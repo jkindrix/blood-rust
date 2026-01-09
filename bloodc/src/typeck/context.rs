@@ -1,0 +1,1500 @@
+//! Type checking context.
+//!
+//! The TypeContext is the main entry point for type checking. It coordinates
+//! name resolution, type collection, and type inference.
+
+use std::collections::HashMap;
+
+use string_interner::{DefaultStringInterner, Symbol as _};
+
+use crate::ast;
+use crate::hir::{self, DefId, LocalId, Type, TypeKind, PrimitiveTy, TyVarId};
+use crate::hir::def::{IntTy, UintTy};
+use crate::span::Span;
+use crate::diagnostics::Diagnostic;
+
+use super::error::{TypeError, TypeErrorKind};
+use super::resolve::{Resolver, ScopeKind, Binding};
+use super::unify::Unifier;
+
+/// The main type checking context.
+pub struct TypeContext<'a> {
+    /// The source code (reserved for future use in error messages).
+    _source: &'a str,
+    /// The string interner for resolving symbols.
+    interner: DefaultStringInterner,
+    /// The name resolver.
+    pub resolver: Resolver<'a>,
+    /// The type unifier.
+    pub unifier: Unifier,
+    /// Type signatures for functions.
+    fn_sigs: HashMap<DefId, hir::FnSig>,
+    /// Struct definitions.
+    struct_defs: HashMap<DefId, StructInfo>,
+    /// Enum definitions.
+    enum_defs: HashMap<DefId, EnumInfo>,
+    /// Bodies to type-check.
+    pending_bodies: Vec<(DefId, ast::Block)>,
+    /// The current function's return type.
+    return_type: Option<Type>,
+    /// Errors encountered.
+    errors: Vec<TypeError>,
+    /// Compiled bodies.
+    bodies: HashMap<hir::BodyId, hir::Body>,
+    /// Mapping from function DefId to its body.
+    fn_bodies: HashMap<DefId, hir::BodyId>,
+    /// Next body ID.
+    next_body_id: u32,
+    /// Local variables in current function.
+    locals: Vec<hir::Local>,
+}
+
+/// Information about a struct.
+#[derive(Debug, Clone)]
+pub struct StructInfo {
+    pub name: String,
+    pub fields: Vec<FieldInfo>,
+    pub generics: Vec<TyVarId>,
+}
+
+/// Information about a field.
+#[derive(Debug, Clone)]
+pub struct FieldInfo {
+    pub name: String,
+    pub ty: Type,
+    pub index: u32,
+}
+
+/// Information about an enum.
+#[derive(Debug, Clone)]
+pub struct EnumInfo {
+    pub name: String,
+    pub variants: Vec<VariantInfo>,
+    pub generics: Vec<TyVarId>,
+}
+
+/// Information about a variant.
+#[derive(Debug, Clone)]
+pub struct VariantInfo {
+    pub name: String,
+    pub fields: Vec<FieldInfo>,
+    pub index: u32,
+    pub def_id: DefId,
+}
+
+impl<'a> TypeContext<'a> {
+    /// Create a new type context.
+    pub fn new(source: &'a str, interner: DefaultStringInterner) -> Self {
+        let mut ctx = Self {
+            _source: source,
+            interner,
+            resolver: Resolver::new(source),
+            unifier: Unifier::new(),
+            fn_sigs: HashMap::new(),
+            struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
+            pending_bodies: Vec::new(),
+            return_type: None,
+            errors: Vec::new(),
+            bodies: HashMap::new(),
+            fn_bodies: HashMap::new(),
+            next_body_id: 0,
+            locals: Vec::new(),
+        };
+        ctx.register_builtins();
+        ctx
+    }
+
+    /// Register built-in runtime functions.
+    fn register_builtins(&mut self) {
+        let unit_ty = Type::unit();
+        let i32_ty = Type::i32();
+        let str_ty = Type::str();
+
+        // print_int(i32) -> ()
+        self.register_builtin_fn("print_int", vec![i32_ty.clone()], unit_ty.clone());
+
+        // println_int(i32) -> ()
+        self.register_builtin_fn("println_int", vec![i32_ty.clone()], unit_ty.clone());
+
+        // print_str(&str) -> ()
+        self.register_builtin_fn("print_str", vec![str_ty.clone()], unit_ty.clone());
+
+        // println_str(&str) -> ()
+        self.register_builtin_fn("println_str", vec![str_ty.clone()], unit_ty.clone());
+
+        // print_char(i32) -> ()  (char as i32 for now)
+        self.register_builtin_fn("print_char", vec![i32_ty.clone()], unit_ty.clone());
+
+        // println() -> ()
+        self.register_builtin_fn("println", vec![], unit_ty);
+    }
+
+    /// Register a single built-in function.
+    fn register_builtin_fn(&mut self, name: &str, inputs: Vec<Type>, output: Type) {
+        let def_id = self.resolver.define_item(
+            name.to_string(),
+            hir::DefKind::Fn,
+            Span::dummy(),
+        ).expect("builtin registration should succeed");
+
+        self.fn_sigs.insert(def_id, hir::FnSig {
+            inputs,
+            output,
+            is_const: false,
+            is_async: false,
+            is_unsafe: false,
+        });
+    }
+
+    /// Resolve names in a program.
+    pub fn resolve_program(&mut self, program: &ast::Program) -> Result<(), Vec<Diagnostic>> {
+        // First pass: collect all top-level definitions
+        for decl in &program.declarations {
+            if let Err(e) = self.collect_declaration(decl) {
+                self.errors.push(e);
+            }
+        }
+
+        if !self.errors.is_empty() {
+            return Err(self.errors.iter().map(|e| e.to_diagnostic()).collect());
+        }
+
+        Ok(())
+    }
+
+    /// Collect a declaration.
+    fn collect_declaration(&mut self, decl: &ast::Declaration) -> Result<(), TypeError> {
+        match decl {
+            ast::Declaration::Function(f) => self.collect_function(f),
+            ast::Declaration::Struct(s) => self.collect_struct(s),
+            ast::Declaration::Enum(e) => self.collect_enum(e),
+            ast::Declaration::Const(c) => self.collect_const(c),
+            ast::Declaration::Static(s) => self.collect_static(s),
+            // Type alias, trait, impl, effect, handler - Phase 2+
+            _ => Ok(()), // Skip for now
+        }
+    }
+
+    /// Collect a function declaration.
+    fn collect_function(&mut self, func: &ast::FnDecl) -> Result<(), TypeError> {
+        let name = self.symbol_to_string(func.name.node);
+        let def_id = self.resolver.define_item(
+            name.clone(),
+            hir::DefKind::Fn,
+            func.span,
+        )?;
+
+        // Build function signature
+        let mut param_types = Vec::new();
+        for param in &func.params {
+            let ty = self.ast_type_to_hir_type(&param.ty)?;
+            param_types.push(ty);
+        }
+
+        let return_type = if let Some(ref ret) = func.return_type {
+            self.ast_type_to_hir_type(ret)?
+        } else {
+            Type::unit()
+        };
+
+        let sig = hir::FnSig::new(param_types, return_type);
+        self.fn_sigs.insert(def_id, sig);
+
+        // Queue body for later type-checking
+        if let Some(ref body) = func.body {
+            self.pending_bodies.push((def_id, body.clone()));
+        }
+
+        Ok(())
+    }
+
+    /// Collect a struct declaration.
+    fn collect_struct(&mut self, struct_decl: &ast::StructDecl) -> Result<(), TypeError> {
+        let name = self.symbol_to_string(struct_decl.name.node);
+        let def_id = self.resolver.define_item(
+            name.clone(),
+            hir::DefKind::Struct,
+            struct_decl.span,
+        )?;
+
+        // Also define as a type
+        self.resolver.define_type(name.clone(), def_id, struct_decl.span)?;
+
+        // Collect fields
+        let fields = match &struct_decl.body {
+            ast::StructBody::Record(fields) => {
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let field_name = self.symbol_to_string(f.name.node);
+                        let ty = self.ast_type_to_hir_type(&f.ty)?;
+                        Ok(FieldInfo {
+                            name: field_name,
+                            ty,
+                            index: i as u32,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, TypeError>>()?
+            }
+            ast::StructBody::Tuple(types) => {
+                types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ty)| {
+                        let ty = self.ast_type_to_hir_type(ty)?;
+                        Ok(FieldInfo {
+                            name: format!("{i}"),
+                            ty,
+                            index: i as u32,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, TypeError>>()?
+            }
+            ast::StructBody::Unit => Vec::new(),
+        };
+
+        self.struct_defs.insert(def_id, StructInfo {
+            name,
+            fields,
+            generics: Vec::new(), // Phase 1: no generics yet
+        });
+
+        Ok(())
+    }
+
+    /// Collect an enum declaration.
+    fn collect_enum(&mut self, enum_decl: &ast::EnumDecl) -> Result<(), TypeError> {
+        let name = self.symbol_to_string(enum_decl.name.node);
+        let def_id = self.resolver.define_item(
+            name.clone(),
+            hir::DefKind::Enum,
+            enum_decl.span,
+        )?;
+
+        // Also define as a type
+        self.resolver.define_type(name.clone(), def_id, enum_decl.span)?;
+
+        // Collect variants
+        let mut variants = Vec::new();
+        for (i, variant) in enum_decl.variants.iter().enumerate() {
+            let variant_name = self.symbol_to_string(variant.name.node);
+
+            // Define variant in scope
+            let variant_def_id = self.resolver.define_item(
+                variant_name.clone(),
+                hir::DefKind::Variant,
+                variant.span,
+            )?;
+
+            let fields = match &variant.body {
+                ast::StructBody::Record(fields) => {
+                    fields
+                        .iter()
+                        .enumerate()
+                        .map(|(j, f)| {
+                            let field_name = self.symbol_to_string(f.name.node);
+                            let ty = self.ast_type_to_hir_type(&f.ty)?;
+                            Ok(FieldInfo {
+                                name: field_name,
+                                ty,
+                                index: j as u32,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, TypeError>>()?
+                }
+                ast::StructBody::Tuple(types) => {
+                    types
+                        .iter()
+                        .enumerate()
+                        .map(|(j, ty)| {
+                            let ty = self.ast_type_to_hir_type(ty)?;
+                            Ok(FieldInfo {
+                                name: format!("{j}"),
+                                ty,
+                                index: j as u32,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, TypeError>>()?
+                }
+                ast::StructBody::Unit => Vec::new(),
+            };
+
+            variants.push(VariantInfo {
+                name: variant_name,
+                fields,
+                index: i as u32,
+                def_id: variant_def_id,
+            });
+        }
+
+        self.enum_defs.insert(def_id, EnumInfo {
+            name,
+            variants,
+            generics: Vec::new(),
+        });
+
+        Ok(())
+    }
+
+    /// Collect a const declaration.
+    fn collect_const(&mut self, const_decl: &ast::ConstDecl) -> Result<(), TypeError> {
+        let name = self.symbol_to_string(const_decl.name.node);
+        let _def_id = self.resolver.define_item(
+            name,
+            hir::DefKind::Const,
+            const_decl.span,
+        )?;
+        // Type-checking const values is deferred
+        Ok(())
+    }
+
+    /// Collect a static declaration.
+    fn collect_static(&mut self, static_decl: &ast::StaticDecl) -> Result<(), TypeError> {
+        let name = self.symbol_to_string(static_decl.name.node);
+        let _def_id = self.resolver.define_item(
+            name,
+            hir::DefKind::Static,
+            static_decl.span,
+        )?;
+        Ok(())
+    }
+
+    /// Type-check all queued bodies.
+    pub fn check_all_bodies(&mut self) -> Result<(), Vec<Diagnostic>> {
+        let pending = std::mem::take(&mut self.pending_bodies);
+
+        for (def_id, body) in pending {
+            if let Err(e) = self.check_function_body(def_id, &body) {
+                self.errors.push(e);
+            }
+        }
+
+        if !self.errors.is_empty() {
+            return Err(self.errors.iter().map(|e| e.to_diagnostic()).collect());
+        }
+
+        Ok(())
+    }
+
+    /// Type-check a function body.
+    fn check_function_body(&mut self, def_id: DefId, body: &ast::Block) -> Result<(), TypeError> {
+        let sig = self.fn_sigs.get(&def_id).cloned()
+            .ok_or_else(|| TypeError::new(
+                TypeErrorKind::NotFound { name: format!("fn sig for {def_id}") },
+                body.span,
+            ))?;
+
+        // Set up function scope
+        self.resolver.push_scope(ScopeKind::Function, body.span);
+        self.resolver.reset_local_ids();
+        self.locals.clear();
+
+        // Add return place
+        self.locals.push(hir::Local {
+            id: LocalId::RETURN_PLACE,
+            ty: sig.output.clone(),
+            mutable: false,
+            name: None,
+            span: body.span,
+        });
+
+        // Set return type for return statements
+        self.return_type = Some(sig.output.clone());
+
+        // Add parameters as locals
+        // Note: In a real implementation, we'd get param names from the AST
+        for (i, param_ty) in sig.inputs.iter().enumerate() {
+            let local_id = self.resolver.next_local_id();
+            self.locals.push(hir::Local {
+                id: local_id,
+                ty: param_ty.clone(),
+                mutable: false,
+                name: Some(format!("param{i}")),
+                span: body.span,
+            });
+        }
+
+        // Type-check the body
+        let body_expr = self.check_block(body, &sig.output)?;
+
+        // Create body
+        let body_id = hir::BodyId::new(self.next_body_id);
+        self.next_body_id += 1;
+
+        let hir_body = hir::Body {
+            locals: std::mem::take(&mut self.locals),
+            param_count: sig.inputs.len(),
+            expr: body_expr,
+            span: body.span,
+        };
+
+        self.bodies.insert(body_id, hir_body);
+        self.fn_bodies.insert(def_id, body_id);
+
+        // Clean up
+        self.return_type = None;
+        self.resolver.pop_scope();
+
+        Ok(())
+    }
+
+    /// Type-check a block.
+    fn check_block(&mut self, block: &ast::Block, expected: &Type) -> Result<hir::Expr, TypeError> {
+        self.resolver.push_scope(ScopeKind::Block, block.span);
+
+        let mut stmts = Vec::new();
+
+        for stmt in &block.statements {
+            match stmt {
+                ast::Statement::Let { pattern, ty, value, span } => {
+                    let local_ty = if let Some(ty) = ty {
+                        self.ast_type_to_hir_type(ty)?
+                    } else if let Some(value) = value {
+                        // Infer from value
+                        let inferred = self.infer_expr(value)?;
+                        inferred.ty.clone()
+                    } else {
+                        // No type annotation and no value - error
+                        return Err(TypeError::new(
+                            TypeErrorKind::CannotInfer,
+                            *span,
+                        ));
+                    };
+
+                    // Handle the pattern (simplified: just identifiers for Phase 1)
+                    let local_id = self.define_pattern(pattern, local_ty.clone())?;
+
+                    let init = if let Some(value) = value {
+                        Some(self.check_expr(value, &local_ty)?)
+                    } else {
+                        None
+                    };
+
+                    stmts.push(hir::Stmt::Let { local_id, init });
+                }
+                ast::Statement::Expr { expr, has_semi: _ } => {
+                    let hir_expr = self.infer_expr(expr)?;
+                    stmts.push(hir::Stmt::Expr(hir_expr));
+                }
+                ast::Statement::Item(decl) => {
+                    // Nested items - collect them
+                    self.collect_declaration(decl)?;
+                }
+            }
+        }
+
+        // Type-check trailing expression
+        let expr = if let Some(expr) = &block.expr {
+            self.check_expr(expr, expected)?
+        } else {
+            // No trailing expression - block returns unit
+            if !expected.is_unit() && !expected.is_never() {
+                // Check if expected is a type variable
+                if let TypeKind::Infer(_) = expected.kind() {
+                    self.unifier.unify(&Type::unit(), expected, block.span)?;
+                }
+            }
+            hir::Expr::new(
+                hir::ExprKind::Tuple(Vec::new()),
+                Type::unit(),
+                block.span,
+            )
+        };
+
+        self.resolver.pop_scope();
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Block {
+                stmts,
+                expr: Some(Box::new(expr.clone())),
+            },
+            expr.ty.clone(),
+            block.span,
+        ))
+    }
+
+    /// Define a pattern, returning the local ID for simple patterns.
+    fn define_pattern(&mut self, pattern: &ast::Pattern, ty: Type) -> Result<LocalId, TypeError> {
+        match &pattern.kind {
+            ast::PatternKind::Ident { name, mutable, .. } => {
+                let name_str = self.symbol_to_string(name.node);
+                let local_id = self.resolver.define_local(
+                    name_str.clone(),
+                    ty.clone(),
+                    *mutable,
+                    pattern.span,
+                )?;
+
+                self.locals.push(hir::Local {
+                    id: local_id,
+                    ty,
+                    mutable: *mutable,
+                    name: Some(name_str),
+                    span: pattern.span,
+                });
+
+                Ok(local_id)
+            }
+            ast::PatternKind::Wildcard => {
+                // Anonymous local
+                let local_id = self.resolver.next_local_id();
+                self.locals.push(hir::Local {
+                    id: local_id,
+                    ty,
+                    mutable: false,
+                    name: None,
+                    span: pattern.span,
+                });
+                Ok(local_id)
+            }
+            // More complex patterns - Phase 2+
+            _ => {
+                let local_id = self.resolver.next_local_id();
+                self.locals.push(hir::Local {
+                    id: local_id,
+                    ty,
+                    mutable: false,
+                    name: None,
+                    span: pattern.span,
+                });
+                Ok(local_id)
+            }
+        }
+    }
+
+    /// Check an expression against an expected type.
+    fn check_expr(&mut self, expr: &ast::Expr, expected: &Type) -> Result<hir::Expr, TypeError> {
+        let inferred = self.infer_expr(expr)?;
+
+        // Unify inferred type with expected
+        self.unifier.unify(&inferred.ty, expected, expr.span)?;
+
+        Ok(inferred)
+    }
+
+    /// Infer the type of an expression.
+    fn infer_expr(&mut self, expr: &ast::Expr) -> Result<hir::Expr, TypeError> {
+        match &expr.kind {
+            ast::ExprKind::Literal(lit) => self.infer_literal(lit, expr.span),
+            ast::ExprKind::Path(path) => self.infer_path(path, expr.span),
+            ast::ExprKind::Binary { op, left, right } => {
+                self.infer_binary(*op, left, right, expr.span)
+            }
+            ast::ExprKind::Unary { op, operand } => {
+                self.infer_unary(*op, operand, expr.span)
+            }
+            ast::ExprKind::Call { callee, args } => {
+                self.infer_call(callee, args, expr.span)
+            }
+            ast::ExprKind::If { condition, then_branch, else_branch } => {
+                self.infer_if(condition, then_branch, else_branch.as_ref(), expr.span)
+            }
+            ast::ExprKind::Block(block) => {
+                let expected = self.unifier.fresh_var();
+                self.check_block(block, &expected)
+            }
+            ast::ExprKind::Return(value) => {
+                self.infer_return(value.as_deref(), expr.span)
+            }
+            ast::ExprKind::Tuple(exprs) => {
+                self.infer_tuple(exprs, expr.span)
+            }
+            ast::ExprKind::Paren(inner) => {
+                self.infer_expr(inner)
+            }
+            ast::ExprKind::Assign { target, value } => {
+                self.infer_assign(target, value, expr.span)
+            }
+            ast::ExprKind::Loop { body, .. } => {
+                self.infer_loop(body, expr.span)
+            }
+            ast::ExprKind::While { condition, body, .. } => {
+                self.infer_while(condition, body, expr.span)
+            }
+            ast::ExprKind::Break { value, .. } => {
+                self.infer_break(value.as_deref(), expr.span)
+            }
+            ast::ExprKind::Continue { .. } => {
+                Ok(hir::Expr::new(
+                    hir::ExprKind::Continue { label: None },
+                    Type::never(),
+                    expr.span,
+                ))
+            }
+            ast::ExprKind::Match { scrutinee, arms } => {
+                self.infer_match(scrutinee, arms, expr.span)
+            }
+            ast::ExprKind::Record { path, fields, base } => {
+                self.infer_record(path.as_ref(), fields, base.as_deref(), expr.span)
+            }
+            ast::ExprKind::Field { base: field_base, field } => {
+                self.infer_field_access(field_base, field, expr.span)
+            }
+            // More expression kinds - implement as needed
+            _ => {
+                // Placeholder for unimplemented expression kinds
+                Ok(hir::Expr::new(
+                    hir::ExprKind::Error,
+                    Type::error(),
+                    expr.span,
+                ))
+            }
+        }
+    }
+
+    /// Infer type of a literal.
+    fn infer_literal(&mut self, lit: &ast::Literal, span: Span) -> Result<hir::Expr, TypeError> {
+        let (value, ty) = match &lit.kind {
+            ast::LiteralKind::Int { value, suffix } => {
+                let ty = match suffix {
+                    Some(ast::IntSuffix::I8) => Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I8))),
+                    Some(ast::IntSuffix::I16) => Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I16))),
+                    Some(ast::IntSuffix::I32) => Type::i32(),
+                    Some(ast::IntSuffix::I64) => Type::i64(),
+                    Some(ast::IntSuffix::I128) => Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I128))),
+                    Some(ast::IntSuffix::U8) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U8))),
+                    Some(ast::IntSuffix::U16) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U16))),
+                    Some(ast::IntSuffix::U32) => Type::u32(),
+                    Some(ast::IntSuffix::U64) => Type::u64(),
+                    Some(ast::IntSuffix::U128) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U128))),
+                    None => Type::i32(), // Default to i32
+                };
+                (hir::LiteralValue::Int(*value as i128), ty)
+            }
+            ast::LiteralKind::Float { value, suffix } => {
+                let ty = match suffix {
+                    Some(ast::FloatSuffix::F32) => Type::f32(),
+                    Some(ast::FloatSuffix::F64) | None => Type::f64(),
+                };
+                (hir::LiteralValue::Float(value.0), ty)
+            }
+            ast::LiteralKind::Bool(b) => (hir::LiteralValue::Bool(*b), Type::bool()),
+            ast::LiteralKind::Char(c) => (hir::LiteralValue::Char(*c), Type::char()),
+            ast::LiteralKind::String(s) => (hir::LiteralValue::String(s.clone()), Type::str()),
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Literal(value),
+            ty,
+            span,
+        ))
+    }
+
+    /// Infer type of a path (variable/function reference).
+    fn infer_path(&mut self, path: &ast::ExprPath, span: Span) -> Result<hir::Expr, TypeError> {
+        // For now, handle simple single-segment paths
+        if path.segments.len() == 1 {
+            let name = self.symbol_to_string(path.segments[0].name.node);
+
+            match self.resolver.lookup(&name) {
+                Some(Binding::Local { local_id, ty, .. }) => {
+                    Ok(hir::Expr::new(
+                        hir::ExprKind::Local(local_id),
+                        ty,
+                        span,
+                    ))
+                }
+                Some(Binding::Def(def_id)) => {
+                    // Look up the type of the definition
+                    if let Some(sig) = self.fn_sigs.get(&def_id) {
+                        let fn_ty = Type::function(sig.inputs.clone(), sig.output.clone());
+                        Ok(hir::Expr::new(
+                            hir::ExprKind::Def(def_id),
+                            fn_ty,
+                            span,
+                        ))
+                    } else {
+                        // Could be a constant or other definition
+                        Ok(hir::Expr::new(
+                            hir::ExprKind::Def(def_id),
+                            Type::error(),
+                            span,
+                        ))
+                    }
+                }
+                None => {
+                    Err(TypeError::new(
+                        TypeErrorKind::NotFound { name },
+                        span,
+                    ))
+                }
+            }
+        } else {
+            // Multi-segment paths - Phase 2+
+            Err(TypeError::new(
+                TypeErrorKind::NotFound { name: format!("{:?}", path) },
+                span,
+            ))
+        }
+    }
+
+    /// Infer type of a binary expression.
+    fn infer_binary(
+        &mut self,
+        op: ast::BinOp,
+        left: &ast::Expr,
+        right: &ast::Expr,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let left_expr = self.infer_expr(left)?;
+        let right_expr = self.infer_expr(right)?;
+
+        // Check operator compatibility and determine result type
+        let result_ty = match op {
+            // Arithmetic operators
+            ast::BinOp::Add | ast::BinOp::Sub | ast::BinOp::Mul | ast::BinOp::Div | ast::BinOp::Rem => {
+                // Both operands must be the same numeric type
+                self.unifier.unify(&left_expr.ty, &right_expr.ty, span)?;
+                left_expr.ty.clone()
+            }
+            // Comparison operators
+            ast::BinOp::Eq | ast::BinOp::Ne | ast::BinOp::Lt | ast::BinOp::Le | ast::BinOp::Gt | ast::BinOp::Ge => {
+                // Operands must be comparable
+                self.unifier.unify(&left_expr.ty, &right_expr.ty, span)?;
+                Type::bool()
+            }
+            // Logical operators
+            ast::BinOp::And | ast::BinOp::Or => {
+                self.unifier.unify(&left_expr.ty, &Type::bool(), span)?;
+                self.unifier.unify(&right_expr.ty, &Type::bool(), span)?;
+                Type::bool()
+            }
+            // Bitwise operators
+            ast::BinOp::BitAnd | ast::BinOp::BitOr | ast::BinOp::BitXor | ast::BinOp::Shl | ast::BinOp::Shr => {
+                self.unifier.unify(&left_expr.ty, &right_expr.ty, span)?;
+                left_expr.ty.clone()
+            }
+            // Pipe operator
+            ast::BinOp::Pipe => {
+                // left |> right === right(left)
+                // right must be a function taking left as argument
+                // For now, simplified handling
+                right_expr.ty.clone()
+            }
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Binary {
+                op,
+                left: Box::new(left_expr),
+                right: Box::new(right_expr),
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Infer type of a unary expression.
+    fn infer_unary(
+        &mut self,
+        op: ast::UnaryOp,
+        operand: &ast::Expr,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let operand_expr = self.infer_expr(operand)?;
+
+        let result_ty = match op {
+            ast::UnaryOp::Neg => {
+                // Operand must be numeric
+                operand_expr.ty.clone()
+            }
+            ast::UnaryOp::Not => {
+                // Operand must be bool or integer
+                operand_expr.ty.clone()
+            }
+            ast::UnaryOp::Deref => {
+                // Operand must be a reference
+                match operand_expr.ty.kind() {
+                    TypeKind::Ref { inner, .. } => inner.clone(),
+                    TypeKind::Ptr { inner, .. } => inner.clone(),
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
+                            span,
+                        ));
+                    }
+                }
+            }
+            ast::UnaryOp::Ref => {
+                Type::reference(operand_expr.ty.clone(), false)
+            }
+            ast::UnaryOp::RefMut => {
+                Type::reference(operand_expr.ty.clone(), true)
+            }
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Unary {
+                op,
+                operand: Box::new(operand_expr),
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Infer type of a function call.
+    fn infer_call(
+        &mut self,
+        callee: &ast::Expr,
+        args: &[ast::CallArg],
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let callee_expr = self.infer_expr(callee)?;
+
+        // Check that callee is a function
+        let (param_types, return_type) = match callee_expr.ty.kind() {
+            TypeKind::Fn { params, ret } => (params.clone(), ret.clone()),
+            _ => {
+                return Err(TypeError::new(
+                    TypeErrorKind::NotAFunction { ty: callee_expr.ty.clone() },
+                    span,
+                ));
+            }
+        };
+
+        // Check arity
+        if args.len() != param_types.len() {
+            return Err(TypeError::new(
+                TypeErrorKind::WrongArity {
+                    expected: param_types.len(),
+                    found: args.len(),
+                },
+                span,
+            ));
+        }
+
+        // Type-check arguments
+        let mut hir_args = Vec::new();
+        for (arg, param_ty) in args.iter().zip(param_types.iter()) {
+            let arg_expr = self.check_expr(&arg.value, param_ty)?;
+            hir_args.push(arg_expr);
+        }
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(callee_expr),
+                args: hir_args,
+            },
+            return_type,
+            span,
+        ))
+    }
+
+    /// Infer type of an if expression.
+    fn infer_if(
+        &mut self,
+        condition: &ast::Expr,
+        then_branch: &ast::Block,
+        else_branch: Option<&ast::ElseBranch>,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Condition must be bool
+        let cond_expr = self.check_expr(condition, &Type::bool())?;
+
+        // Both branches must have same type
+        let expected = self.unifier.fresh_var();
+        let then_expr = self.check_block(then_branch, &expected)?;
+
+        let else_expr = if let Some(else_branch) = else_branch {
+            match else_branch {
+                ast::ElseBranch::Block(block) => {
+                    Some(Box::new(self.check_block(block, &expected)?))
+                }
+                ast::ElseBranch::If(if_expr) => {
+                    Some(Box::new(self.check_expr(if_expr, &expected)?))
+                }
+            }
+        } else {
+            // No else branch - result is unit
+            self.unifier.unify(&expected, &Type::unit(), span)?;
+            None
+        };
+
+        let result_ty = self.unifier.resolve(&expected);
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::If {
+                condition: Box::new(cond_expr),
+                then_branch: Box::new(then_expr),
+                else_branch: else_expr,
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Infer type of a return expression.
+    fn infer_return(&mut self, value: Option<&ast::Expr>, span: Span) -> Result<hir::Expr, TypeError> {
+        let return_type = self.return_type.clone().ok_or_else(|| {
+            TypeError::new(TypeErrorKind::ReturnOutsideFunction, span)
+        })?;
+
+        let value_expr = if let Some(value) = value {
+            Some(Box::new(self.check_expr(value, &return_type)?))
+        } else {
+            // return; is only valid if return type is unit
+            self.unifier.unify(&return_type, &Type::unit(), span)?;
+            None
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Return(value_expr),
+            Type::never(),
+            span,
+        ))
+    }
+
+    /// Infer type of a tuple expression.
+    fn infer_tuple(&mut self, exprs: &[ast::Expr], span: Span) -> Result<hir::Expr, TypeError> {
+        let mut hir_exprs = Vec::new();
+        let mut types = Vec::new();
+
+        for expr in exprs {
+            let hir_expr = self.infer_expr(expr)?;
+            types.push(hir_expr.ty.clone());
+            hir_exprs.push(hir_expr);
+        }
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Tuple(hir_exprs),
+            Type::tuple(types),
+            span,
+        ))
+    }
+
+    /// Infer type of an assignment.
+    fn infer_assign(&mut self, target: &ast::Expr, value: &ast::Expr, span: Span) -> Result<hir::Expr, TypeError> {
+        let target_expr = self.infer_expr(target)?;
+        let value_expr = self.check_expr(value, &target_expr.ty)?;
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Assign {
+                target: Box::new(target_expr),
+                value: Box::new(value_expr),
+            },
+            Type::unit(),
+            span,
+        ))
+    }
+
+    /// Infer type of a loop.
+    fn infer_loop(&mut self, body: &ast::Block, span: Span) -> Result<hir::Expr, TypeError> {
+        self.resolver.push_scope(ScopeKind::Loop, span);
+
+        let body_expr = self.check_block(body, &Type::unit())?;
+
+        self.resolver.pop_scope();
+
+        // Loop type depends on break values
+        Ok(hir::Expr::new(
+            hir::ExprKind::Loop {
+                body: Box::new(body_expr),
+                label: None,
+            },
+            Type::never(), // Unless there's a break
+            span,
+        ))
+    }
+
+    /// Infer type of a while loop.
+    fn infer_while(&mut self, condition: &ast::Expr, body: &ast::Block, span: Span) -> Result<hir::Expr, TypeError> {
+        self.resolver.push_scope(ScopeKind::Loop, span);
+
+        let cond_expr = self.check_expr(condition, &Type::bool())?;
+        let body_expr = self.check_block(body, &Type::unit())?;
+
+        self.resolver.pop_scope();
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::While {
+                condition: Box::new(cond_expr),
+                body: Box::new(body_expr),
+                label: None,
+            },
+            Type::unit(),
+            span,
+        ))
+    }
+
+    /// Infer type of a break.
+    fn infer_break(&mut self, value: Option<&ast::Expr>, span: Span) -> Result<hir::Expr, TypeError> {
+        if !self.resolver.in_loop() {
+            return Err(TypeError::new(TypeErrorKind::BreakOutsideLoop, span));
+        }
+
+        let value_expr = if let Some(value) = value {
+            Some(Box::new(self.infer_expr(value)?))
+        } else {
+            None
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Break {
+                label: None,
+                value: value_expr,
+            },
+            Type::never(),
+            span,
+        ))
+    }
+
+    /// Infer type of a match expression.
+    fn infer_match(
+        &mut self,
+        scrutinee: &ast::Expr,
+        arms: &[ast::MatchArm],
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let scrutinee_expr = self.infer_expr(scrutinee)?;
+
+        if arms.is_empty() {
+            return Ok(hir::Expr::new(
+                hir::ExprKind::Match {
+                    scrutinee: Box::new(scrutinee_expr),
+                    arms: Vec::new(),
+                },
+                Type::never(),
+                span,
+            ));
+        }
+
+        let result_ty = self.unifier.fresh_var();
+        let mut hir_arms = Vec::new();
+
+        for arm in arms {
+            self.resolver.push_scope(ScopeKind::MatchArm, arm.span);
+
+            // TODO: Properly type-check pattern against scrutinee type
+            let pattern = self.lower_pattern(&arm.pattern, &scrutinee_expr.ty)?;
+
+            let guard = if let Some(ref guard) = arm.guard {
+                Some(self.check_expr(guard, &Type::bool())?)
+            } else {
+                None
+            };
+
+            let body = self.check_expr(&arm.body, &result_ty)?;
+
+            self.resolver.pop_scope();
+
+            hir_arms.push(hir::MatchArm {
+                pattern,
+                guard,
+                body,
+            });
+        }
+
+        let final_ty = self.unifier.resolve(&result_ty);
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(scrutinee_expr),
+                arms: hir_arms,
+            },
+            final_ty,
+            span,
+        ))
+    }
+
+    /// Lower a pattern from AST to HIR.
+    fn lower_pattern(&mut self, pattern: &ast::Pattern, expected_ty: &Type) -> Result<hir::Pattern, TypeError> {
+        let kind = match &pattern.kind {
+            ast::PatternKind::Wildcard => hir::PatternKind::Wildcard,
+            ast::PatternKind::Ident { name, mutable, .. } => {
+                let name_str = self.symbol_to_string(name.node);
+                let local_id = self.resolver.define_local(
+                    name_str.clone(),
+                    expected_ty.clone(),
+                    *mutable,
+                    pattern.span,
+                )?;
+
+                self.locals.push(hir::Local {
+                    id: local_id,
+                    ty: expected_ty.clone(),
+                    mutable: *mutable,
+                    name: Some(name_str),
+                    span: pattern.span,
+                });
+
+                hir::PatternKind::Binding {
+                    local_id,
+                    mutable: *mutable,
+                    subpattern: None,
+                }
+            }
+            ast::PatternKind::Literal(lit) => {
+                hir::PatternKind::Literal(hir::LiteralValue::from_ast(&lit.kind))
+            }
+            // More pattern kinds - simplified for Phase 1
+            _ => hir::PatternKind::Wildcard,
+        };
+
+        Ok(hir::Pattern {
+            kind,
+            ty: expected_ty.clone(),
+            span: pattern.span,
+        })
+    }
+
+    /// Convert an AST type to an HIR type.
+    fn ast_type_to_hir_type(&mut self, ty: &ast::Type) -> Result<Type, TypeError> {
+        match &ty.kind {
+            ast::TypeKind::Path(path) => {
+                if path.segments.len() == 1 && path.segments[0].args.is_none() {
+                    let name = self.symbol_to_string(path.segments[0].name.node);
+
+                    // Check for primitive types
+                    if let Some(prim) = PrimitiveTy::from_name(&name) {
+                        return Ok(Type::new(TypeKind::Primitive(prim)));
+                    }
+
+                    // Look up user-defined types
+                    if let Some(def_id) = self.resolver.lookup_type(&name) {
+                        return Ok(Type::adt(def_id, Vec::new()));
+                    }
+
+                    return Err(TypeError::new(
+                        TypeErrorKind::TypeNotFound { name },
+                        ty.span,
+                    ));
+                }
+
+                // Multi-segment path or with type args - Phase 2+
+                Err(TypeError::new(
+                    TypeErrorKind::TypeNotFound { name: format!("{path:?}") },
+                    ty.span,
+                ))
+            }
+            ast::TypeKind::Reference { inner, mutable, .. } => {
+                let inner_ty = self.ast_type_to_hir_type(inner)?;
+                Ok(Type::reference(inner_ty, *mutable))
+            }
+            ast::TypeKind::Pointer { inner, mutable } => {
+                let inner_ty = self.ast_type_to_hir_type(inner)?;
+                Ok(Type::new(TypeKind::Ptr {
+                    inner: inner_ty,
+                    mutable: *mutable,
+                }))
+            }
+            ast::TypeKind::Tuple(types) => {
+                let hir_types: Result<Vec<_>, _> = types
+                    .iter()
+                    .map(|t| self.ast_type_to_hir_type(t))
+                    .collect();
+                Ok(Type::tuple(hir_types?))
+            }
+            ast::TypeKind::Array { element, size } => {
+                let elem_ty = self.ast_type_to_hir_type(element)?;
+                // For now, assume size is a literal integer
+                // Const evaluation is Phase 2+
+                let size_val = match &size.kind {
+                    ast::ExprKind::Literal(ast::Literal { kind: ast::LiteralKind::Int { value, .. }, .. }) => {
+                        *value as u64
+                    }
+                    _ => 0, // Placeholder
+                };
+                Ok(Type::array(elem_ty, size_val))
+            }
+            ast::TypeKind::Slice { element } => {
+                let elem_ty = self.ast_type_to_hir_type(element)?;
+                Ok(Type::slice(elem_ty))
+            }
+            ast::TypeKind::Function { params, return_type, .. } => {
+                let param_types: Result<Vec<_>, _> = params
+                    .iter()
+                    .map(|t| self.ast_type_to_hir_type(t))
+                    .collect();
+                let ret_ty = self.ast_type_to_hir_type(return_type)?;
+                Ok(Type::function(param_types?, ret_ty))
+            }
+            ast::TypeKind::Never => Ok(Type::never()),
+            ast::TypeKind::Infer => Ok(self.unifier.fresh_var()),
+            ast::TypeKind::Paren(inner) => self.ast_type_to_hir_type(inner),
+            _ => {
+                // Other type kinds - Phase 2+
+                Ok(Type::error())
+            }
+        }
+    }
+
+    /// Convert a Symbol to a String.
+    ///
+    /// Note: This is a temporary implementation. In the real implementation,
+    /// we'd use the string interner from the parser.
+    fn symbol_to_string(&self, symbol: ast::Symbol) -> String {
+        self.interner.resolve(symbol)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("sym_{}", symbol.to_usize()))
+    }
+
+    /// Convert to HIR crate.
+    pub fn into_hir(self) -> hir::Crate {
+        let mut items = HashMap::new();
+
+        // Convert collected definitions to HIR items
+        for (def_id, info) in self.resolver.def_info {
+            let kind = match info.kind {
+                hir::DefKind::Fn => {
+                    if let Some(sig) = self.fn_sigs.get(&def_id) {
+                        hir::ItemKind::Fn(hir::FnDef {
+                            sig: sig.clone(),
+                            body_id: self.fn_bodies.get(&def_id).copied(),
+                            generics: hir::Generics::empty(),
+                        })
+                    } else {
+                        continue;
+                    }
+                }
+                hir::DefKind::Struct => {
+                    if let Some(struct_info) = self.struct_defs.get(&def_id) {
+                        let fields: Vec<_> = struct_info.fields.iter().map(|f| {
+                            hir::FieldDef {
+                                index: f.index,
+                                name: Some(f.name.clone()),
+                                ty: f.ty.clone(),
+                                vis: ast::Visibility::Public,
+                                span: info.span,
+                            }
+                        }).collect();
+
+                        hir::ItemKind::Struct(hir::StructDef {
+                            generics: hir::Generics::empty(),
+                            kind: hir::StructKind::Record(fields),
+                        })
+                    } else {
+                        continue;
+                    }
+                }
+                hir::DefKind::Enum => {
+                    if let Some(enum_info) = self.enum_defs.get(&def_id) {
+                        let variants: Vec<_> = enum_info.variants.iter().map(|v| {
+                            let fields: Vec<_> = v.fields.iter().map(|f| {
+                                hir::FieldDef {
+                                    index: f.index,
+                                    name: Some(f.name.clone()),
+                                    ty: f.ty.clone(),
+                                    vis: ast::Visibility::Public,
+                                    span: info.span,
+                                }
+                            }).collect();
+
+                            hir::Variant {
+                                index: v.index,
+                                name: v.name.clone(),
+                                fields: if fields.is_empty() {
+                                    hir::StructKind::Unit
+                                } else {
+                                    hir::StructKind::Record(fields)
+                                },
+                                def_id: v.def_id,
+                                span: info.span,
+                            }
+                        }).collect();
+
+                        hir::ItemKind::Enum(hir::EnumDef {
+                            generics: hir::Generics::empty(),
+                            variants,
+                        })
+                    } else {
+                        continue;
+                    }
+                }
+                _ => continue,
+            };
+
+            items.insert(def_id, hir::Item {
+                def_id,
+                kind,
+                vis: ast::Visibility::Public,
+                name: info.name,
+                span: info.span,
+            });
+        }
+
+        // Find main function
+        let entry = items.iter()
+            .find(|(_, item)| item.name == "main" || item.name.ends_with("_main"))
+            .map(|(id, _)| *id);
+
+        hir::Crate {
+            items,
+            bodies: self.bodies,
+            entry,
+        }
+    }
+
+    /// Infer type of a record (struct) construction expression.
+    fn infer_record(
+        &mut self,
+        path: Option<&ast::TypePath>,
+        fields: &[ast::RecordExprField],
+        _base: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Get the struct type from the path
+        let (def_id, struct_info, result_ty) = if let Some(path) = path {
+            if path.segments.len() == 1 {
+                let name = self.symbol_to_string(path.segments[0].name.node);
+
+                // Look up the struct definition
+                if let Some(binding) = self.resolver.lookup(&name) {
+                    match binding {
+                        Binding::Def(def_id) => {
+                            if let Some(struct_info) = self.struct_defs.get(&def_id) {
+                                let result_ty = Type::adt(def_id, Vec::new());
+                                (def_id, struct_info.clone(), result_ty)
+                            } else {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::NotAStruct { ty: Type::error() },
+                                    span,
+                                ));
+                            }
+                        }
+                        Binding::Local { .. } => {
+                            return Err(TypeError::new(
+                                TypeErrorKind::NotAStruct { ty: Type::error() },
+                                span,
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(TypeError::new(
+                        TypeErrorKind::UnresolvedName { name },
+                        span,
+                    ));
+                }
+            } else {
+                return Err(TypeError::new(
+                    TypeErrorKind::UnsupportedFeature { feature: "qualified struct paths".to_string() },
+                    span,
+                ));
+            }
+        } else {
+            // Anonymous record - not supported in Phase 1
+            return Err(TypeError::new(
+                TypeErrorKind::UnsupportedFeature { feature: "anonymous records".to_string() },
+                span,
+            ));
+        };
+
+        // Type-check each field
+        let mut hir_fields = Vec::new();
+        for field in fields {
+            let field_name = self.symbol_to_string(field.name.node);
+
+            // Find the field in the struct definition
+            let field_info = struct_info.fields.iter()
+                .find(|f| f.name == field_name)
+                .ok_or_else(|| TypeError::new(
+                    TypeErrorKind::UnknownField {
+                        ty: result_ty.clone(),
+                        field: field_name.clone(),
+                    },
+                    field.span,
+                ))?;
+
+            // Type-check the field value
+            let value = if let Some(ref value_expr) = field.value {
+                self.check_expr(value_expr, &field_info.ty)?
+            } else {
+                // Shorthand: `{ x }` means `{ x: x }`
+                self.infer_path(&ast::ExprPath {
+                    segments: vec![ast::ExprPathSegment {
+                        name: field.name.clone(),
+                        args: None,
+                    }],
+                    span: field.span,
+                }, field.span)?
+            };
+
+            hir_fields.push(hir::FieldExpr {
+                field_idx: field_info.index,
+                value,
+            });
+        }
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Struct {
+                def_id,
+                fields: hir_fields,
+                base: None,
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Infer type of a field access expression.
+    fn infer_field_access(
+        &mut self,
+        base: &ast::Expr,
+        field: &ast::FieldAccess,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let base_expr = self.infer_expr(base)?;
+        let base_ty = self.unifier.resolve(&base_expr.ty);
+
+        match field {
+            ast::FieldAccess::Named(name) => {
+                let field_name = self.symbol_to_string(name.node);
+
+                // Check if it's a struct type
+                if let TypeKind::Adt { def_id, .. } = base_ty.kind() {
+                    // Look up the struct definition
+                    if let Some(struct_info) = self.struct_defs.get(def_id) {
+                        // Find the field
+                        if let Some(field_info) = struct_info.fields.iter().find(|f| f.name == field_name) {
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Field {
+                                    base: Box::new(base_expr),
+                                    field_idx: field_info.index,
+                                },
+                                field_info.ty.clone(),
+                                span,
+                            ));
+                        } else {
+                            return Err(TypeError::new(
+                                TypeErrorKind::UnknownField {
+                                    ty: base_ty,
+                                    field: field_name,
+                                },
+                                span,
+                            ));
+                        }
+                    }
+                }
+
+                // Not a struct or unknown type
+                Err(TypeError::new(
+                    TypeErrorKind::NotAStruct { ty: base_ty },
+                    span,
+                ))
+            }
+            ast::FieldAccess::Index(index, _span) => {
+                // Tuple field access
+                if let TypeKind::Tuple(types) = base_ty.kind() {
+                    if (*index as usize) < types.len() {
+                        let field_ty = types[*index as usize].clone();
+                        return Ok(hir::Expr::new(
+                            hir::ExprKind::Field {
+                                base: Box::new(base_expr),
+                                field_idx: *index,
+                            },
+                            field_ty,
+                            span,
+                        ));
+                    }
+                }
+
+                Err(TypeError::new(
+                    TypeErrorKind::NotATuple { ty: base_ty },
+                    span,
+                ))
+            }
+        }
+    }
+}

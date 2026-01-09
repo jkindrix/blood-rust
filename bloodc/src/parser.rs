@@ -219,6 +219,11 @@ impl<'src> Parser<'src> {
         self.interner.get_or_intern(s)
     }
 
+    /// Take ownership of the string interner.
+    pub fn take_interner(&mut self) -> DefaultStringInterner {
+        std::mem::take(&mut self.interner)
+    }
+
     /// Create a spanned symbol from the previous token.
     fn spanned_symbol(&mut self) -> Spanned<Symbol> {
         let text = self.text(&self.previous.span);

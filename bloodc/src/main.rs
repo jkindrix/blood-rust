@@ -30,6 +30,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use bloodc::diagnostics::DiagnosticEmitter;
 use bloodc::{Lexer, TokenKind};
+use bloodc::codegen;
 
 /// The Blood Programming Language Compiler
 ///
@@ -141,16 +142,8 @@ fn main() -> ExitCode {
         Commands::Lex(args) => cmd_lex(&args, verbosity),
         Commands::Parse(args) => cmd_parse(&args, verbosity),
         Commands::Check(args) => cmd_check(&args, verbosity),
-        Commands::Build(_) => {
-            eprintln!("Error: 'build' is not yet implemented (Phase 1)");
-            eprintln!("See ROADMAP.md for implementation timeline.");
-            ExitCode::from(1)
-        }
-        Commands::Run(_) => {
-            eprintln!("Error: 'run' is not yet implemented (Phase 1)");
-            eprintln!("See ROADMAP.md for implementation timeline.");
-            ExitCode::from(1)
-        }
+        Commands::Build(args) => cmd_build(&args, verbosity),
+        Commands::Run(args) => cmd_run(&args, verbosity),
     }
 }
 
@@ -302,6 +295,163 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
                 emitter.emit(error);
             }
             eprintln!("Checking failed with {} error(s).", errors.len());
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Build command - compile to executable
+fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
+    let source = match read_source(&args.file) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+
+    if verbosity > 1 {
+        eprintln!("Building file: {}", args.file.display());
+    }
+
+    let path_str = args.file.to_string_lossy();
+    let emitter = DiagnosticEmitter::new(&path_str, &source);
+
+    // Parse
+    let mut parser = bloodc::Parser::new(&source);
+    let program = match parser.parse_program() {
+        Ok(p) => p,
+        Err(errors) => {
+            for error in &errors {
+                emitter.emit(error);
+            }
+            eprintln!("Build failed: parsing errors.");
+            return ExitCode::from(1);
+        }
+    };
+
+    // Take interner from parser for type checking
+    let interner = parser.take_interner();
+
+    if verbosity > 0 {
+        eprintln!("Parsed {} declarations.", program.declarations.len());
+    }
+
+    // Type check and lower to HIR
+    let mut ctx = bloodc::typeck::TypeContext::new(&source, interner);
+    if let Err(errors) = ctx.resolve_program(&program) {
+        for error in &errors {
+            emitter.emit(error);
+        }
+        eprintln!("Build failed: type errors.");
+        return ExitCode::from(1);
+    }
+
+    // Type-check all function bodies
+    if let Err(errors) = ctx.check_all_bodies() {
+        for error in &errors {
+            emitter.emit(error);
+        }
+        eprintln!("Build failed: type errors.");
+        return ExitCode::from(1);
+    }
+
+    // Generate HIR
+    let hir_crate = ctx.into_hir();
+
+    if verbosity > 0 {
+        eprintln!("Type checking passed. {} items.", hir_crate.items.len());
+    }
+
+    // Generate LLVM IR
+    match codegen::compile_to_ir(&hir_crate) {
+        Ok(ir) => {
+            if args.debug {
+                println!("{}", ir);
+            }
+
+            // Determine output path
+            let output_obj = args.file.with_extension("o");
+            let output_exe = args.file.with_extension("");
+
+            // Compile to object file
+            if let Err(errors) = codegen::compile_to_object(&hir_crate, &output_obj) {
+                for error in &errors {
+                    emitter.emit(error);
+                }
+                eprintln!("Build failed: codegen errors.");
+                return ExitCode::from(1);
+            }
+
+            if verbosity > 0 {
+                eprintln!("Generated object file: {}", output_obj.display());
+            }
+
+            // Link with runtime
+            let runtime_path = std::env::current_dir()
+                .map(|d| d.join("runtime/runtime.o"))
+                .unwrap_or_else(|_| PathBuf::from("runtime/runtime.o"));
+
+            let status = std::process::Command::new("cc")
+                .arg(&output_obj)
+                .arg(&runtime_path)
+                .arg("-o")
+                .arg(&output_exe)
+                .status();
+
+            match status {
+                Ok(s) if s.success() => {
+                    if verbosity > 0 {
+                        eprintln!("Linked executable: {}", output_exe.display());
+                    }
+                    println!("Build successful: {}", output_exe.display());
+                    ExitCode::SUCCESS
+                }
+                Ok(_) => {
+                    eprintln!("Linking failed.");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("Failed to run linker: {}", e);
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Err(errors) => {
+            for error in &errors {
+                emitter.emit(error);
+            }
+            eprintln!("Build failed: codegen errors.");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run command - compile and execute
+fn cmd_run(args: &FileArgs, verbosity: u8) -> ExitCode {
+    // First build
+    let build_result = cmd_build(args, verbosity);
+    if build_result != ExitCode::SUCCESS {
+        return build_result;
+    }
+
+    // Then run
+    let output_exe = args.file.with_extension("");
+
+    if verbosity > 0 {
+        eprintln!("Running: {}", output_exe.display());
+    }
+
+    let status = std::process::Command::new(&output_exe)
+        .status();
+
+    match status {
+        Ok(s) => {
+            if s.success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(s.code().unwrap_or(1) as u8)
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to run program: {}", e);
             ExitCode::from(1)
         }
     }

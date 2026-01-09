@@ -18,6 +18,7 @@ blake3.workspace = true
 serde.workspace = true
 clap.workspace = true
 ordered-float.workspace = true
+inkwell.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

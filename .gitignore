@@ -23,3 +23,16 @@ Thumbs.db
 # Fuzzing artifacts
 bloodc/fuzz/corpus/
 bloodc/fuzz/artifacts/
+
+# Compiled examples
+examples/*.o
+examples/*.exe
+# Executables without extension (Linux)
+examples/minimal
+examples/fizzbuzz
+examples/hello
+examples/simple
+examples/test*
+
+# Runtime build artifacts
+runtime/*.o

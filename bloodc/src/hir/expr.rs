@@ -1,0 +1,438 @@
+//! HIR expressions and function bodies.
+//!
+//! This module defines the typed expression representation used after
+//! type checking. All expressions have a resolved type attached.
+
+use std::fmt;
+
+use crate::ast::{BinOp, UnaryOp, LiteralKind};
+use crate::span::Span;
+use super::{DefId, LocalId, Type};
+
+/// A unique identifier for a function/closure body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BodyId(pub u32);
+
+impl BodyId {
+    /// Create a new BodyId.
+    pub const fn new(id: u32) -> Self {
+        BodyId(id)
+    }
+}
+
+/// A function or closure body.
+///
+/// Bodies contain:
+/// - A list of locals (parameters and temporaries)
+/// - The body expression
+#[derive(Debug, Clone)]
+pub struct Body {
+    /// The parameters and local variables.
+    pub locals: Vec<Local>,
+    /// The number of parameters (first N locals are params).
+    pub param_count: usize,
+    /// The body expression.
+    pub expr: Expr,
+    /// The span of the body.
+    pub span: Span,
+}
+
+impl Body {
+    /// Get the return type (type of local 0).
+    pub fn return_type(&self) -> &Type {
+        &self.locals[0].ty
+    }
+
+    /// Iterate over parameters.
+    pub fn params(&self) -> impl Iterator<Item = &Local> {
+        self.locals.iter().skip(1).take(self.param_count)
+    }
+
+    /// Get a local by ID.
+    pub fn get_local(&self, id: LocalId) -> Option<&Local> {
+        self.locals.get(id.index as usize)
+    }
+}
+
+/// A local variable (parameter or temporary).
+#[derive(Debug, Clone)]
+pub struct Local {
+    /// The local ID.
+    pub id: LocalId,
+    /// The type of this local.
+    pub ty: Type,
+    /// Whether this local is mutable.
+    pub mutable: bool,
+    /// The name of this local (for debugging/errors).
+    pub name: Option<String>,
+    /// The span where this local was declared.
+    pub span: Span,
+}
+
+/// A typed expression.
+#[derive(Debug, Clone)]
+pub struct Expr {
+    /// The expression kind.
+    pub kind: ExprKind,
+    /// The type of this expression.
+    pub ty: Type,
+    /// The source span.
+    pub span: Span,
+}
+
+impl Expr {
+    /// Create a new expression.
+    pub fn new(kind: ExprKind, ty: Type, span: Span) -> Self {
+        Self { kind, ty, span }
+    }
+
+    /// Create an error expression.
+    pub fn error(span: Span) -> Self {
+        Self {
+            kind: ExprKind::Error,
+            ty: Type::error(),
+            span,
+        }
+    }
+
+    /// Check if this is an error expression.
+    pub fn is_error(&self) -> bool {
+        matches!(self.kind, ExprKind::Error)
+    }
+}
+
+/// The kind of an expression.
+#[derive(Debug, Clone)]
+pub enum ExprKind {
+    /// A literal value.
+    Literal(LiteralValue),
+
+    /// A local variable reference.
+    Local(LocalId),
+
+    /// A reference to a definition (function, constant, etc.).
+    Def(DefId),
+
+    /// Binary operation: `a + b`
+    Binary {
+        op: BinOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+
+    /// Unary operation: `-x`, `!x`, `*x`, `&x`
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+
+    /// Function call: `f(x, y)`
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+
+    /// Method call: `x.method(y)`
+    /// Note: In HIR, this is resolved to a function call with receiver.
+    MethodCall {
+        receiver: Box<Expr>,
+        method: DefId,
+        args: Vec<Expr>,
+    },
+
+    /// Field access: `x.field`
+    Field {
+        base: Box<Expr>,
+        field_idx: u32,
+    },
+
+    /// Array/slice indexing: `x[i]`
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
+
+    /// Tuple expression: `(a, b, c)`
+    Tuple(Vec<Expr>),
+
+    /// Array expression: `[a, b, c]`
+    Array(Vec<Expr>),
+
+    /// Array repeat: `[x; N]`
+    Repeat {
+        value: Box<Expr>,
+        count: u64,
+    },
+
+    /// Struct construction: `Point { x: 1, y: 2 }`
+    Struct {
+        def_id: DefId,
+        fields: Vec<FieldExpr>,
+        base: Option<Box<Expr>>,
+    },
+
+    /// Enum variant construction: `Some(x)`
+    Variant {
+        def_id: DefId,
+        variant_idx: u32,
+        fields: Vec<Expr>,
+    },
+
+    /// Type cast: `x as T`
+    Cast {
+        expr: Box<Expr>,
+        target_ty: Type,
+    },
+
+    /// Assignment: `x = y`
+    Assign {
+        target: Box<Expr>,
+        value: Box<Expr>,
+    },
+
+    /// Block: `{ stmts; expr }`
+    Block {
+        stmts: Vec<Stmt>,
+        expr: Option<Box<Expr>>,
+    },
+
+    /// If expression: `if cond { then } else { else }`
+    If {
+        condition: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Option<Box<Expr>>,
+    },
+
+    /// Match expression: `match x { patterns }`
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+
+    /// Loop: `loop { body }`
+    Loop {
+        body: Box<Expr>,
+        /// Label for break/continue.
+        label: Option<LoopId>,
+    },
+
+    /// While loop: `while cond { body }`
+    /// Desugared to `loop { if !cond { break }; body }`
+    While {
+        condition: Box<Expr>,
+        body: Box<Expr>,
+        label: Option<LoopId>,
+    },
+
+    /// Return: `return x`
+    Return(Option<Box<Expr>>),
+
+    /// Break: `break x`
+    Break {
+        label: Option<LoopId>,
+        value: Option<Box<Expr>>,
+    },
+
+    /// Continue: `continue`
+    Continue {
+        label: Option<LoopId>,
+    },
+
+    /// Closure: `|x| x + 1`
+    Closure {
+        body_id: BodyId,
+        captures: Vec<Capture>,
+    },
+
+    /// Borrow: `&x` or `&mut x`
+    Borrow {
+        expr: Box<Expr>,
+        mutable: bool,
+    },
+
+    /// Dereference: `*x`
+    Deref(Box<Expr>),
+
+    /// Address of: for raw pointers
+    AddrOf {
+        expr: Box<Expr>,
+        mutable: bool,
+    },
+
+    /// Let binding within an expression (let-else)
+    Let {
+        pattern: Pattern,
+        init: Box<Expr>,
+    },
+
+    /// Unsafe block: `unsafe { ... }`
+    Unsafe(Box<Expr>),
+
+    /// Error placeholder (for error recovery).
+    Error,
+}
+
+/// A literal value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiteralValue {
+    /// Integer literal.
+    Int(i128),
+    /// Unsigned integer literal.
+    Uint(u128),
+    /// Floating-point literal.
+    Float(f64),
+    /// Boolean literal.
+    Bool(bool),
+    /// Character literal.
+    Char(char),
+    /// String literal.
+    String(String),
+}
+
+impl LiteralValue {
+    /// Create from AST literal kind.
+    pub fn from_ast(kind: &LiteralKind) -> Self {
+        match kind {
+            LiteralKind::Int { value, suffix } => {
+                // For now, treat all as signed unless suffix says otherwise
+                if matches!(
+                    suffix,
+                    Some(crate::ast::IntSuffix::U8)
+                        | Some(crate::ast::IntSuffix::U16)
+                        | Some(crate::ast::IntSuffix::U32)
+                        | Some(crate::ast::IntSuffix::U64)
+                        | Some(crate::ast::IntSuffix::U128)
+                ) {
+                    LiteralValue::Uint(*value)
+                } else {
+                    LiteralValue::Int(*value as i128)
+                }
+            }
+            LiteralKind::Float { value, .. } => LiteralValue::Float(value.0),
+            LiteralKind::Bool(b) => LiteralValue::Bool(*b),
+            LiteralKind::Char(c) => LiteralValue::Char(*c),
+            LiteralKind::String(s) => LiteralValue::String(s.clone()),
+        }
+    }
+}
+
+/// A field in a struct expression.
+#[derive(Debug, Clone)]
+pub struct FieldExpr {
+    /// Field index.
+    pub field_idx: u32,
+    /// Field value.
+    pub value: Expr,
+}
+
+/// A statement in a block.
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    /// Let binding: `let x = e;`
+    Let {
+        local_id: LocalId,
+        init: Option<Expr>,
+    },
+    /// Expression statement: `e;`
+    Expr(Expr),
+    /// Item declaration (nested function, etc.)
+    Item(DefId),
+}
+
+/// A match arm.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    /// The pattern to match.
+    pub pattern: Pattern,
+    /// Optional guard: `if cond`
+    pub guard: Option<Expr>,
+    /// The body expression.
+    pub body: Expr,
+}
+
+/// A pattern in HIR.
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    /// The pattern kind.
+    pub kind: PatternKind,
+    /// The type this pattern matches.
+    pub ty: Type,
+    /// The source span.
+    pub span: Span,
+}
+
+/// The kind of a pattern.
+#[derive(Debug, Clone)]
+pub enum PatternKind {
+    /// Wildcard: `_`
+    Wildcard,
+    /// Binding: `x` or `mut x`
+    Binding {
+        local_id: LocalId,
+        mutable: bool,
+        /// Optional subpattern: `x @ pat`
+        subpattern: Option<Box<Pattern>>,
+    },
+    /// Literal: `42`, `true`
+    Literal(LiteralValue),
+    /// Variant: `Some(x)`
+    Variant {
+        def_id: DefId,
+        variant_idx: u32,
+        fields: Vec<Pattern>,
+    },
+    /// Struct: `Point { x, y }`
+    Struct {
+        def_id: DefId,
+        fields: Vec<FieldPattern>,
+    },
+    /// Tuple: `(a, b)`
+    Tuple(Vec<Pattern>),
+    /// Slice: `[first, .., last]`
+    Slice {
+        prefix: Vec<Pattern>,
+        slice: Option<Box<Pattern>>,
+        suffix: Vec<Pattern>,
+    },
+    /// Or pattern: `A | B`
+    Or(Vec<Pattern>),
+    /// Reference: `&x`
+    Ref {
+        mutable: bool,
+        inner: Box<Pattern>,
+    },
+}
+
+/// A field pattern.
+#[derive(Debug, Clone)]
+pub struct FieldPattern {
+    /// Field index.
+    pub field_idx: u32,
+    /// The pattern for this field.
+    pub pattern: Pattern,
+}
+
+/// A captured variable in a closure.
+#[derive(Debug, Clone)]
+pub struct Capture {
+    /// The local being captured.
+    pub local_id: LocalId,
+    /// Whether captured by move or by reference.
+    pub by_move: bool,
+}
+
+/// A loop identifier for break/continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LoopId(pub u32);
+
+impl LoopId {
+    pub const fn new(id: u32) -> Self {
+        LoopId(id)
+    }
+}
+
+impl fmt::Display for LoopId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "'loop{}", self.0)
+    }
+}

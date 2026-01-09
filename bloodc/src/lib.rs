@@ -79,20 +79,26 @@
 //! - [`arena`] - Arena allocation for efficient memory management
 //! - [`ast`] - Abstract Syntax Tree types
 //! - [`diagnostics`] - Error reporting infrastructure
+//! - [`hir`] - High-level Intermediate Representation (Phase 1+)
 //! - [`lexer`] - Tokenization (lexical analysis)
 //! - [`parser`] - Parsing (syntax analysis)
 //! - [`span`] - Source location tracking
 //! - [`syntax_kind`] - Syntax kinds for future CST support
 //! - [`trivia`] - Trivia preservation for lossless syntax trees
+//! - [`typeck`] - Type checking and inference (Phase 1+)
+//! - [`codegen`] - LLVM code generation (Phase 1+)
 
 pub mod arena;
 pub mod ast;
+pub mod codegen;
 pub mod diagnostics;
+pub mod hir;
 pub mod lexer;
 pub mod parser;
 pub mod span;
 pub mod syntax_kind;
 pub mod trivia;
+pub mod typeck;
 
 // Re-export commonly used types
 pub use diagnostics::{Diagnostic, DiagnosticEmitter, DiagnosticKind, ErrorCode};
