@@ -5,10 +5,10 @@ This document captures key architectural decisions made during the design of Blo
 ### Related Specifications
 
 - [SPECIFICATION.md](./SPECIFICATION.md) — Core language specification
-- [MEMORY_MODEL.md](./MEMORY_MODEL.md) — ADR-001, ADR-004, ADR-008 details
+- [MEMORY_MODEL.md](./MEMORY_MODEL.md) — ADR-001, ADR-004, ADR-008, ADR-013, ADR-014 details
 - [DISPATCH.md](./DISPATCH.md) — ADR-005 details
-- [CONTENT_ADDRESSED.md](./CONTENT_ADDRESSED.md) — ADR-003 details
-- [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) — ADR-002, ADR-006, ADR-007 details
+- [CONTENT_ADDRESSED.md](./CONTENT_ADDRESSED.md) — ADR-003, ADR-012 details
+- [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) — ADR-002, ADR-006, ADR-007, ADR-011 details
 - [ROADMAP.md](./ROADMAP.md) — Implementation timeline
 
 ---
@@ -26,7 +26,7 @@ This document captures key architectural decisions made during the design of Blo
 **Rationale**:
 - Borrow checking has a steep learning curve and adversarial feel
 - Generational references are simpler to understand and use
-- Runtime overhead is minimal (~1-2 cycles per dereference)
+- Runtime overhead is minimal (~1-2 cycles per dereference, theoretical—see MEMORY_MODEL.md §1.1)
 - Escape analysis can eliminate checks for provably-safe references
 - Mutable value semantics further reduce the need for references
 
@@ -244,6 +244,120 @@ This document captures key architectural decisions made during the design of Blo
 - No "escape hatches" that compromise safety
 - Poor ergonomics indicates design problem
 - Clear decision framework for tradeoffs
+
+---
+
+## ADR-011: Five Innovation Composition
+
+**Status**: Accepted
+
+**Context**: Blood combines five specific innovations from different research languages:
+1. Content-addressed code (Unison)
+2. Generational references (Vale)
+3. Mutable value semantics (Hylo)
+4. Algebraic effects (Koka)
+5. Multiple dispatch (Julia)
+
+This combination is unprecedented and required formal analysis of interaction safety.
+
+**Decision**: Blood adopts all five innovations with formal composition safety proofs.
+
+**Rationale**:
+- Each innovation solves real problems independently
+- Composition benefits exceed sum of parts (synergies documented in FORMAL_SEMANTICS.md §10)
+- Formal analysis proves innovations compose safely (no emergent unsoundness)
+- Addresses gaps in existing languages (safety-performance tradeoff, expression problem, effect management)
+
+**Consequences**:
+- Unprecedented language design requiring novel research
+- Complexity in implementation and tooling
+- Rich feature set enabling new programming patterns
+- Formal proofs provide confidence in soundness (see FORMAL_SEMANTICS.md §10)
+
+**Novel Contribution**: The composition and its formal analysis constitute Blood's primary research contribution.
+
+---
+
+## ADR-012: VFT Hot-Swap with Effect Coordination
+
+**Status**: Accepted
+
+**Context**: Content-addressed code enables hot-swapping by redirecting hash references. However, in-flight operations (active function calls, suspended effect handlers) complicate safe replacement.
+
+**Decision**: Blood supports three swap strategies with effect handler coordination:
+1. **Immediate** — New version takes effect at next call (may mix versions)
+2. **Barrier** — Wait for quiescent point before swap
+3. **Epoch** — Requests entering after swap use new version; in-flight complete with old
+
+**Rationale**:
+- Different applications need different consistency guarantees
+- Effect handlers can span VFT boundaries (suspended continuations)
+- Version mixing is sometimes acceptable (stateless functions)
+- Full consistency sometimes required (stateful operations)
+- See CONTENT_ADDRESSED.md §8.5 for full specification
+
+**Consequences**:
+- Runtime must track version epochs per handler
+- Rollback possible if new version fails validation
+- Observability metrics for swap progress
+- Clear semantics for each consistency level
+
+**Novel Contribution**: Integrating hot-swap with algebraic effect handlers is novel to Blood.
+
+---
+
+## ADR-013: Effect-Aware Escape Analysis
+
+**Status**: Accepted
+
+**Context**: Traditional escape analysis determines whether values can be stack-allocated based on whether references outlive their scope. Algebraic effects add complexity: effect suspension points can capture references in continuations.
+
+**Decision**: Blood extends escape analysis with effect boundary tracking:
+- Values that may be captured in continuations at effect suspension points are classified differently
+- Deep handlers preserve captured references across multiple resumes
+- Shallow handlers consume values (single resume)
+- Multi-shot handlers require special handling (values may be used multiple times)
+
+**Rationale**:
+- Effect suspension creates implicit reference capture (in continuation)
+- Captured references must survive to resume point
+- Optimization requires understanding effect handler semantics
+- Shallow handlers enable optimizations impossible with deep handlers
+- See MEMORY_MODEL.md §5.8 for full specification
+
+**Consequences**:
+- More conservative stack promotion near effect boundaries
+- Optimization based on handler kind (deep vs shallow)
+- Multi-shot handlers require stricter escape classification
+- Effect inference provides information for escape analysis
+
+**Novel Contribution**: This interaction between escape analysis and algebraic effects is novel to Blood.
+
+---
+
+## ADR-014: Hybrid Mutable Value Semantics
+
+**Status**: Accepted
+
+**Context**: Hylo demonstrates pure mutable value semantics (MVS) can eliminate many reference-related bugs. However, some patterns genuinely require references (graph structures, shared state).
+
+**Decision**: Blood uses a hybrid model:
+- Default to value semantics (like Hylo)
+- Explicit borrowing syntax (`&T`, `&mut T`) when references are genuinely needed
+- Clear distinction between value operations and reference operations
+
+**Rationale**:
+- Pure MVS is too restrictive for systems programming
+- Explicit references make aliasing visible
+- Value semantics simplify reasoning for most code
+- Hybrid approach provides best of both worlds
+- See MEMORY_MODEL.md §1.3 for clarification
+
+**Consequences**:
+- Most code uses simple value semantics
+- Reference patterns require explicit annotation
+- Clear mental model: values copy, references alias
+- Gradual adoption path from reference-heavy code
 
 ---
 
