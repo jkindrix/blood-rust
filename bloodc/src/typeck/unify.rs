@@ -3,6 +3,28 @@
 //! This module implements unification for type inference. The algorithm
 //! is based on Hindley-Milner with some extensions for Blood's type system.
 //!
+//! # Specification Alignment
+//!
+//! This implementation follows the UNIFY algorithm specified in DISPATCH.md §4.4.
+//!
+//! ## Implemented Cases (Phase 1)
+//!
+//! | Spec Case | Implementation |
+//! |-----------|----------------|
+//! | Case 1: Identical types | `Primitive(p1) == Primitive(p2)` |
+//! | Case 2-3: Type variables | `Infer(id)` binding |
+//! | Case 4: Type constructors | `Primitive` comparison |
+//! | Case 5: Type applications | `Adt { def_id, args }` |
+//! | Case 6: Function types | `Fn { params, ret }` |
+//!
+//! ## Deferred Cases (Phase 2+)
+//!
+//! | Spec Case | Status |
+//! |-----------|--------|
+//! | Case 7: Record types (row polymorphism) | Phase 2+ |
+//! | Case 8: Forall types (instantiation) | Phase 2+ |
+//! | Effect row unification (§4.4.3) | Phase 2+ |
+//!
 //! # Algorithm
 //!
 //! Unification finds a substitution that makes two types equal:
@@ -244,6 +266,10 @@ impl Default for Unifier {
 mod tests {
     use super::*;
 
+    // ============================================================
+    // Primitive Type Tests
+    // ============================================================
+
     #[test]
     fn test_unify_primitives() {
         let mut u = Unifier::new();
@@ -252,10 +278,30 @@ mod tests {
         // Same primitives should unify
         assert!(u.unify(&Type::i32(), &Type::i32(), span).is_ok());
         assert!(u.unify(&Type::bool(), &Type::bool(), span).is_ok());
+        assert!(u.unify(&Type::f64(), &Type::f64(), span).is_ok());
+        assert!(u.unify(&Type::unit(), &Type::unit(), span).is_ok());
 
         // Different primitives should not unify
         assert!(u.unify(&Type::i32(), &Type::bool(), span).is_err());
+        assert!(u.unify(&Type::i32(), &Type::f64(), span).is_err());
+        assert!(u.unify(&Type::bool(), &Type::unit(), span).is_err());
     }
+
+    #[test]
+    fn test_unify_different_integer_types() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        // i32 should not unify with i64 (different bit widths)
+        assert!(u.unify(&Type::i32(), &Type::i64(), span).is_err());
+
+        // Same types should always unify
+        assert!(u.unify(&Type::i64(), &Type::i64(), span).is_ok());
+    }
+
+    // ============================================================
+    // Type Variable Tests
+    // ============================================================
 
     #[test]
     fn test_unify_variable() {
@@ -269,6 +315,76 @@ mod tests {
         let resolved = u.resolve(&var);
         assert_eq!(resolved, Type::i32());
     }
+
+    #[test]
+    fn test_unify_variable_reverse_order() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        // Unify in reverse order: concrete type first, then variable
+        assert!(u.unify(&Type::bool(), &var, span).is_ok());
+
+        let resolved = u.resolve(&var);
+        assert_eq!(resolved, Type::bool());
+    }
+
+    #[test]
+    fn test_unify_two_variables() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var1 = u.fresh_var();
+        let var2 = u.fresh_var();
+
+        // Two variables can unify
+        assert!(u.unify(&var1, &var2, span).is_ok());
+
+        // Binding one should bind the other
+        assert!(u.unify(&var1, &Type::i32(), span).is_ok());
+
+        assert_eq!(u.resolve(&var1), Type::i32());
+        assert_eq!(u.resolve(&var2), Type::i32());
+    }
+
+    #[test]
+    fn test_unify_variable_chaining() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        // Create chain: ?a -> ?b -> ?c -> i32
+        let a = u.fresh_var();
+        let b = u.fresh_var();
+        let c = u.fresh_var();
+
+        assert!(u.unify(&a, &b, span).is_ok());
+        assert!(u.unify(&b, &c, span).is_ok());
+        assert!(u.unify(&c, &Type::i32(), span).is_ok());
+
+        // All should resolve to i32
+        assert_eq!(u.resolve(&a), Type::i32());
+        assert_eq!(u.resolve(&b), Type::i32());
+        assert_eq!(u.resolve(&c), Type::i32());
+    }
+
+    #[test]
+    fn test_unify_already_bound_variable() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        assert!(u.unify(&var, &Type::i32(), span).is_ok());
+
+        // Unifying with same type should succeed
+        assert!(u.unify(&var, &Type::i32(), span).is_ok());
+
+        // Unifying with different type should fail
+        assert!(u.unify(&var, &Type::bool(), span).is_err());
+    }
+
+    // ============================================================
+    // Tuple Type Tests
+    // ============================================================
 
     #[test]
     fn test_unify_tuples() {
@@ -285,6 +401,202 @@ mod tests {
     }
 
     #[test]
+    fn test_unify_empty_tuples() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let empty1 = Type::tuple(vec![]);
+        let empty2 = Type::tuple(vec![]);
+        assert!(u.unify(&empty1, &empty2, span).is_ok());
+    }
+
+    #[test]
+    fn test_unify_tuples_with_variables() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        let t1 = Type::tuple(vec![var.clone(), Type::bool()]);
+        let t2 = Type::tuple(vec![Type::i32(), Type::bool()]);
+
+        assert!(u.unify(&t1, &t2, span).is_ok());
+        assert_eq!(u.resolve(&var), Type::i32());
+    }
+
+    #[test]
+    fn test_unify_nested_tuples() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let inner1 = Type::tuple(vec![Type::i32(), Type::i32()]);
+        let inner2 = Type::tuple(vec![Type::i32(), Type::i32()]);
+        let t1 = Type::tuple(vec![inner1, Type::bool()]);
+        let t2 = Type::tuple(vec![inner2, Type::bool()]);
+
+        assert!(u.unify(&t1, &t2, span).is_ok());
+    }
+
+    // ============================================================
+    // Array and Slice Tests
+    // ============================================================
+
+    #[test]
+    fn test_unify_arrays_same_size() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let arr1 = Type::array(Type::i32(), 5);
+        let arr2 = Type::array(Type::i32(), 5);
+        assert!(u.unify(&arr1, &arr2, span).is_ok());
+    }
+
+    #[test]
+    fn test_unify_arrays_different_size() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let arr1 = Type::array(Type::i32(), 5);
+        let arr2 = Type::array(Type::i32(), 10);
+        assert!(u.unify(&arr1, &arr2, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_arrays_different_element() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let arr1 = Type::array(Type::i32(), 5);
+        let arr2 = Type::array(Type::bool(), 5);
+        assert!(u.unify(&arr1, &arr2, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_slices() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let slice1 = Type::slice(Type::i32());
+        let slice2 = Type::slice(Type::i32());
+        assert!(u.unify(&slice1, &slice2, span).is_ok());
+
+        let slice3 = Type::slice(Type::bool());
+        assert!(u.unify(&slice1, &slice3, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_array_slice_different() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        // Array and slice of same element type should NOT unify
+        let arr = Type::array(Type::i32(), 5);
+        let slice = Type::slice(Type::i32());
+        assert!(u.unify(&arr, &slice, span).is_err());
+    }
+
+    // ============================================================
+    // Reference and Pointer Tests
+    // ============================================================
+
+    #[test]
+    fn test_unify_references() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let ref1 = Type::reference(Type::i32(), false);
+        let ref2 = Type::reference(Type::i32(), false);
+        assert!(u.unify(&ref1, &ref2, span).is_ok());
+    }
+
+    #[test]
+    fn test_unify_references_mutability_mismatch() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let ref_imm = Type::reference(Type::i32(), false);
+        let ref_mut = Type::reference(Type::i32(), true);
+        // Different mutability should NOT unify
+        assert!(u.unify(&ref_imm, &ref_mut, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_pointers() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let ptr1 = Type::new(TypeKind::Ptr {
+            inner: Type::i32(),
+            mutable: false,
+        });
+        let ptr2 = Type::new(TypeKind::Ptr {
+            inner: Type::i32(),
+            mutable: false,
+        });
+        assert!(u.unify(&ptr1, &ptr2, span).is_ok());
+    }
+
+    // ============================================================
+    // Function Type Tests
+    // ============================================================
+
+    #[test]
+    fn test_unify_functions_same() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let fn1 = Type::function(vec![Type::i32()], Type::bool());
+        let fn2 = Type::function(vec![Type::i32()], Type::bool());
+        assert!(u.unify(&fn1, &fn2, span).is_ok());
+    }
+
+    #[test]
+    fn test_unify_functions_different_params() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let fn1 = Type::function(vec![Type::i32()], Type::bool());
+        let fn2 = Type::function(vec![Type::bool()], Type::bool());
+        assert!(u.unify(&fn1, &fn2, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_functions_different_return() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let fn1 = Type::function(vec![Type::i32()], Type::bool());
+        let fn2 = Type::function(vec![Type::i32()], Type::i32());
+        assert!(u.unify(&fn1, &fn2, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_functions_different_arity() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let fn1 = Type::function(vec![Type::i32()], Type::bool());
+        let fn2 = Type::function(vec![Type::i32(), Type::i32()], Type::bool());
+        assert!(u.unify(&fn1, &fn2, span).is_err());
+    }
+
+    #[test]
+    fn test_unify_functions_with_variables() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        let fn1 = Type::function(vec![var.clone()], Type::bool());
+        let fn2 = Type::function(vec![Type::i32()], Type::bool());
+
+        assert!(u.unify(&fn1, &fn2, span).is_ok());
+        assert_eq!(u.resolve(&var), Type::i32());
+    }
+
+    // ============================================================
+    // Occurs Check Tests
+    // ============================================================
+
+    #[test]
     fn test_occurs_check() {
         let mut u = Unifier::new();
         let span = Span::dummy();
@@ -293,5 +605,150 @@ mod tests {
         // Try to create infinite type: ?T = (?T,)
         let tuple = Type::tuple(vec![var.clone()]);
         assert!(u.unify(&var, &tuple, span).is_err());
+    }
+
+    #[test]
+    fn test_occurs_check_in_array() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        // Try to create infinite type: ?T = [?T; 5]
+        let array = Type::array(var.clone(), 5);
+        assert!(u.unify(&var, &array, span).is_err());
+    }
+
+    #[test]
+    fn test_occurs_check_in_function() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        // Try to create infinite type: ?T = fn(?T) -> bool
+        let func = Type::function(vec![var.clone()], Type::bool());
+        assert!(u.unify(&var, &func, span).is_err());
+    }
+
+    #[test]
+    fn test_occurs_check_nested() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+        // Deeply nested occurs: ?T = (i32, (?T, bool))
+        let inner = Type::tuple(vec![var.clone(), Type::bool()]);
+        let outer = Type::tuple(vec![Type::i32(), inner]);
+        assert!(u.unify(&var, &outer, span).is_err());
+    }
+
+    // ============================================================
+    // Special Type Tests
+    // ============================================================
+
+    #[test]
+    fn test_unify_never_type() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        // Never type should unify with anything
+        assert!(u.unify(&Type::never(), &Type::i32(), span).is_ok());
+        assert!(u.unify(&Type::bool(), &Type::never(), span).is_ok());
+        assert!(u.unify(&Type::never(), &Type::never(), span).is_ok());
+    }
+
+    #[test]
+    fn test_unify_error_type() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        // Error type should unify with anything (for error recovery)
+        assert!(u.unify(&Type::error(), &Type::i32(), span).is_ok());
+        assert!(u.unify(&Type::bool(), &Type::error(), span).is_ok());
+        assert!(u.unify(&Type::error(), &Type::error(), span).is_ok());
+    }
+
+    // ============================================================
+    // Resolution Tests
+    // ============================================================
+
+    #[test]
+    fn test_is_resolved() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var = u.fresh_var();
+
+        // Unbound variable is not resolved
+        assert!(!u.is_resolved(&var));
+
+        // Primitive is always resolved
+        assert!(u.is_resolved(&Type::i32()));
+
+        // After binding, variable is resolved
+        u.unify(&var, &Type::i32(), span).unwrap();
+        assert!(u.is_resolved(&var));
+    }
+
+    #[test]
+    fn test_resolve_nested_structure() {
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let var1 = u.fresh_var();
+        let var2 = u.fresh_var();
+
+        let nested = Type::tuple(vec![var1.clone(), Type::tuple(vec![var2.clone()])]);
+
+        u.unify(&var1, &Type::i32(), span).unwrap();
+        u.unify(&var2, &Type::bool(), span).unwrap();
+
+        let resolved = u.resolve(&nested);
+        let expected = Type::tuple(vec![Type::i32(), Type::tuple(vec![Type::bool()])]);
+        assert_eq!(resolved, expected);
+    }
+
+    // ============================================================
+    // Property-Based Style Tests
+    // ============================================================
+
+    #[test]
+    fn test_unification_reflexivity() {
+        // For all types T: unify(T, T) succeeds
+        let span = Span::dummy();
+
+        let types = vec![
+            Type::i32(),
+            Type::bool(),
+            Type::unit(),
+            Type::tuple(vec![Type::i32(), Type::bool()]),
+            Type::array(Type::i32(), 5),
+            Type::function(vec![Type::i32()], Type::bool()),
+        ];
+
+        for ty in types {
+            let mut u = Unifier::new();
+            assert!(
+                u.unify(&ty, &ty, span).is_ok(),
+                "Reflexivity failed for {:?}",
+                ty
+            );
+        }
+    }
+
+    #[test]
+    fn test_unification_symmetry() {
+        // For all types T, U: if unify(T, U) succeeds, unify(U, T) also succeeds
+        let mut u1 = Unifier::new();
+        let mut u2 = Unifier::new();
+        let span = Span::dummy();
+
+        let var1_a = u1.fresh_var();
+        let var1_b = u2.fresh_var();
+
+        // unify(var, i32) should behave same as unify(i32, var)
+        assert!(u1.unify(&var1_a, &Type::i32(), span).is_ok());
+        assert!(u2.unify(&Type::i32(), &var1_b, span).is_ok());
+
+        assert_eq!(u1.resolve(&var1_a), u2.resolve(&var1_b));
     }
 }
