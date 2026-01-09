@@ -219,17 +219,124 @@ References to stack-allocated values use **thin pointers** (64-bit):
 
 Rationale: Stack references are proven safe at compile time; no runtime generation check needed.
 
+### 2.6 128-bit Pointer Overhead Analysis
+
+Blood's 128-bit pointers incur overhead compared to standard 64-bit pointers. This section provides detailed analysis.
+
+#### 2.6.1 Memory Bandwidth Overhead
+
+| Metric | 64-bit Ptr | 128-bit Ptr | Overhead | Impact |
+|--------|------------|-------------|----------|--------|
+| Pointer size | 8 bytes | 16 bytes | 2x | Higher memory usage |
+| Cache line fit | 8 ptrs/64B | 4 ptrs/64B | 2x | More cache misses |
+| Array traversal | 8 bytes/elem | 16 bytes/elem | 2x | Slower iteration |
+| Struct packing | Dense | Padding overhead | 1.3-2x | Larger objects |
+
+**Mitigation**: Blood's tiered memory model means **only heap pointers are 128-bit**. Stack references use 64-bit thin pointers, which are the majority of references in typical programs. Escape analysis promotes values to stack when possible.
+
+#### 2.6.2 Cache Efficiency Impact
+
+**L1/L2 Cache Pressure** (unvalidated estimates):
+
+```
+Workload: Pointer-chasing linked structure (worst case)
+64-bit pointers: 8 pointers per cache line
+128-bit pointers: 4 pointers per cache line
+
+Estimated cache miss increase: ~10-30% for pointer-heavy code
+Estimated performance impact: ~5-15% slowdown
+```
+
+**Array of Pointers**:
+```
+64-bit:  [ptr₁|ptr₂|ptr₃|ptr₄|ptr₅|ptr₆|ptr₇|ptr₈] = 64 bytes (1 cache line)
+128-bit: [ptr₁|ptr₂|ptr₃|ptr₄|             padding] = 64 bytes (1 cache line)
+                                                       4 pointers vs 8
+```
+
+**Mitigation Strategies**:
+1. **Value semantics**: Prefer copying small values over boxing
+2. **Escape analysis**: Promotes to stack (64-bit thin pointers)
+3. **Frozen types**: Immutable data uses specialized layouts
+4. **Type fingerprint caching**: 24-bit fingerprint avoids full type lookup
+
+#### 2.6.3 Atomic Operation Costs
+
+128-bit atomic operations require special instructions:
+
+| Platform | Instruction | Latency (approx.)* | Notes |
+|----------|-------------|-------------------|-------|
+| x86-64 | `CMPXCHG16B` | ~15-20 cycles | Requires 16-byte alignment |
+| ARM64 | `LDXP`/`STXP` | ~10-15 cycles | Load/store exclusive pair |
+| RISC-V | Emulated | ~30-50 cycles | No native 128-bit atomics |
+
+*Latency values are approximate, based on published CPU documentation. Actual latency varies by microarchitecture and contention.
+
+**Comparison with 64-bit atomics** (approximate):
+- `CMPXCHG8B` (64-bit): ~5-10 cycles
+- `CMPXCHG16B` (128-bit): ~15-20 cycles
+- Overhead: ~2-3x for atomic operations
+
+**Mitigation**: Most pointer operations are non-atomic. Atomic operations occur only for:
+- Cross-fiber reference transfer
+- Concurrent data structure updates
+- VFT hot-swap
+
+#### 2.6.4 Real-World Overhead Estimates (Unvalidated)
+
+Based on analysis of similar systems (Go with GC, Vale's design documents):
+
+| Workload Type | Estimated Overhead | Confidence |
+|---------------|-------------------|------------|
+| Compute-bound (minimal pointers) | <1% | High |
+| Balanced (mixed) | 3-8% | Medium |
+| Pointer-heavy (graphs, trees) | 10-20% | Medium |
+| Linked list traversal (worst case) | 20-40% | Low |
+
+**Note**: These estimates are unvalidated. Vale (the source of generational references) has not published production benchmarks as of January 2026. Actual performance will be measured during Blood implementation.
+
+#### 2.6.5 Trade-off Justification
+
+The 128-bit pointer overhead is accepted because:
+
+1. **Memory safety without GC**: No garbage collector pauses or overhead
+2. **No borrow checker complexity**: Simpler mental model than Rust's lifetimes
+3. **Effect safety**: Generation snapshots enable safe continuation capture
+4. **Hot-swap capability**: Metadata field enables runtime updates
+
+**Break-even analysis**: The overhead is justified if:
+- GC pause avoidance is worth 10-20% steady-state overhead
+- Developer productivity gains from simpler ownership model
+- Safety-critical requirements preclude GC
+
+#### 2.6.6 Comparison with Alternatives
+
+| Approach | Memory Overhead | CPU Overhead | Complexity | GC Pauses |
+|----------|-----------------|--------------|------------|-----------|
+| **Blood (128-bit gen-ref)** | 2x pointers | 1-2 cycles/check | Low | None |
+| **Rust (borrow checker)** | None | None | High | None |
+| **Go (GC)** | ~1.5x heap | Variable | Low | 1-10ms |
+| **Java (GC)** | ~2x heap | Variable | Low | 10-100ms |
+| **C (manual)** | None | None | Very High | None |
+
+Blood's approach trades memory/CPU overhead for:
+- Simpler ownership than Rust
+- No GC pauses
+- Stronger safety than C
+
 ---
 
 ## 3. Memory Tiers
 
 ### 3.1 Tier Overview
 
-| Tier | Name | Lifecycle | Safety Mechanism | Cost |
-|------|------|-----------|------------------|------|
+| Tier | Name | Lifecycle | Safety Mechanism | Cost (theoretical)* |
+|------|------|-----------|------------------|---------------------|
 | 0 | Stack | Lexical scope | Compile-time proof | Zero |
 | 1 | Region | Explicit scope | Generational check | ~1-2 cycles |
 | 2 | Persistent | Reference-counted | Deferred RC | Variable |
+
+*Cycle costs are design targets based on analysis. See Performance Status in §1.1.
 
 ### 3.2 Tier 0: Stack
 
@@ -466,7 +573,7 @@ dereference:
     call    blood_stale_ref_handler
 ```
 
-Typical cost: 3-4 cycles in the fast path (generations match).
+**Typical cost (theoretical)**: ~3-4 cycles in the fast path (generations match). See Performance Status in §1.1 for validation status.
 
 ---
 
@@ -577,6 +684,171 @@ fn no_escape() -> i32 {
 2. Stack frame containing value outlives all references
 3. Frame deallocation happens after all references die
 4. Therefore, no stale references possible ∎
+
+### 5.8 Escape Analysis × Effects Interaction
+
+This section details how escape analysis interacts with Blood's algebraic effect system.
+
+#### 5.8.1 Effect Suspension Points
+
+Effect operations (`perform`) are **suspension points** where execution may yield to a handler and resume later:
+
+```blood
+fn process(data: &mut Data) / {Yield<i32>} {
+    // Phase 1: data is live
+    let intermediate = transform(data)
+
+    yield(intermediate)  // ← SUSPENSION POINT
+
+    // Phase 2: data must still be valid
+    finalize(data)
+}
+```
+
+At suspension points, escape analysis must answer:
+1. Which references in scope might become stale?
+2. Which references must be included in generation snapshot?
+3. Can any references be proven safe across suspension?
+
+#### 5.8.2 Effect-Aware Escape Classification
+
+Extended escape states for effect interaction:
+
+| State | Standard Meaning | Effect Implication |
+|-------|------------------|-------------------|
+| `NoEscape` | Never escapes scope | Safe across suspension (stack-bound) |
+| `EffectEscape` | Crosses suspension | **Requires snapshot validation** |
+| `EffectLocal` | Used before/after but not across | No snapshot needed |
+| `EffectCapture` | Captured in handler closure | Handler owns reference |
+
+```
+CLASSIFY_EFFECT_ESCAPE(ref, suspension_point):
+    IF ref.def_point AFTER suspension_point:
+        RETURN EffectLocal  // Defined after, not captured
+
+    IF ref.last_use BEFORE suspension_point:
+        RETURN EffectLocal  // Used only before, not needed after
+
+    IF ref.owner IS handler_closure:
+        RETURN EffectCapture  // Handler manages lifetime
+
+    IF ref.is_stack_bound AND ref.frame.outlives(suspension_point):
+        RETURN NoEscape  // Stack frame still valid
+
+    RETURN EffectEscape  // Must snapshot
+```
+
+#### 5.8.3 Deep vs. Shallow Handler Implications
+
+**Deep handlers** re-install themselves on resume, affecting escape analysis:
+
+```blood
+deep handler Logger for Log {
+    op log(msg) {
+        // Handler state persists across multiple log calls
+        let count = get_count()  // Handler-local state
+        set_count(count + 1)
+        resume(())  // Deep: handler reinstalled
+    }
+}
+```
+
+For deep handlers:
+- Handler closure state is `EffectCapture`
+- References in handled computation may cross multiple suspensions
+- Escape analysis must be conservative
+
+**Shallow handlers** handle once and disappear:
+
+```blood
+shallow handler OneShot for Yield<i32> {
+    op yield(value) {
+        // Only handles first yield
+        resume(())  // Shallow: handler NOT reinstalled
+    }
+}
+```
+
+For shallow handlers:
+- Continuation resumes without handler
+- Fewer suspension points after first
+- Escape analysis can be more precise
+
+#### 5.8.4 Multi-shot Handler Analysis
+
+When a handler may call `resume` multiple times (e.g., for backtracking):
+
+```blood
+deep handler Backtrack for NonDet {
+    op choose(options) {
+        for opt in options {
+            resume(opt)  // Multiple resumes!
+        }
+    }
+}
+```
+
+Multi-shot implications:
+1. **Linear values forbidden** (see FORMAL_SEMANTICS.md §8)
+2. **All captured references are EffectEscape**
+3. **Each resume requires fresh snapshot validation**
+4. **Mutable state requires isolation** (copy-on-resume)
+
+#### 5.8.5 Optimization: Effect-Aware Check Elision
+
+When escape analysis can prove safety across effects:
+
+```blood
+fn optimizable() / {IO} {
+    let v = vec![1, 2, 3]  // NoEscape (stack-promotable)
+    println(v.len().to_string())  // IO effect, but v doesn't cross
+    let sum = v.iter().sum()  // Still NoEscape
+    sum
+}
+```
+
+Even though `println` performs IO:
+- `v` is not used *across* the IO operation
+- Its lifetime is within the stack frame
+- No snapshot needed for `v`
+
+**Contrast with**:
+
+```blood
+fn requires_snapshot() / {Yield<i32>} {
+    let v = Box::new(vec![1, 2, 3])  // HeapEscape
+    yield(v.len() as i32)  // v is live across suspension!
+    v.push(4)  // v must be validated after resume
+    v.len() as i32
+}
+```
+
+Here `v` is `EffectEscape` because:
+- `v` is heap-allocated (`Box`)
+- `v` is used both before and after `yield`
+- Must be included in generation snapshot
+
+#### 5.8.6 Analysis Complexity
+
+Effect-aware escape analysis has higher complexity than standard escape analysis:
+
+| Analysis Level | Complexity | Precision |
+|----------------|------------|-----------|
+| Intra-procedural | O(n) | Low |
+| Inter-procedural (no effects) | O(n²) | Medium |
+| Effect-aware inter-procedural | O(n² × e) | High |
+| Effect-aware + multi-shot | O(n² × e × r) | Very High |
+
+Where:
+- n = number of values
+- e = number of effect operations
+- r = resume count bound (infinite for multi-shot)
+
+**Implementation Strategy**:
+1. Start with conservative analysis (all EffectEscape)
+2. Apply precision improvements incrementally
+3. Use optimization levels to control analysis depth
+4. Cache function summaries for inter-procedural reuse
 
 ---
 
