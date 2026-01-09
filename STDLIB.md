@@ -14,10 +14,18 @@ This document specifies Blood's standard library, including core types, traits, 
 2. [Primitive Types](#2-primitive-types)
 3. [Core Types](#3-core-types)
 4. [Collections](#4-collections)
+   - 4.0 [Complexity Notation](#40-complexity-notation)
+   - 4.1 [Vec\<T\>](#41-vect)
+   - 4.2 [HashMap\<K, V\>](#42-hashmapk-v)
+   - 4.3 [HashSet\<T\>](#43-hashsett)
+   - 4.4 [VecDeque\<T\>](#44-vecdequt)
+   - 4.5 [BTreeMap\<K, V\>](#45-btreemapk-v)
+   - 4.6 [BTreeSet\<T\>](#46-btreesett)
 5. [Core Traits](#5-core-traits)
 6. [Standard Effects](#6-standard-effects)
 7. [Standard Handlers](#7-standard-handlers)
 8. [Prelude](#8-prelude)
+9. [Implementation Notes](#9-implementation-notes)
 
 ---
 
@@ -314,14 +322,25 @@ impl<T> Deref for Frozen<T> {
 
 ## 4. Collections
 
+### 4.0 Complexity Notation
+
+All complexity bounds use standard big-O notation:
+- `n` = number of elements in the collection
+- `m` = number of elements in another collection (for set operations)
+- Amortized bounds marked with †
+
 ### 4.1 Vec<T>
 
-Growable array.
+Growable contiguous array, similar to Rust's `Vec` or C++'s `std::vector`.
+
+**Memory Layout**: Contiguous heap allocation with `(pointer, capacity, length)` header.
+
+**Growth Strategy**: Geometric growth (2x) for amortized O(1) push.
 
 ```blood
 struct Vec<T> {
-    buf: RawVec<T>,
-    len: usize,
+    buf: RawVec<T>,   // Pointer + capacity (Tier 1 or 2 depending on escape)
+    len: usize,        // Current element count
 }
 
 impl<T> Vec<T> {
@@ -365,13 +384,40 @@ impl<T> Vec<T> {
 }
 ```
 
+**Complexity Bounds**:
+
+| Operation | Time | Space | Notes |
+|-----------|------|-------|-------|
+| `new()` | O(1) | O(1) | No allocation |
+| `with_capacity(n)` | O(1) | O(n) | Single allocation |
+| `push(x)` | O(1)† | O(1)† | Amortized, may reallocate |
+| `pop()` | O(1) | O(1) | |
+| `insert(i, x)` | O(n) | O(1)† | Shifts elements |
+| `remove(i)` | O(n) | O(1) | Shifts elements |
+| `swap_remove(i)` | O(1) | O(1) | Swaps with last |
+| `get(i)` | O(1) | O(1) | Bounds check + index |
+| `sort()` | O(n log n) | O(log n) | Introsort variant |
+| `binary_search(x)` | O(log n) | O(1) | Requires sorted |
+| `retain(f)` | O(n) | O(1) | In-place filter |
+| `reverse()` | O(n) | O(1) | In-place |
+| `clear()` | O(n) | O(1) | Drops elements |
+| `iter()` | O(1) | O(1) | Creates iterator |
+
 ### 4.2 HashMap<K, V>
 
-Hash map with generational safety.
+Hash map with generational safety, using SwissTable-style layout (similar to Rust's `hashbrown`).
+
+**Memory Layout**: Flat array of control bytes + key-value pairs for cache efficiency.
+
+**Hash Algorithm**: SipHash-1-3 default (DoS-resistant), configurable via `S` parameter.
 
 ```blood
 struct HashMap<K, V, S = DefaultHasher> {
-    // Implementation details
+    ctrl: *mut u8,       // Control bytes (EMPTY/DELETED/hash bits)
+    data: *mut (K, V),   // Key-value pairs
+    len: usize,
+    capacity: usize,
+    hasher: S,
 }
 
 impl<K: Hash + Eq, V> HashMap<K, V> {
@@ -400,9 +446,28 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
 }
 ```
 
+**Complexity Bounds** (expected case with good hash function):
+
+| Operation | Time (expected) | Time (worst) | Notes |
+|-----------|-----------------|--------------|-------|
+| `new()` | O(1) | O(1) | No allocation |
+| `with_capacity(n)` | O(n) | O(n) | Allocates control + data |
+| `insert(k, v)` | O(1)† | O(n) | Amortized, may resize |
+| `remove(k)` | O(1) | O(n) | Tombstone deletion |
+| `get(k)` | O(1) | O(n) | Probe sequence |
+| `contains_key(k)` | O(1) | O(n) | Probe sequence |
+| `entry(k)` | O(1) | O(n) | Probe + possible insert |
+| `clear()` | O(n) | O(n) | Drops all entries |
+| `iter()` | O(1) | O(1) | Creates iterator |
+| `reserve(n)` | O(n) | O(n) | May resize |
+
+**Load Factor**: 87.5% maximum (Swiss Table standard).
+
 ### 4.3 HashSet<T>
 
-Hash set.
+Hash set implemented as `HashMap<T, ()>`, inheriting SwissTable performance characteristics.
+
+**Memory Layout**: Same as HashMap, with zero-sized unit value optimized away.
 
 ```blood
 struct HashSet<T, S = DefaultHasher> {
@@ -413,32 +478,70 @@ impl<T: Hash + Eq> HashSet<T> {
     fn new() -> HashSet<T> / pure
     fn with_capacity(cap: usize) -> HashSet<T> / {Allocate}
 
+    fn len(&self) -> usize / pure
+    fn is_empty(&self) -> bool / pure
+    fn capacity(&self) -> usize / pure
+
     fn insert(&mut self, value: T) -> bool / {Allocate}
     fn remove(&mut self, value: &T) -> bool / pure
     fn contains(&self, value: &T) -> bool / pure
+    fn take(&mut self, value: &T) -> Option<T> / pure
 
     fn union(&self, other: &HashSet<T>) -> HashSet<T> / {Allocate}
     fn intersection(&self, other: &HashSet<T>) -> HashSet<T> / {Allocate}
     fn difference(&self, other: &HashSet<T>) -> HashSet<T> / {Allocate}
+    fn symmetric_difference(&self, other: &HashSet<T>) -> HashSet<T> / {Allocate}
 
     fn is_subset(&self, other: &HashSet<T>) -> bool / pure
     fn is_superset(&self, other: &HashSet<T>) -> bool / pure
     fn is_disjoint(&self, other: &HashSet<T>) -> bool / pure
+
+    fn iter(&self) -> impl Iterator<Item = &T> / pure
+    fn drain(&mut self) -> impl Iterator<Item = T> / pure
+    fn clear(&mut self) / pure
+    fn reserve(&mut self, additional: usize) / {Allocate}
 }
 ```
 
+**Complexity Bounds** (expected case with good hash function):
+
+| Operation | Time (expected) | Time (worst) | Space | Notes |
+|-----------|-----------------|--------------|-------|-------|
+| `new()` | O(1) | O(1) | O(1) | No allocation |
+| `with_capacity(n)` | O(n) | O(n) | O(n) | Allocates control bytes |
+| `insert(v)` | O(1)† | O(n) | O(1)† | Amortized, may resize |
+| `remove(v)` | O(1) | O(n) | O(1) | Tombstone deletion |
+| `contains(v)` | O(1) | O(n) | O(1) | Probe sequence |
+| `union(other)` | O(n + m) | O((n + m)²) | O(n + m) | Creates new set |
+| `intersection(other)` | O(min(n, m)) | O(n × m) | O(min(n, m)) | Iterates smaller |
+| `difference(other)` | O(n) | O(n × m) | O(n) | Checks each element |
+| `is_subset(other)` | O(n) | O(n × m) | O(1) | Early exit on mismatch |
+| `is_disjoint(other)` | O(min(n, m)) | O(n × m) | O(1) | Early exit on match |
+
+Where `n` = `self.len()`, `m` = `other.len()`.
+
 ### 4.4 VecDeque<T>
 
-Double-ended queue.
+Double-ended queue implemented as a growable ring buffer.
+
+**Memory Layout**: Contiguous allocation with `(pointer, head, len, capacity)` header. Elements stored in circular fashion; `head` tracks the start position.
+
+**Growth Strategy**: Same as Vec (2x geometric growth).
 
 ```blood
 struct VecDeque<T> {
-    // Ring buffer implementation
+    buf: RawVec<T>,    // Pointer + capacity
+    head: usize,        // Index of first element
+    len: usize,         // Element count
 }
 
 impl<T> VecDeque<T> {
     fn new() -> VecDeque<T> / pure
     fn with_capacity(cap: usize) -> VecDeque<T> / {Allocate}
+
+    fn len(&self) -> usize / pure
+    fn is_empty(&self) -> bool / pure
+    fn capacity(&self) -> usize / pure
 
     fn push_front(&mut self, value: T) / {Allocate}
     fn push_back(&mut self, value: T) / {Allocate}
@@ -446,9 +549,144 @@ impl<T> VecDeque<T> {
     fn pop_back(&mut self) -> Option<T> / pure
 
     fn front(&self) -> Option<&T> / pure
+    fn front_mut(&mut self) -> Option<&mut T> / pure
     fn back(&self) -> Option<&T> / pure
+    fn back_mut(&mut self) -> Option<&mut T> / pure
+
+    fn get(&self, index: usize) -> Option<&T> / pure
+    fn get_mut(&mut self, index: usize) -> Option<&mut T> / pure
+
+    fn insert(&mut self, index: usize, value: T) / {Allocate, Panic}
+    fn remove(&mut self, index: usize) -> Option<T> / pure
+    fn swap_remove_front(&mut self, index: usize) -> Option<T> / pure
+    fn swap_remove_back(&mut self, index: usize) -> Option<T> / pure
+
+    fn make_contiguous(&mut self) -> &mut [T] / pure
+    fn as_slices(&self) -> (&[T], &[T]) / pure
+    fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) / pure
+
+    fn rotate_left(&mut self, n: usize) / pure
+    fn rotate_right(&mut self, n: usize) / pure
+
+    fn iter(&self) -> impl Iterator<Item = &T> / pure
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> / pure
+    fn drain(&mut self, range: Range<usize>) -> impl Iterator<Item = T> / pure
+
+    fn clear(&mut self) / pure
+    fn truncate(&mut self, len: usize) / pure
+    fn reserve(&mut self, additional: usize) / {Allocate}
+    fn shrink_to_fit(&mut self) / {Allocate}
 }
 ```
+
+**Complexity Bounds**:
+
+| Operation | Time | Space | Notes |
+|-----------|------|-------|-------|
+| `new()` | O(1) | O(1) | No allocation |
+| `with_capacity(n)` | O(1) | O(n) | Single allocation |
+| `push_front(x)` | O(1)† | O(1)† | Amortized, may reallocate |
+| `push_back(x)` | O(1)† | O(1)† | Amortized, may reallocate |
+| `pop_front()` | O(1) | O(1) | Adjusts head pointer |
+| `pop_back()` | O(1) | O(1) | Adjusts length |
+| `get(i)` | O(1) | O(1) | Index + modular arithmetic |
+| `insert(i, x)` | O(min(i, n-i)) | O(1)† | Shifts toward closer end |
+| `remove(i)` | O(min(i, n-i)) | O(1) | Shifts toward closer end |
+| `rotate_left(k)` | O(min(k, n-k)) | O(1) | In-place rotation |
+| `make_contiguous()` | O(n) | O(1) | May rotate elements |
+| `as_slices()` | O(1) | O(1) | Returns two views |
+
+**Ring Buffer Advantage**: Unlike Vec, VecDeque provides O(1) push/pop at both ends, making it ideal for queues, work-stealing deques, and sliding window algorithms.
+
+### 4.5 BTreeMap<K, V>
+
+Ordered map implemented as a B-Tree.
+
+**Memory Layout**: Tree of nodes, each containing up to `B-1` keys and `B` children (B = branching factor, typically 6-12).
+
+```blood
+struct BTreeMap<K, V> {
+    root: Option<Box<Node<K, V>>>,
+    len: usize,
+}
+
+impl<K: Ord, V> BTreeMap<K, V> {
+    fn new() -> BTreeMap<K, V> / pure
+
+    fn len(&self) -> usize / pure
+    fn is_empty(&self) -> bool / pure
+
+    fn insert(&mut self, k: K, v: V) -> Option<V> / {Allocate}
+    fn remove(&mut self, k: &K) -> Option<V> / pure
+    fn get(&self, k: &K) -> Option<&V> / pure
+    fn get_mut(&mut self, k: &K) -> Option<&mut V> / pure
+    fn contains_key(&self, k: &K) -> bool / pure
+
+    fn entry(&mut self, k: K) -> Entry<K, V> / pure
+
+    fn first_key_value(&self) -> Option<(&K, &V)> / pure
+    fn last_key_value(&self) -> Option<(&K, &V)> / pure
+    fn pop_first(&mut self) -> Option<(K, V)> / pure
+    fn pop_last(&mut self) -> Option<(K, V)> / pure
+
+    fn range<R: RangeBounds<K>>(&self, range: R) -> impl Iterator<Item = (&K, &V)> / pure
+    fn keys(&self) -> impl Iterator<Item = &K> / pure
+    fn values(&self) -> impl Iterator<Item = &V> / pure
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> / pure
+
+    fn clear(&mut self) / pure
+}
+```
+
+**Complexity Bounds**:
+
+| Operation | Time | Space | Notes |
+|-----------|------|-------|-------|
+| `new()` | O(1) | O(1) | No allocation |
+| `insert(k, v)` | O(log n) | O(log n)† | May split nodes |
+| `remove(k)` | O(log n) | O(1) | May merge nodes |
+| `get(k)` | O(log n) | O(1) | Binary search in nodes |
+| `contains_key(k)` | O(log n) | O(1) | Binary search |
+| `first_key_value()` | O(log n) | O(1) | Leftmost traversal |
+| `last_key_value()` | O(log n) | O(1) | Rightmost traversal |
+| `range(r)` | O(log n + k) | O(1) | k = items yielded |
+| `iter()` | O(1) | O(log n) | Iterator creation + stack |
+
+**B-Tree Advantage**: Better cache locality than binary search trees due to node packing; ordered iteration; no hash function required.
+
+### 4.6 BTreeSet<T>
+
+Ordered set implemented as `BTreeMap<T, ()>`.
+
+```blood
+struct BTreeSet<T> {
+    map: BTreeMap<T, ()>,
+}
+
+impl<T: Ord> BTreeSet<T> {
+    fn new() -> BTreeSet<T> / pure
+
+    fn insert(&mut self, value: T) -> bool / {Allocate}
+    fn remove(&mut self, value: &T) -> bool / pure
+    fn contains(&self, value: &T) -> bool / pure
+
+    fn first(&self) -> Option<&T> / pure
+    fn last(&self) -> Option<&T> / pure
+    fn pop_first(&mut self) -> Option<T> / pure
+    fn pop_last(&mut self) -> Option<T> / pure
+
+    fn range<R: RangeBounds<T>>(&self, range: R) -> impl Iterator<Item = &T> / pure
+    fn iter(&self) -> impl Iterator<Item = &T> / pure
+
+    // Set operations (all return ordered results)
+    fn union(&self, other: &BTreeSet<T>) -> impl Iterator<Item = &T> / pure
+    fn intersection(&self, other: &BTreeSet<T>) -> impl Iterator<Item = &T> / pure
+    fn difference(&self, other: &BTreeSet<T>) -> impl Iterator<Item = &T> / pure
+    fn symmetric_difference(&self, other: &BTreeSet<T>) -> impl Iterator<Item = &T> / pure
+}
+```
+
+**Complexity Bounds**: Same as BTreeMap for single-element operations. Set operations return lazy iterators that merge sorted sequences in O(n + m) time.
 
 ---
 
@@ -1733,6 +1971,296 @@ use std::core::Option;
 Effects lower in the hierarchy subsume those above:
 - `IO` implies `Error`, `State`, `Log` capabilities
 - `Async` implies `IO` capabilities
+
+---
+
+## 9. Implementation Notes
+
+This section provides implementation guidance for compiler writers and advanced users.
+
+### 9.1 Effect Compilation Strategy
+
+Blood effects are compiled using **evidence passing**, similar to Koka's approach. This transforms effect operations into explicit dictionary parameters.
+
+#### 9.1.1 Monomorphization
+
+For monomorphic effect usage, the compiler eliminates effect overhead entirely:
+
+```blood
+// Source code
+fn increment() -> i32 / {State<i32>} {
+    let x = get()
+    put(x + 1)
+    x
+}
+
+// After monomorphization (conceptual)
+fn increment(state: &mut i32) -> i32 {
+    let x = *state;
+    *state = x + 1;
+    x
+}
+```
+
+#### 9.1.2 Polymorphic Effects
+
+For polymorphic effect rows, evidence dictionaries are passed:
+
+```blood
+// Source with effect polymorphism
+fn map_with_effect<T, U, E>(
+    items: &[T],
+    f: fn(T) -> U / {E}
+) -> Vec<U> / {E} {
+    items.iter().map(f).collect()
+}
+
+// After evidence passing (conceptual)
+fn map_with_effect<T, U>(
+    items: &[T],
+    f: fn(T, &Evidence_E) -> U,
+    evidence: &Evidence_E
+) -> Vec<U> {
+    items.iter().map(|t| f(t, evidence)).collect()
+}
+```
+
+#### 9.1.3 Handler Compilation
+
+Handlers compile to different implementations based on their characteristics:
+
+| Handler Type | Resume Behavior | Implementation |
+|-------------|-----------------|----------------|
+| Deep, single-shot | `resume` called once | Direct continuation |
+| Deep, multi-shot | `resume` may be called multiple times | Continuation cloning |
+| Shallow | `resume` returns new handler | CPS transformation |
+| Tail-resumptive | `resume` is last operation | Loop optimization |
+
+**Tail-Resumptive Optimization**: When a handler always resumes as its final action, it compiles to a loop rather than continuation capture:
+
+```blood
+// Tail-resumptive handler
+deep handler CountOps for Log {
+    let mut count: usize = 0
+    return(x) { (x, count) }
+    op log(level, msg, _) {
+        count += 1
+        resume(())  // Tail position
+    }
+}
+
+// Compiles to (conceptual)
+fn count_ops<T>(computation: fn() -> T) -> (T, usize) {
+    let mut count = 0;
+    loop {
+        match computation.run_until_effect() {
+            Complete(x) => return (x, count),
+            Effect::Log(_, _, _, k) => {
+                count += 1;
+                computation = k(());  // Continue without stack growth
+            }
+        }
+    }
+}
+```
+
+### 9.2 Memory Management Implementation
+
+#### 9.2.1 Generational Reference Layout
+
+The 128-bit generational pointer format:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Bit 127                                                                   Bit 0 │
+├────────────────────────────────────────────┬──────────────────┬─────────────────┤
+│            Address (64 bits)               │  Generation (32) │  Metadata (32)  │
+│                                            │                  │                 │
+│  Virtual memory address                    │  Monotonic       │  Tier (2 bits)  │
+│  (NULL = 0x0000000000000000)              │  counter         │  Flags (14 bits)│
+│                                            │                  │  Type FP (16b)  │
+└────────────────────────────────────────────┴──────────────────┴─────────────────┘
+```
+
+**Generation Check Cost**: On modern x86-64, the generation check adds approximately 2-3 cycles per dereference (single cache line, branch prediction favorable).
+
+#### 9.2.2 Slot Allocator Design
+
+Each memory tier uses optimized allocators:
+
+| Tier | Allocator | Generation Increment | Deallocation |
+|------|-----------|---------------------|--------------|
+| Tier 0 (Stack) | Stack pointer | N/A (no references) | Automatic (scope exit) |
+| Tier 1 (Region) | Bump allocator per region | Per-slot | Region release |
+| Tier 2 (Persistent) | System allocator + RC | Per-slot | RC zero |
+
+**Slot Structure**:
+
+```rust
+struct Slot {
+    generation: AtomicU32,  // Current generation
+    data: MaybeUninit<T>,   // Payload
+}
+```
+
+#### 9.2.3 Collection Memory Patterns
+
+**Vec Growth**: Geometric (2x) growth with configurable initial capacity:
+
+```
+Capacity: 0 → 4 → 8 → 16 → 32 → 64 → 128 → ...
+```
+
+**HashMap Probe Sequence**: Quadratic probing with SIMD-accelerated control byte scanning:
+
+```
+probe(i) = (h + i * (i + 1) / 2) mod capacity
+```
+
+**BTreeMap Node Size**: Targeting cache-line alignment (6-12 keys per node on 64-byte cache lines).
+
+### 9.3 Effect Safety Invariants
+
+#### 9.3.1 Generation Snapshot Invariants
+
+The runtime maintains these invariants for generation snapshots:
+
+1. **Capture Completeness**: Snapshot includes all generational references in continuation
+2. **Validation Atomicity**: All generations checked before any continuation code runs
+3. **Monotonicity**: Generations only increase; snapshot gen ≤ current gen always
+
+#### 9.3.2 Linear Type Enforcement
+
+Linear values have additional compile-time tracking:
+
+```blood
+// Linear resource must be used exactly once
+fn process_file(file: File @linear) / {IO, Error<IoError>} {
+    // Compiler tracks: file must be consumed before function returns
+    let data = file.read_all()?
+    file.close()  // Consumes file - this is required
+    data
+}
+```
+
+**Compilation Strategy**: Linear values tracked through abstract interpretation; error if any path drops without use or uses more than once.
+
+### 9.4 Standard Handler Implementation Patterns
+
+#### 9.4.1 State Handler Memory
+
+The `LocalState<S>` handler stores state in handler activation:
+
+```rust
+struct LocalStateHandler<S> {
+    state: S,
+    // No heap allocation for small S (stack-allocated)
+}
+```
+
+For large state, consider `Box<S>` or passing by reference.
+
+#### 9.4.2 Async Handler Internals
+
+The async runtime uses:
+
+- **Task Queue**: Lock-free MPSC queue for ready tasks
+- **Wait Set**: HashMap<TaskId, (Future, Continuation)> for blocked tasks
+- **Executor**: Single-threaded event loop (multi-threaded optional)
+
+**Task State Machine**:
+
+```
+Created → Ready ⟷ Running → Completed
+              ↘ Waiting ↗
+```
+
+#### 9.4.3 NonDet Handler Search Strategies
+
+| Handler | Strategy | Memory | Use Case |
+|---------|----------|--------|----------|
+| `FirstSolution` | DFS | O(depth) stack | Find any solution |
+| `AllSolutions` | DFS + collection | O(solutions) | Enumerate all |
+| `BoundedSearch` | DFS + depth limit | O(max_depth) | Prevent infinite |
+| `MonteCarloSampler` | Random | O(1) | Probabilistic |
+
+### 9.5 FFI Integration
+
+For C interop, effects must be explicitly handled at the boundary:
+
+```blood
+#[ffi]
+extern "C" fn callback_wrapper(
+    user_fn: fn(i32) -> i32 / {Error<E>},
+    arg: i32
+) -> i32 {
+    // Must handle Error effect before crossing FFI boundary
+    with PropagateError handle {
+        match user_fn(arg) {
+            Ok(v) => v,
+            Err(_) => -1,  // Error code for C
+        }
+    }
+}
+```
+
+See [FFI.md](./FFI.md) for complete FFI specification.
+
+### 9.6 Performance Guidelines
+
+#### 9.6.1 Effect Overhead Guidelines
+
+| Scenario | Overhead | Mitigation |
+|----------|----------|------------|
+| Monomorphic effects | ~0% | Full specialization |
+| Polymorphic (known at compile) | ~5-10% | Evidence inlining |
+| Polymorphic (unknown) | ~15-30% | Evidence dictionary |
+| Multi-shot handlers | O(continuation size) | Avoid in hot paths |
+
+#### 9.6.2 Collection Selection Guide
+
+| Need | Use | Rationale |
+|------|-----|-----------|
+| Random access | `Vec<T>` | O(1) indexing, cache-friendly |
+| Key-value lookup | `HashMap<K, V>` | O(1) expected |
+| Ordered iteration | `BTreeMap<K, V>` | O(log n) ops, sorted keys |
+| FIFO queue | `VecDeque<T>` | O(1) both ends |
+| Priority queue | `BinaryHeap<T>` | O(log n) push/pop |
+| Set membership | `HashSet<T>` | O(1) expected |
+| Ordered set ops | `BTreeSet<T>` | Efficient range queries |
+
+#### 9.6.3 Memory Tier Selection
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Does value escape current scope?                                │
+│   NO → Tier 0 (Stack)                                           │
+│   YES ↓                                                         │
+├─────────────────────────────────────────────────────────────────┤
+│ Does value escape current region?                               │
+│   NO → Tier 1 (Region) with generational references            │
+│   YES ↓                                                         │
+├─────────────────────────────────────────────────────────────────┤
+│ Is value shared across fibers/threads?                          │
+│   NO → Tier 1 (Region) with promotion                          │
+│   YES → Tier 2 (Persistent) with reference counting            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Appendix B: Collection Selection Quick Reference
+
+| If you need... | Use | Not |
+|----------------|-----|-----|
+| A growable array | `Vec<T>` | Array |
+| A stack | `Vec<T>` with `push`/`pop` | VecDeque |
+| A queue | `VecDeque<T>` | Vec |
+| A set | `HashSet<T>` (unordered) or `BTreeSet<T>` (ordered) | Vec with dedup |
+| A map | `HashMap<K, V>` (unordered) or `BTreeMap<K, V>` (ordered) | Vec of tuples |
+| Sorted data with range queries | `BTreeMap`/`BTreeSet` | HashMap/HashSet |
+| Maximum/minimum tracking | `BinaryHeap<T>` | Sorted Vec |
+| Double-ended operations | `VecDeque<T>` | Vec |
 
 ---
 

@@ -977,6 +977,7 @@ For non-tail-resumptive handlers, continuations are captured:
 | **Fiber stack size** | Growable (8KB initial) | Balance memory vs growth cost |
 | **WASM backend priority** | Phase 7 | Focus on native first |
 | **Continuation representation** | Segmented stacks | Best multi-shot performance |
+| **JIT vs AOT** | AOT-first with optional JIT | Systems programming alignment, predictable performance (see DECISIONS.md ADR-015) |
 
 ### 14.2 Ecosystem Decisions (Resolved)
 
@@ -1004,15 +1005,341 @@ For non-tail-resumptive handlers, continuations are captured:
 
 | Question | Options | Status |
 |----------|---------|--------|
-| **JIT vs AOT** | JIT only / AOT only / Both | JIT for development, AOT for production (tentative) |
 | **Debug info format** | DWARF / CodeView / Custom | DWARF (tentative) |
 | **C++ interop** | Via C / Direct Itanium ABI | Via C (simpler) |
 
-### 15.2 Future Research
+### 15.2 Resolved Research Questions
 
-- **Effect polymorphism erasure** — Can effect rows be erased at runtime?
-- **Algebraic effect inference** — Can we infer effect signatures?
-- **Cross-codebase hot-swap** — Sync and swap across distributed systems
+The following research questions have been resolved based on literature review and analysis of existing implementations.
+
+#### Effect Polymorphism Erasure
+
+**Question**: Can effect rows be erased at runtime?
+
+**Resolution**: **Yes**, through monomorphization and evidence passing.
+
+**Analysis** (based on [Koka](https://koka-lang.github.io/koka/doc/book.html) and [Type-Directed Compilation](https://dl.acm.org/doi/10.1145/3093333.3009872)):
+
+1. **Compile-time usage**: Effect types are used for:
+   - Type checking (ensuring handlers exist)
+   - Effect inference (propagating effect requirements)
+   - Optimization decisions (tail-resumptive detection)
+
+2. **Runtime erasure**: After type checking, effect information is erased:
+   - Monomorphization specializes polymorphic functions to concrete effect rows
+   - Evidence passing replaces effect polymorphism with runtime handler lookup
+   - No runtime representation of effect types needed
+
+3. **Blood implementation**:
+   ```
+   // Source (polymorphic)
+   fn map<A, B, E>(xs: List<A>, f: fn(A) -> B / E) -> List<B> / E
+
+   // After monomorphization (effect-erased)
+   fn map_List_i32_String_IO(xs: List<i32>, f: fn(i32) -> String, ev: Evidence) -> List<String>
+   ```
+
+4. **Residual runtime cost**: Only evidence vector lookup (~O(1) with indexing).
+
+**Decision**: Blood erases effect types at runtime via monomorphization. Effect polymorphism is a compile-time abstraction only.
+
+#### Algebraic Effect Inference
+
+**Question**: Can we infer effect signatures automatically?
+
+**Resolution**: **Yes**, Blood will support automatic effect inference with explicit annotation override.
+
+**Analysis** (based on [Inferring Algebraic Effects](https://lmcs.episciences.org/1004/pdf) by Pretnar):
+
+1. **Inference algorithm**: Standard Hindley-Milner extended with effect rows:
+   - Effect variables introduced for unknown effects
+   - Effect unification during type inference
+   - Principal effect types computed
+
+2. **Koka's approach**: Fully automatic inference:
+   - No effect annotations required
+   - `total` (pure) inferred when no effects used
+   - Effect signatures displayed in IDE/documentation
+
+3. **Blood's approach**: Inference with optional explicit signatures:
+   ```blood
+   // Inferred: fn read_file(path: Path) -> String / {IO, Error<IOError>}
+   fn read_file(path: Path) -> String {
+       let f = open(path)?     // IO, Error inferred
+       f.read_to_string()?     // IO, Error inferred
+   }
+
+   // Explicit (for documentation or restriction)
+   fn pure_compute(x: i32) -> i32 / pure {
+       x * 2  // Compiler verifies purity
+   }
+   ```
+
+4. **IDE integration**: Effect signatures shown in hover/completion even when inferred.
+
+**Decision**: Blood infers effect signatures by default. Explicit annotations are optional but recommended for public APIs.
+
+### 15.3 Future Research (Deferred)
+
+- **Cross-codebase hot-swap** — Sync and swap across distributed systems (Phase 6+)
+- **Effect handler fusion** — Combine adjacent handlers for performance (optimization research)
+- **Gradual effect typing** — Interop with untyped FFI code (FFI enhancement)
+
+---
+
+## 16. Novel Mechanisms Prototype Plan
+
+Blood contains several novel mechanisms with no prior implementation. This section defines a spike/prototype plan to validate these mechanisms before full implementation.
+
+### 16.1 Novel Mechanisms Overview
+
+| Mechanism | Novelty | Risk | Validation Priority |
+|-----------|---------|------|---------------------|
+| **Generation Snapshots** | No prior art for effect continuations | High | P0 (Critical) |
+| **Snapshot + Linear Types** | Novel interaction | Medium | P1 (High) |
+| **Effects + Generations** | Novel safety model | High | P0 (Critical) |
+| **Region Suspension** | Deferred deallocation for effects | Medium | P1 (High) |
+| **Reserved Generation Values** | Overflow without collision | Low | P2 (Medium) |
+
+### 16.2 Prototype Architecture
+
+The prototype validates novel mechanisms in isolation using Rust (the bootstrap language), without building a full compiler.
+
+```
+blood-prototype/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs
+│   ├── generation/           # Generation snapshot prototype
+│   │   ├── mod.rs
+│   │   ├── pointer.rs        # 128-bit fat pointer simulation
+│   │   ├── slot.rs           # Memory slot with generation
+│   │   └── snapshot.rs       # Snapshot capture/validate
+│   │
+│   ├── effects/              # Effect handler prototype
+│   │   ├── mod.rs
+│   │   ├── handler.rs        # Deep/shallow handlers
+│   │   ├── continuation.rs   # Captured continuations
+│   │   └── evidence.rs       # Evidence passing simulation
+│   │
+│   ├── integration/          # Novel interaction tests
+│   │   ├── mod.rs
+│   │   ├── snapshot_resume.rs    # Generation snapshot + resume
+│   │   ├── linear_effects.rs     # Linear types + single-shot
+│   │   └── region_suspend.rs     # Region + effect suspension
+│   │
+│   └── benchmarks/           # Performance validation
+│       ├── mod.rs
+│       ├── snapshot_overhead.rs
+│       └── handler_cost.rs
+│
+└── tests/
+    ├── safety_tests.rs       # Property-based safety tests
+    └── stress_tests.rs       # Concurrent stress tests
+```
+
+### 16.3 Spike 1: Generation Snapshots + Effect Resume (P0)
+
+**Goal**: Validate that generation snapshots correctly detect stale references on continuation resume.
+
+**Implementation**:
+
+```rust
+// Simplified prototype structure
+
+struct Slot {
+    generation: u32,
+    data: Option<Box<dyn Any>>,
+}
+
+struct GenPointer {
+    address: usize,      // Slot index
+    generation: u32,     // Captured at creation
+}
+
+struct Snapshot {
+    entries: Vec<(usize, u32)>,  // (address, generation) pairs
+}
+
+struct Continuation {
+    snapshot: Snapshot,
+    // ... closure data
+}
+
+impl Continuation {
+    fn validate(&self, slots: &[Slot]) -> Result<(), StaleRef> {
+        for (addr, gen) in &self.snapshot.entries {
+            if slots[*addr].generation != *gen {
+                return Err(StaleRef { addr: *addr });
+            }
+        }
+        Ok(())
+    }
+}
+```
+
+**Test Scenarios**:
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Resume without deallocation | All refs valid, resume succeeds |
+| Resume after single dealloc | StaleReference for freed ref |
+| Resume after realloc to same slot | StaleReference (gen mismatch) |
+| Multi-shot resume, first valid | First succeeds, second may fail |
+| Nested handler resume | Inner snapshot validated first |
+
+**Success Criteria**:
+- [ ] 100% detection of stale references (no false negatives)
+- [ ] No false positives (valid refs never rejected)
+- [ ] Snapshot overhead < 100ns per captured reference
+- [ ] Validation overhead < 50ns per reference checked
+
+### 16.4 Spike 2: Effects + Linear Types (P1)
+
+**Goal**: Validate that linear values cannot be captured in multi-shot handlers.
+
+**Implementation**:
+
+```rust
+#[derive(Clone, Copy, PartialEq)]
+enum Linearity {
+    Unrestricted,  // Can copy freely
+    Affine,        // Use at most once
+    Linear,        // Use exactly once
+}
+
+struct TypedValue {
+    linearity: Linearity,
+    value: Box<dyn Any>,
+    used: bool,
+}
+
+enum HandlerKind {
+    Deep,          // Multi-shot (persists across resumes)
+    Shallow,       // Single-shot (consumed on resume)
+}
+
+fn capture_in_continuation(
+    values: &[TypedValue],
+    handler: HandlerKind,
+) -> Result<Continuation, LinearityError> {
+    for v in values {
+        if v.linearity == Linearity::Linear && handler == HandlerKind::Deep {
+            return Err(LinearityError::LinearInMultiShot);
+        }
+    }
+    // ... create continuation
+}
+```
+
+**Test Scenarios**:
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Linear in shallow handler | Allowed |
+| Linear in deep handler | Rejected at capture |
+| Affine in deep handler | Allowed (at-most-once) |
+| Linear returned from handler | Must be used in handler body |
+
+### 16.5 Spike 3: Region Suspension (P1)
+
+**Goal**: Validate that regions with suspended references defer deallocation correctly.
+
+**Implementation**:
+
+```rust
+struct Region {
+    id: RegionId,
+    slots: Vec<Slot>,
+    suspend_count: AtomicU32,
+    state: RegionState,
+}
+
+enum RegionState {
+    Active,
+    PendingDeallocation,
+    Deallocated,
+}
+
+impl Region {
+    fn try_deallocate(&mut self) -> bool {
+        if self.suspend_count.load(Ordering::Acquire) > 0 {
+            self.state = RegionState::PendingDeallocation;
+            false
+        } else {
+            self.deallocate_now();
+            true
+        }
+    }
+
+    fn on_continuation_complete(&mut self) {
+        let prev = self.suspend_count.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 && self.state == RegionState::PendingDeallocation {
+            self.deallocate_now();
+        }
+    }
+}
+```
+
+**Test Scenarios**:
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Exit region with no suspended refs | Immediate deallocation |
+| Exit region with 1 suspended ref | Deferred until resume |
+| Exit region with 2 suspended refs | Deferred until both resume |
+| Nested regions with suspension | Inner deferred, outer waits |
+
+### 16.6 Spike 4: Reserved Generation Values (P2)
+
+**Goal**: Validate generation overflow handling without collision with reserved values.
+
+**Test Scenarios**:
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Generation reaches OVERFLOW_GUARD | Slot promoted to Tier 3 |
+| Rapid alloc/free cycles | Promotion before overflow |
+| PERSISTENT_MARKER never from increment | Invariant preserved |
+
+### 16.7 Prototype Timeline
+
+| Week | Activities | Deliverables |
+|------|------------|--------------|
+| 1 | Setup, Spike 1 implementation | Generation snapshot prototype |
+| 2 | Spike 1 tests, Spike 2 implementation | Snapshot tests passing |
+| 3 | Spike 2 tests, Spike 3 implementation | Linear+effects tests passing |
+| 4 | Spike 3 tests, Spike 4, integration | Region suspension tests, full integration |
+| 5 | Performance benchmarks, documentation | Benchmark report, lessons learned |
+
+### 16.8 Success Criteria
+
+The prototype validates Blood's novel mechanisms if:
+
+1. **Safety**: All property-based tests pass (100+ random scenarios per spike)
+2. **Correctness**: No stale reference escapes detection
+3. **Performance**: Overhead within design targets (see §16.3)
+4. **Composability**: Mechanisms work correctly when combined
+5. **Stress**: No failures under concurrent stress testing (10K+ operations)
+
+### 16.9 Risk Mitigation
+
+| Risk | Mitigation |
+|------|------------|
+| Snapshot overhead too high | Profile, consider lazy validation |
+| Region suspension deadlock | Add timeout, cycle detection |
+| Linear escape in edge case | Expand test coverage, formal model |
+| Performance cliff in combination | Identify hot paths, optimize |
+
+### 16.10 Lessons Learned Template
+
+After prototype completion, document:
+
+1. **What worked well**: Design decisions validated
+2. **What needed adjustment**: Changes from original spec
+3. **Performance insights**: Actual vs. estimated overhead
+4. **Spec updates needed**: Amendments to specification documents
+5. **Implementation notes**: Guidance for full implementation
 
 ---
 

@@ -1023,7 +1023,52 @@ Based on Java HotSpot research (validated) and theoretical extension:
 | Escape analysis (inter-procedural) | O(n²) worst case | May require optimization levels |
 | Type stability checking | O(methods × types) | Potentially expensive |
 | Effect inference | O(n) | Linear in program size |
-| Generation snapshot analysis | O(refs × effects) | Novel, complexity TBD |
+| Generation snapshot analysis | O(R × H) | See detailed analysis below |
+
+#### 11.6.1 Generation Snapshot Complexity Analysis
+
+**Variables**:
+- `R` = number of generational references in scope at effect operation
+- `H` = handler nesting depth
+- `L` = average number of references per continuation (liveness-filtered)
+
+**Compile-Time Complexity**:
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Liveness analysis | O(n) per function | Standard dataflow, cacheable |
+| Snapshot point detection | O(effects) | Each `perform` is a snapshot point |
+| Reference set computation | O(R) per snapshot | Set of live refs at that point |
+| Total per function | O(n + R × effects) | Dominated by liveness analysis |
+
+**Runtime Complexity**:
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Snapshot capture | O(L) | Copy L (addr, gen) pairs |
+| Snapshot validation | O(L) | Check L generations |
+| Full resume cost | O(L × H) | Validate at each handler level |
+
+**Practical Bounds** (unvalidated estimates):
+
+| Metric | Typical | Worst Case | Mitigation |
+|--------|---------|------------|------------|
+| L (refs per snapshot) | 5-20 | 100+ | Liveness filtering |
+| H (handler depth) | 2-5 | 10+ | Flatten handlers |
+| Capture overhead | <1μs | 10μs | Batch capture |
+| Validation overhead | <500ns | 5μs | Lazy validation |
+
+**Optimization Strategies**:
+
+1. **Liveness filtering**: Only include references that may be dereferenced after resume (reduces L by 50-80% in typical code).
+
+2. **Snapshot sharing**: Nested handlers share prefix of snapshot, avoiding redundant copies.
+
+3. **Lazy validation**: Defer validation to first dereference (amortizes cost, catches errors at use site).
+
+4. **Generation caching**: Hot references have generation cached in registers after first check.
+
+**Complexity Class**: Generation snapshot operations are **O(L)** where L is bounded by the number of live references at the snapshot point. With liveness filtering, L is typically much smaller than the total references in scope.
 
 **Recommendation**: Blood may offer optimization levels trading compile time for runtime performance:
 - `-O0`: No escape analysis, all heap allocations use generation checks
@@ -1033,22 +1078,106 @@ Based on Java HotSpot research (validated) and theoretical extension:
 
 ### 11.7 Benchmarking Plan
 
-Before Blood 1.0, the following benchmarks must validate performance claims:
+Before Blood 1.0, the following benchmarks must validate performance claims.
 
-1. **Micro-benchmarks**
-   - Generation check overhead (cycles per dereference)
-   - Snapshot capture/validation cost
-   - Effect handler installation/invocation
+#### 11.7.1 Performance Targets
 
-2. **Macro-benchmarks**
-   - Memory-intensive algorithms (sorting, graph traversal)
-   - Allocation-heavy workloads
-   - Effect-heavy concurrent code
+| Category | Metric | Target | Acceptable | Unacceptable |
+|----------|--------|--------|------------|--------------|
+| **Generation check** | Cycles per deref | 1-2 | 3-5 | >10 |
+| **Snapshot capture** | ns per reference | <100 | <500 | >1000 |
+| **Snapshot validation** | ns per reference | <50 | <200 | >500 |
+| **Handler installation** | ns per handler | <100 | <500 | >1000 |
+| **Handler invocation** | ns per operation | <50 | <200 | >500 |
+| **Evidence lookup** | ns per lookup | <10 | <50 | >100 |
+| **128-bit pointer overhead** | % vs 64-bit | <10% | <20% | >30% |
 
-3. **Comparative benchmarks**
-   - vs. Rust (borrow checking baseline)
-   - vs. Go (GC baseline)
-   - vs. C (unsafe baseline)
+#### 11.7.2 Micro-Benchmarks
+
+| Benchmark | Measures | Baseline Comparison |
+|-----------|----------|---------------------|
+| `gen_check_hot` | Generation check in tight loop | Raw pointer deref |
+| `gen_check_cold` | Generation check with cache miss | Memory bandwidth |
+| `snapshot_capture_N` | Capture N references | N × single capture |
+| `snapshot_validate_N` | Validate N references | N × single validate |
+| `handler_install` | Install effect handler | Function call overhead |
+| `handler_invoke` | Invoke effect operation | Virtual call |
+| `evidence_pass` | Evidence vector lookup | Array index |
+| `rc_increment` | Atomic refcount increment | Non-atomic increment |
+| `rc_decrement` | Atomic refcount decrement | Non-atomic decrement |
+| `tier_promotion` | Tier 1 → Tier 3 promotion | Allocation baseline |
+
+#### 11.7.3 Macro-Benchmarks
+
+| Benchmark | Category | Description |
+|-----------|----------|-------------|
+| `quicksort` | Compute | In-place sorting, minimal allocation |
+| `mergesort` | Allocation | Allocation-heavy sorting |
+| `bfs_graph` | Pointer-heavy | Breadth-first search on graph |
+| `json_parse` | Mixed | Parse JSON, build AST |
+| `http_server` | Effect-heavy | Handle concurrent HTTP requests |
+| `fibonacci_effect` | Effect | Recursive with State effect |
+| `generator_sum` | Shallow handler | Sum values from generator |
+| `async_fanout` | Concurrency | Spawn N concurrent tasks |
+| `ring_buffer` | Memory | Circular buffer operations |
+| `btree_ops` | Balanced | B-tree insert/lookup/delete |
+
+#### 11.7.4 Comparative Benchmarks
+
+| Benchmark Suite | Languages | Purpose |
+|-----------------|-----------|---------|
+| **Computer Language Benchmarks Game** | Blood, Rust, Go, C | Industry standard comparison |
+| **Are We Fast Yet** | Blood, Java, JavaScript | Dynamic language comparison |
+| **Custom Effect Suite** | Blood, Koka, OCaml 5 | Effect system comparison |
+
+**Comparison Targets**:
+
+| vs. Language | Acceptable Overhead | Notes |
+|--------------|---------------------|-------|
+| **C (unsafe)** | <50% | Safety overhead acceptable |
+| **Rust** | <20% | Similar safety model |
+| **Go** | <10% or faster | GC baseline |
+| **Koka** | Comparable | Effect system baseline |
+
+#### 11.7.5 Benchmark Infrastructure
+
+```
+benches/
+├── micro/
+│   ├── generation.rs       # Generation check benchmarks
+│   ├── snapshot.rs         # Snapshot capture/validate
+│   ├── effects.rs          # Handler installation/invocation
+│   └── memory.rs           # RC, allocation, tiers
+│
+├── macro/
+│   ├── algorithms/         # Sorting, searching, etc.
+│   ├── data_structures/    # Trees, graphs, etc.
+│   ├── effects/            # Effect-heavy workloads
+│   └── concurrent/         # Multi-fiber benchmarks
+│
+├── comparative/
+│   ├── rust/               # Equivalent Rust implementations
+│   ├── go/                 # Equivalent Go implementations
+│   └── c/                  # Equivalent C implementations
+│
+└── criterion.toml          # Benchmark configuration
+```
+
+#### 11.7.6 Continuous Benchmarking
+
+- **CI Integration**: Benchmarks run on every PR
+- **Regression Detection**: >5% slowdown blocks merge
+- **Historical Tracking**: Performance graphed over time
+- **Platform Matrix**: Linux x86-64, macOS ARM64, Windows x86-64
+
+#### 11.7.7 Milestone Gates
+
+| Milestone | Required Benchmarks | Gate Criteria |
+|-----------|---------------------|---------------|
+| Phase 2 Complete | All micro-benchmarks | Within 2x of target |
+| Phase 3 Complete | + Macro-benchmarks | Within 1.5x of target |
+| Phase 4 Complete | + Comparative | Meet comparison targets |
+| 1.0 Release | Full suite | All targets met |
 
 ### 11.8 Performance Anti-Patterns
 

@@ -361,6 +361,92 @@ This combination is unprecedented and required formal analysis of interaction sa
 
 ---
 
+## ADR-015: AOT-First with Optional JIT Compilation
+
+**Status**: Accepted
+
+**Context**: Blood must choose between Ahead-of-Time (AOT) and Just-in-Time (JIT) compilation strategies. This affects startup time, peak performance, memory usage, and development experience.
+
+| Factor | AOT | JIT |
+|--------|-----|-----|
+| **Startup time** | Fast (pre-compiled) | Slow (compile at runtime) |
+| **Peak performance** | Good | Excellent (runtime profiling) |
+| **Memory usage** | Lower | Higher (compiler in memory) |
+| **Predictability** | High | Variable (warmup phase) |
+| **Debugging** | Straightforward | Complex (multiple code versions) |
+| **Deployment** | Simple binary | Requires runtime |
+
+**Decision**: Blood uses **AOT compilation as the primary strategy** with optional JIT for development and specific use cases.
+
+### Compilation Modes
+
+| Mode | Use Case | Implementation |
+|------|----------|----------------|
+| `blood build` | Production deployment | Full AOT via LLVM |
+| `blood run` (default) | Development | AOT with fast compilation |
+| `blood run --jit` | Performance exploration | Optional JIT mode (Phase 5+) |
+| `blood repl` | Interactive development | Interpreter + incremental AOT |
+
+**Rationale**:
+
+1. **Systems programming alignment**: Blood targets safety-critical systems where predictable performance and minimal runtime are essential. AOT provides deterministic startup and no warmup variance.
+
+2. **Effect system compatibility**: Evidence passing compilation (see ROADMAP.md §13) works naturally with AOT. Effect handlers compile to direct calls in monomorphic code, avoiding JIT complexity.
+
+3. **Content-addressed synergy**: Blood's content-addressed design enables perfect incremental AOT compilation. Function hashes enable aggressive caching—a JIT benefit achieved at compile time.
+
+4. **Embedded/resource-constrained targets**: AOT produces standalone binaries without runtime overhead, suitable for embedded systems and containers.
+
+5. **Development experience preserved**: Fast incremental AOT compilation (~100ms for typical changes) provides JIT-like iteration speed. The REPL uses interpretation for immediate feedback.
+
+6. **Optional JIT for specific needs**: Some workloads benefit from runtime profiling (e.g., generic algorithms with unpredictable type distributions). JIT mode available when explicitly requested.
+
+### AOT Optimization Strategy
+
+```
+Source → Parse → Type Check → Effect Inference → Monomorphize
+       → LLVM IR → Optimize → Native Code
+
+Optimization levels:
+  -O0: Debug (no optimization, fast compile)
+  -O1: Basic (local optimizations)
+  -O2: Standard (full optimization, default for release)
+  -O3: Aggressive (LTO, PGO-guided if profile available)
+```
+
+### Profile-Guided AOT
+
+Blood supports AOT with profiling data, achieving JIT-like optimization without runtime overhead:
+
+```bash
+# Generate profile
+$ blood build --profile
+$ ./my_program < typical_input.txt
+$ blood build --use-profile=my_program.profdata -O3
+```
+
+**Consequences**:
+
+- Predictable, fast startup for all Blood programs
+- No runtime compiler overhead in production
+- Incremental compilation provides fast development iteration
+- JIT available as opt-in for performance exploration
+- Profile-guided optimization bridges the AOT/JIT performance gap
+- Simpler debugging (one code version at a time)
+
+**Implementation Notes**:
+
+- Phase 1-4: AOT only via LLVM backend
+- Phase 5+: Optional JIT mode using Cranelift or LLVM MCJIT
+- REPL: Tree-walking interpreter for immediate feedback, AOT for defined functions
+
+**References**:
+- [JIT vs AOT Trade-offs](https://www.infoq.com/presentations/jit-aot-tradeoffs/) (InfoQ)
+- [GraalVM Native Image](https://www.graalvm.org/native-image/) — AOT for JVM languages
+- [Koka Compilation](https://koka-lang.github.io/koka/doc/book.html) — AOT with evidence passing
+
+---
+
 ## Decision Status Legend
 
 - **Proposed**: Under discussion

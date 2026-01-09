@@ -1787,9 +1787,152 @@ fn share_config() {
 5. Pointers are created with `slot.generation`, never with reserved values
 6. Therefore, no valid pointer has reserved generation ∎
 
+#### Theorem 10: Region Hierarchy Correctness
+
+**Statement**: If region `r₂` is nested within region `r₁`, then `r₂` is always deallocated before `r₁`.
+
+**Definitions**:
+- Let `regions(F)` be the set of active regions for fiber `F`
+- Let `parent(r)` denote the parent region of `r` (or `⊥` if root)
+- Let `depth(r)` = 0 if `parent(r) = ⊥`, else `1 + depth(parent(r))`
+- Let `dealloc_time(r)` be the logical timestamp when `r` is deallocated
+
+**Proof**:
+1. Regions are allocated on a per-fiber stack with LIFO semantics
+2. `ENTER_REGION` pushes a new region onto the fiber's region stack
+3. `EXIT_REGION_SCOPE` pops from the region stack (after suspend_count check)
+4. By LIFO property: if `depth(r₂) > depth(r₁)`, then `r₂` was pushed after `r₁`
+5. LIFO deallocation ensures `r₂` is popped before `r₁`
+6. Therefore, `dealloc_time(r₂) < dealloc_time(r₁)` ∎
+
+**Corollary**: References from child to parent region are always valid while the child exists.
+
+**Proof**: Parent outlives child by Theorem 10, so parent's contents are valid during child's lifetime ∎
+
+#### Theorem 11: Reference Counting Correctness (Concurrent)
+
+**Statement**: For any Tier 3 object `o`, `refcount(o) = 0` implies `o` is unreachable from all roots.
+
+**Definitions**:
+- Let `R` be the set of all roots (stack, globals, suspended continuations)
+- Let `reachable(R)` be the transitive closure of objects reachable from `R`
+- Let `refcount(o)` be the atomic reference count of object `o`
+
+**Invariants** (maintained by all operations):
+- **INV-RC1**: `refcount(o) ≥ |{r ∈ R : o ∈ reachable({r})}|` (count ≥ root refs)
+- **INV-RC2**: `refcount(o) ≥ |{p : p.field = o}|` (count ≥ field refs)
+- **INV-RC3**: All refcount modifications are atomic (fetch_add, fetch_sub)
+
+**Proof**:
+
+*Part A: Increment correctness*
+1. `RC_INCREMENT(o)` performs `atomic_fetch_add(&o.refcount, 1)`
+2. Called before creating a new reference to `o`
+3. Atomicity ensures no lost increments under concurrency
+4. INV-RC1 and INV-RC2 preserved ✓
+
+*Part B: Decrement correctness*
+1. `RC_DECREMENT(o)` performs `old = atomic_fetch_sub(&o.refcount, 1)`
+2. Called after removing a reference to `o`
+3. If `old == 1`, the reference being removed was the last
+4. Atomicity ensures no double-decrements
+
+*Part C: Zero implies unreachable*
+1. Assume `refcount(o) = 0` but `o ∈ reachable(R)` (contradiction hypothesis)
+2. If `o ∈ reachable(R)`, there exists a path from some root `r` to `o`
+3. By INV-RC1 and INV-RC2, each edge contributes to refcount
+4. At least one reference exists → `refcount(o) ≥ 1`
+5. Contradiction with `refcount(o) = 0`
+6. Therefore, `refcount(o) = 0` implies `o ∉ reachable(R)` ∎
+
+**Concurrent Safety Argument** (based on [Bacon-Rajan 2001](https://pages.cs.wisc.edu/~cymen/misc/interests/Bacon01Concurrent.pdf)):
+- All refcount operations use acquire-release semantics
+- Deferred decrement queue ensures no premature deallocation
+- Memory fences establish happens-before ordering
+- Read-Copy-Update (RCU) pattern for root set modification
+
+#### Theorem 12: Cycle Collection Completeness
+
+**Statement**: If a set of Tier 3 objects forms a garbage cycle (unreachable from roots), the cycle collection algorithm will eventually collect all objects in the cycle.
+
+**Definitions**:
+- Let `C = {o₁, o₂, ..., oₙ}` be a cycle where `o₁ → o₂ → ... → oₙ → o₁`
+- Let `external_refs(C) = |{r : r ∉ C ∧ r.field ∈ C}|` (refs into cycle from outside)
+- Garbage cycle: `external_refs(C) = 0` and `C ∩ reachable(R) = ∅`
+
+**Algorithm Properties**:
+1. `COLLECT_CYCLES` is triggered by memory pressure, timer, or explicit call
+2. Mark phase: traverse from all roots, mark reachable objects
+3. Sweep phase: deallocate all unmarked Tier 3 objects
+
+**Proof**:
+
+*Part A: Garbage cycles are unmarked*
+1. Let `C` be a garbage cycle with `C ∩ reachable(R) = ∅`
+2. Mark phase only marks objects reachable from roots `R`
+3. By definition, no object in `C` is reachable from `R`
+4. Therefore, no object in `C` is marked
+
+*Part B: All unmarked objects are swept*
+1. Sweep phase iterates all Tier 3 slots
+2. For each slot `s`, if `s ∉ marked`, `FORCE_DROP(s)` is called
+3. All objects in `C` are in Tier 3 (cycles only exist in Tier 3)
+4. All objects in `C` are unmarked (Part A)
+5. Therefore, all objects in `C` are swept
+
+*Part C: Eventual collection*
+1. Detection triggers ensure `COLLECT_CYCLES` runs periodically
+2. Memory pressure trigger: when heap exceeds threshold
+3. Timer trigger: configurable periodic collection
+4. Each run collects all current garbage cycles
+5. Therefore, any garbage cycle is eventually collected ∎
+
+**Termination Guarantee**:
+- Mark phase terminates: finite object graph, each object marked at most once
+- Sweep phase terminates: finite number of Tier 3 slots
+
+#### Theorem 13: Concurrent Cycle Collection Safety
+
+**Statement**: Concurrent cycle collection does not collect live objects, even when effect handlers are actively capturing and resuming continuations.
+
+**Definitions**:
+- Let `snap_t` be the snapshot of suspended continuations at time `t`
+- Let `roots_t = globals ∪ stacks ∪ snap_t`
+- Let `live_t = reachable(roots_t)`
+
+**Invariants**:
+- **INV-CC1**: Collection uses `snap_t` captured atomically under read lock
+- **INV-CC2**: Objects added to roots after `snap_t` are protected until next cycle
+- **INV-CC3**: Objects in `live_t` are never collected in cycle starting at `t`
+
+**Proof**:
+
+*Part A: Snapshot consistency*
+1. `SAFE_CYCLE_COLLECTION` acquires `effect_handlers_lock.read()`
+2. `snapshot_all_continuations()` captures all suspended continuations atomically
+3. Released lock allows handlers to resume/capture, but `snap_t` is immutable
+4. Marking uses consistent `snap_t`, not a changing view
+
+*Part B: Live objects protected*
+1. `roots_t` includes all suspended continuation refs at time `t`
+2. Mark phase marks all objects in `reachable(roots_t)`
+3. Any object reachable from a suspended continuation is marked
+4. Sweep only collects unmarked objects
+5. Live objects (in `live_t`) are marked, thus not swept
+
+*Part C: Concurrent handler safety*
+1. Handler captures new continuation `κ` after `snap_t`: `κ ∉ snap_t`
+2. Objects only in `κ` may be unmarked in current cycle
+3. However, `κ` holds strong references (refcount > 0) to its objects
+4. RC prevents deallocation even if unmarked by cycle collector
+5. Next cycle includes `κ` in snapshot, objects properly marked
+6. Therefore, no premature collection occurs ∎
+
+**Liveness**: New garbage cycles created after `snap_t` are collected in subsequent cycle.
+
 ### 9.2 Proof Obligations
 
-The following require formal proof (e.g., in Coq/Agda):
+The following require formal proof (e.g., in Coq/Agda). All theorems now have proof sketches; mechanized verification is recommended for high-complexity proofs.
 
 | Theorem | Status | Complexity | Section |
 |---------|--------|------------|---------|
@@ -1802,10 +1945,24 @@ The following require formal proof (e.g., in Coq/Agda):
 | Snapshot Liveness Soundness | Sketch provided | Medium | 9.1, 6.4.1 |
 | Cycle Collection + Effects | Sketch provided | Medium | 9.1, 8.5 |
 | Reserved Generation Correctness | Sketch provided | Low | 9.1, 4.5 |
-| Region Hierarchy | Not yet proven | Low | 7.3 |
-| RC Correctness | Not yet proven | High (concurrency) | 8.3 |
-| Cycle Collection Completeness | Not yet proven | High | 8.5 |
-| Concurrent Cycle Collection | Not yet proven | High | 8.5.3 |
+| Region Hierarchy | Sketch provided | Low | 9.1 |
+| RC Correctness (Concurrent) | Sketch provided | High (concurrency) | 9.1, 8.3 |
+| Cycle Collection Completeness | Sketch provided | High | 9.1, 8.5 |
+| Concurrent Cycle Collection | Sketch provided | High | 9.1, 8.5.3 |
+
+**Mechanized Verification Recommendations**:
+
+| Theorem | Recommended Tool | Priority |
+|---------|------------------|----------|
+| RC Correctness (Concurrent) | [Verus](https://github.com/verus-lang/verus) or Iris/Coq | High |
+| Concurrent Cycle Collection | Iris/Coq with concurrent separation logic | High |
+| Cycle Collection Completeness | Coq/Agda | Medium |
+| Region Hierarchy | Agda (straightforward induction) | Low |
+
+**References for Mechanized Proofs**:
+- Verus: Rust verification framework ([SOSP 2024](https://dl.acm.org/doi/10.1145/3694715.3695952))
+- Iris: Higher-order concurrent separation logic (MPI-SWS)
+- [Bacon-Rajan 2001](https://pages.cs.wisc.edu/~cymen/misc/interests/Bacon01Concurrent.pdf): Concurrent cycle collection proofs
 
 ### 9.3 What's Established vs. Novel
 
