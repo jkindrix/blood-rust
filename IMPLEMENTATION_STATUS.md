@@ -55,11 +55,11 @@ Hello, World!
 | Handler syntax | **Complete** | `effects/lowering.rs` - `HandlerInfo` structure |
 | Effect row unification | **Complete** | `typeck/effect.rs` - row polymorphism support |
 | Evidence passing | **Complete** | `effects/evidence.rs` - translation context |
-| `perform` operations | Pending | WI-014: Requires codegen integration |
-| `resume` in handlers | Pending | WI-015: Requires continuation capture |
+| `perform` operations | **Complete** | `codegen/context.rs` - `compile_perform` |
+| `resume` in handlers | **Complete** | `codegen/context.rs` - `compile_resume` (tail-resumptive) |
 | Standard effects (State, Error, IO) | Pending | WI-018 through WI-020 |
 
-**Progress**: 4/7 core deliverables complete (57%)
+**Progress**: 6/7 core deliverables complete (86%)
 
 **Technical Standards Verified**:
 - [Generalized Evidence Passing for Effect Handlers](https://dl.acm.org/doi/10.1145/3473576) (ICFP'21)
@@ -173,15 +173,15 @@ Hello, World!
 | WI-011 | Implement effect declaration lowering | P0 | **Complete** |
 | WI-012 | Implement handler lowering | P0 | **Complete** |
 | WI-013 | Implement evidence passing translation | P0 | **Complete** |
-| WI-014 | Implement `perform` codegen | P0 | Pending |
-| WI-015 | Implement `resume` codegen | P0 | Pending |
+| WI-014 | Implement `perform` codegen | P0 | **Complete** |
+| WI-015 | Implement `resume` codegen | P0 | **Complete** |
 | WI-016 | Add effect row unification | P1 | **Complete** |
 | WI-017 | Implement tail-resumptive optimization | P1 | Pending |
 | WI-018 | Standard effects: State | P1 | Pending |
 | WI-019 | Standard effects: Error | P1 | Pending |
 | WI-020 | Standard effects: IO | P1 | Pending |
 
-**Completed Work Items (5/11)**: WI-010, WI-011, WI-012, WI-013, WI-016
+**Completed Work Items (7/11)**: WI-010, WI-011, WI-012, WI-013, WI-014, WI-015, WI-016
 
 ### 4.3 Phase 3: Memory Model (Future)
 
@@ -201,15 +201,16 @@ Hello, World!
 
 | Category | Count | Status |
 |----------|-------|--------|
-| Unit tests | 203 | Passing |
+| Unit tests | 209 | Passing |
 | Integration tests | 22 | Passing |
 | Doc tests | 6 | Passing (3 ignored) |
-| **Total** | **231** | **All Passing** |
+| **Total** | **237** | **All Passing** |
 
 **Phase 2 Tests Added**:
 - `typeck/effect.rs`: Effect row unification tests
 - `effects/evidence.rs`: Evidence translation tests (5 new tests)
 - `effects/lowering.rs`: Effect and handler lowering tests
+- `codegen/context.rs`: Perform, resume, handle codegen tests (6 new tests)
 
 ### 5.2 Coverage by Module
 
@@ -231,7 +232,7 @@ Hello, World!
 | Tool | Result | Notes |
 |------|--------|-------|
 | `cargo clippy` | 0 warnings | All warnings resolved |
-| `cargo test` | 231 passing | Full test suite |
+| `cargo test` | 237 passing | Full test suite |
 | `cargo doc` | 0 warnings | Documentation complete |
 
 ### 6.2 Recent Quality Improvements
@@ -250,6 +251,7 @@ Hello, World!
 | `1be5a64` | Implement effect row unification (ICFP'21 based) |
 | `bba8a7c` | Implement effect and handler declaration lowering |
 | `2e2ee02` | Implement evidence passing translation support |
+| `dd70aa1` | Implement perform, resume, handle codegen (WI-014/WI-015) |
 
 ---
 
@@ -377,7 +379,7 @@ All technical claims in this document are verified against the following sources
 
 **Phase 1 Status**: Complete - All exit criteria met.
 
-**Phase 2 Status**: In Progress - 5/11 work items complete (45%)
+**Phase 2 Status**: In Progress - 7/11 work items complete (64%)
 
 **Completed Phase 2 Components**:
 - `effects/` module structure with evidence passing architecture
@@ -385,14 +387,14 @@ All technical claims in this document are verified against the following sources
 - Handler lowering (`HandlerInfo`, `OpImplInfo`)
 - Evidence passing translation (`EvidenceContext`, `TranslatedOp`)
 - Effect row unification (`EffectUnifier` with row polymorphism)
+- HIR expression kinds: `Perform`, `Resume`, `Handle`
+- Codegen: `compile_perform`, `compile_resume`, `compile_handle`
 
 **Remaining Phase 2 Work**:
-- WI-014: `perform` codegen integration
-- WI-015: `resume` codegen with continuation capture
 - WI-017: Tail-resumptive optimization
 - WI-018-020: Standard effects (State, Error, IO)
 
-**Quality Assessment**: The codebase is well-structured, passes all 231 tests, and has zero clippy warnings. Phase 2 implementation follows ICFP'21 evidence passing research and Koka's row polymorphism approach.
+**Quality Assessment**: The codebase is well-structured, passes all 237 tests, and has zero clippy warnings. Phase 2 implementation follows ICFP'21 evidence passing research and Koka's row polymorphism approach.
 
 ---
 
