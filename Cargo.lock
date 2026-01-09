@@ -126,6 +126,7 @@ name = "bloodc"
 version = "0.2.0"
 dependencies = [
  "ariadne",
+ "bitflags",
  "blake3",
  "clap",
  "criterion",

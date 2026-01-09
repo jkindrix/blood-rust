@@ -88,6 +88,7 @@
 //! - [`typeck`] - Type checking and inference (Phase 1+)
 //! - [`codegen`] - LLVM code generation (Phase 1+)
 //! - [`effects`] - Algebraic effects system with evidence passing (Phase 2+)
+//! - [`mir`] - Mid-level Intermediate Representation (Phase 3+)
 
 pub mod arena;
 pub mod ast;
@@ -96,6 +97,7 @@ pub mod diagnostics;
 pub mod effects;
 pub mod hir;
 pub mod lexer;
+pub mod mir;
 pub mod parser;
 pub mod span;
 pub mod syntax_kind;

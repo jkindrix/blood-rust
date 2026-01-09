@@ -19,6 +19,7 @@ serde.workspace = true
 clap.workspace = true
 ordered-float.workspace = true
 inkwell.workspace = true
+bitflags.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
