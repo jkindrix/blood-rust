@@ -20,7 +20,10 @@ use std::collections::HashMap;
 
 use crate::hir::{DefId, LocalId, Type};
 use crate::span::Span;
-use super::types::{BasicBlockData, BasicBlockId, Terminator, TerminatorKind, Statement};
+use super::types::{BasicBlockData, BasicBlockId, Terminator, Statement};
+
+#[cfg(test)]
+use super::types::TerminatorKind;
 
 /// A MIR function body.
 ///
