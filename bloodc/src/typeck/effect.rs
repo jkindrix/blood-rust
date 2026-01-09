@@ -32,11 +32,10 @@
 //! ```
 
 use std::collections::{HashMap, BTreeSet};
-use crate::hir::Type;
 use crate::effects::row::{EffectRow, EffectRef, RowVar};
 
 #[cfg(test)]
-use crate::hir::DefId;
+use crate::hir::{DefId, Type};
 use crate::span::Span;
 use super::error::{TypeError, TypeErrorKind};
 use super::unify::Unifier;
