@@ -1,6 +1,6 @@
 # Blood Programming Language Specification
 
-**Version**: 0.1.0-draft
+**Version**: 0.2.0-draft
 **Status**: Active Development
 **Last Updated**: 2026-01-09
 
@@ -70,6 +70,7 @@ This document provides the high-level language design. Detailed specifications a
 | Semantics | [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) | Operational semantics, typing rules |
 | Library | [STDLIB.md](./STDLIB.md) | Standard library effects and types |
 | Diagnostics | [DIAGNOSTICS.md](./DIAGNOSTICS.md) | Error messages, warning system |
+| Tooling | [UCM.md](./UCM.md) | Codebase manager specification |
 | Roadmap | [ROADMAP.md](./ROADMAP.md) | Implementation plan, milestones |
 
 ---
@@ -709,11 +710,13 @@ Blood uses the **Synthetic Safety Model (SSM)**, a hybrid ownership model that c
 
 Blood uses a three-tier memory model based on escape analysis:
 
-| Tier | Lifecycle | Mechanism | Cost |
-|------|-----------|-----------|------|
+| Tier | Lifecycle | Mechanism | Cost* |
+|------|-----------|-----------|-------|
 | **Tier 1: Stack** | Lexical | CPU SP manipulation | Zero |
 | **Tier 2: Region** | Scoped | Generational Check | ~1-2 cycles/deref |
 | **Tier 3: Persistent** | Global | Deferred Ref Counting | Higher |
+
+*Cycle costs are theoretical design targets. See [§11](#11-performance-characteristics) for validation status.
 
 ### 5.3 The 128-bit Blood Pointer
 
@@ -1145,10 +1148,436 @@ ExprWithoutBlock ::= Literal | Path | Call | Method | Field
 
 ---
 
+## Appendix C: Complete Code Examples
+
+This appendix provides comprehensive examples demonstrating Blood's features.
+
+### C.1 Hello World
+
+The simplest Blood program:
+
+```blood
+fn main() / {IO} {
+    println("Hello, World!")
+}
+```
+
+### C.2 FizzBuzz with Effects
+
+Using effects for structured output:
+
+```blood
+effect FizzBuzz {
+    op fizz() -> unit;
+    op buzz() -> unit;
+    op fizzbuzz() -> unit;
+    op number(n: i32) -> unit;
+}
+
+fn fizzbuzz_logic(n: i32) / {FizzBuzz} {
+    for i in 1..=n {
+        match (i % 3, i % 5) {
+            (0, 0) => fizzbuzz(),
+            (0, _) => fizz(),
+            (_, 0) => buzz(),
+            _      => number(i),
+        }
+    }
+}
+
+fn main() / {IO} {
+    with PrintHandler handle {
+        fizzbuzz_logic(100)
+    }
+}
+
+deep handler PrintHandler for FizzBuzz {
+    op fizz() { println("Fizz"); resume(()) }
+    op buzz() { println("Buzz"); resume(()) }
+    op fizzbuzz() { println("FizzBuzz"); resume(()) }
+    op number(n) { println(n.to_string()); resume(()) }
+}
+```
+
+### C.3 Generational References Example
+
+Demonstrating safe memory management:
+
+```blood
+struct Node {
+    value: i32,
+    next: Option<Box<Node>>,
+}
+
+fn create_list(values: &[i32]) -> Box<Node> / {Allocate} {
+    let mut head: Option<Box<Node>> = None
+
+    for &v in values.iter().rev() {
+        head = Some(Box::new(Node {
+            value: v,
+            next: head,
+        }))
+    }
+
+    head.unwrap()
+}
+
+fn sum_list(node: &Node) -> i32 / pure {
+    let mut sum = 0
+    let mut current = Some(node)
+
+    while let Some(n) = current {
+        sum += n.value
+        current = n.next.as_ref().map(|b| b.as_ref())
+    }
+
+    sum
+}
+
+fn main() / {IO} {
+    let list = create_list(&[1, 2, 3, 4, 5])
+    let total = sum_list(&list)
+    println("Sum: " ++ total.to_string())
+    // list automatically freed, generation incremented
+    // Any stale references would be detected
+}
+```
+
+### C.4 Multiple Dispatch Example
+
+Type-stable multiple dispatch:
+
+```blood
+// Generic function declaration (method family)
+fn format(x: T) -> String / pure where T: Display
+
+// Specializations for different types
+fn format(x: i32) -> String / pure {
+    x.to_string()
+}
+
+fn format(x: f64) -> String / pure {
+    if x.floor() == x {
+        x.to_string() ++ ".0"
+    } else {
+        x.to_string()
+    }
+}
+
+fn format(x: bool) -> String / pure {
+    if x { "yes" } else { "no" }
+}
+
+fn format(x: Vec<T>) -> String / pure where T: Display {
+    let items = x.iter()
+        .map(|item| format(item))
+        .collect::<Vec<_>>()
+        .join(", ")
+    "[" ++ items ++ "]"
+}
+
+fn main() / {IO} {
+    println(format(42))           // "42"
+    println(format(3.14))         // "3.14"
+    println(format(true))         // "yes"
+    println(format(vec![1, 2, 3])) // "[1, 2, 3]"
+}
+```
+
+### C.5 Error Handling with Effects
+
+Structured error handling:
+
+```blood
+enum ParseError {
+    InvalidNumber(String),
+    UnexpectedChar(char),
+    EndOfInput,
+}
+
+fn parse_int(s: &str) -> i32 / {Error<ParseError>} {
+    if s.is_empty() {
+        raise(ParseError::EndOfInput)
+    }
+
+    let mut result = 0i32
+    for c in s.chars() {
+        match c.to_digit(10) {
+            Some(d) => result = result * 10 + d as i32,
+            None => raise(ParseError::UnexpectedChar(c)),
+        }
+    }
+    result
+}
+
+fn main() / {IO} {
+    // Handle errors by converting to Result
+    let result: Result<i32, ParseError> = with ResultHandler handle {
+        parse_int("123")
+    };
+
+    match result {
+        Ok(n) => println("Parsed: " ++ n.to_string()),
+        Err(e) => println("Error: " ++ e.to_string()),
+    }
+}
+
+deep handler ResultHandler<T, E> for Error<E> -> Result<T, E> {
+    return(x) { Ok(x) }
+    op raise(e) { Err(e) }  // No resume - error terminates
+}
+```
+
+### C.6 Async/Await with Fibers
+
+Concurrent programming:
+
+```blood
+fn fetch_data(url: &str) -> Bytes / {Async, Error<HttpError>} {
+    let response = await(http_get(url))?
+    response.body()
+}
+
+fn process_urls(urls: Vec<String>) -> Vec<Result<Bytes, HttpError>> / {Async} {
+    // Spawn concurrent fetches
+    let handles: Vec<TaskHandle<Result<Bytes, HttpError>>> = urls
+        .into_iter()
+        .map(|url| spawn(|| {
+            with ErrorToResult handle {
+                fetch_data(&url)
+            }
+        }))
+        .collect()
+
+    // Await all results
+    handles.into_iter()
+        .map(|h| h.join())
+        .collect()
+}
+
+fn main() / {IO} {
+    let urls = vec![
+        "https://api.example.com/data1".to_string(),
+        "https://api.example.com/data2".to_string(),
+    ];
+
+    let results = with AsyncRuntime handle {
+        process_urls(urls)
+    };
+
+    for (i, result) in results.iter().enumerate() {
+        match result {
+            Ok(data) => println("URL " ++ i.to_string() ++ ": " ++ data.len().to_string() ++ " bytes"),
+            Err(e) => println("URL " ++ i.to_string() ++ " failed: " ++ e.to_string()),
+        }
+    }
+}
+```
+
+### C.7 State Effect Example
+
+Mutable state without mutation:
+
+```blood
+fn counter_example() -> i32 / {State<i32>} {
+    put(0)
+
+    for _ in 0..10 {
+        let current = get()
+        put(current + 1)
+    }
+
+    get()
+}
+
+fn main() / {IO} {
+    // Run with state handler
+    let final_count = with StateHandler::new(0) handle {
+        counter_example()
+    };
+
+    println("Final count: " ++ final_count.to_string())
+}
+
+deep handler StateHandler<S> for State<S> {
+    state: S
+
+    fn new(initial: S) -> StateHandler<S> {
+        StateHandler { state: initial }
+    }
+
+    op get() {
+        resume(self.state.clone())
+    }
+
+    op put(s) {
+        self.state = s
+        resume(())
+    }
+
+    op modify(f) {
+        self.state = f(self.state.clone())
+        resume(())
+    }
+}
+```
+
+### C.8 Linear Types for Resources
+
+Ensuring resource cleanup:
+
+```blood
+// Linear type - must be used exactly once
+struct linear File {
+    fd: Fd,
+}
+
+impl File {
+    fn open(path: &Path) -> File / {IO, Error<IoError>} {
+        let fd = io_open(path)?
+        File { fd }
+    }
+
+    // Consuming method - takes ownership
+    fn close(self) / {IO} {
+        io_close(self.fd)
+        // self is consumed, cannot be used again
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> usize / {IO, Error<IoError>} {
+        io_read(self.fd, buf)
+    }
+}
+
+fn safe_file_operation(path: &Path) / {IO, Error<IoError>} {
+    let mut file = File::open(path)?
+
+    let mut buffer = [0u8; 1024]
+    let bytes_read = file.read(&mut buffer)?
+
+    file.close()  // MUST call close - compiler enforces
+
+    // file.read(...) here would be compile error:
+    // "use of moved linear value"
+}
+```
+
+### C.9 Generator with Yield Effect
+
+Lazy sequences:
+
+```blood
+fn fibonacci() -> impl Iterator<Item = u64> / pure {
+    gen {
+        let (mut a, mut b) = (0u64, 1u64)
+        loop {
+            yield(a)
+            (a, b) = (b, a.checked_add(b).unwrap_or(u64::MAX))
+        }
+    }
+}
+
+fn primes() -> impl Iterator<Item = u64> / pure {
+    gen {
+        yield(2)
+        let mut n = 3u64
+        while n < u64::MAX {
+            if is_prime(n) {
+                yield(n)
+            }
+            n += 2
+        }
+    }
+}
+
+fn main() / {IO} {
+    // First 10 Fibonacci numbers
+    let fibs: Vec<u64> = fibonacci().take(10).collect()
+    println("Fibonacci: " ++ format(fibs))
+
+    // First 10 primes
+    let ps: Vec<u64> = primes().take(10).collect()
+    println("Primes: " ++ format(ps))
+}
+```
+
+### C.10 Complete Application Example
+
+A mini HTTP server demonstrating multiple features:
+
+```blood
+//! A simple HTTP echo server demonstrating Blood features
+
+struct Request {
+    method: String,
+    path: String,
+    body: Bytes,
+}
+
+struct Response {
+    status: u16,
+    body: Bytes,
+}
+
+effect Http {
+    op handle_request(req: Request) -> Response;
+}
+
+fn echo_handler(req: Request) -> Response / pure {
+    Response {
+        status: 200,
+        body: req.body,
+    }
+}
+
+fn logging_middleware<H>(handler: H) -> impl Fn(Request) -> Response / {IO}
+where
+    H: Fn(Request) -> Response / pure
+{
+    move |req| {
+        info!("Request: {} {}", req.method, req.path)
+        let start = now()
+        let response = handler(req)
+        let duration = now() - start
+        info!("Response: {} in {:?}", response.status, duration)
+        response
+    }
+}
+
+fn run_server(addr: &str) / {IO, Async, Error<IoError>} {
+    let listener = tcp_bind(addr)?
+
+    info!("Listening on {}", addr)
+
+    loop {
+        let (stream, peer) = listener.accept()?
+        info!("Connection from {}", peer)
+
+        spawn(|| {
+            with ErrorToResult handle {
+                let handler = logging_middleware(echo_handler)
+                serve_connection(stream, handler)
+            }
+        })
+    }
+}
+
+fn main() / {IO} {
+    with AsyncRuntime handle {
+        with ErrorHandler handle {
+            run_server("0.0.0.0:8080")
+        }
+    }
+}
+```
+
+---
+
 ## Revision History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.2.0-draft | 2026-01-09 | Added comprehensive examples, tooling reference |
 | 0.1.0-draft | 2026-01-09 | Initial specification |
 
 ---
