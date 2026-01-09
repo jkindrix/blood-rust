@@ -1,0 +1,710 @@
+//! Parser tests using insta snapshot testing.
+//!
+//! These tests verify the parser produces correct ASTs for various inputs.
+//! Snapshots are stored in `src/parser/snapshots/`.
+
+use super::*;
+use crate::ast::*;
+
+/// Helper to parse an expression and return it (for snapshot tests).
+#[allow(dead_code)]
+fn parse_expr(source: &str) -> Result<Expr, String> {
+    let mut parser = Parser::new(source);
+    // For expression parsing, we need to wrap in a function body
+    // since parse_program expects declarations
+    let expr = parser.parse_expr();
+    if parser.errors.is_empty() {
+        Ok(expr)
+    } else {
+        Err(format!("{:?}", parser.errors))
+    }
+}
+
+/// Helper to parse a complete program.
+fn parse_program(source: &str) -> Result<Program, String> {
+    let mut parser = Parser::new(source);
+    match parser.parse_program() {
+        Ok(program) => Ok(program),
+        Err(errors) => Err(format!("{:?}", errors)),
+    }
+}
+
+/// Helper to parse and return debug representation.
+fn parse_to_debug(source: &str) -> String {
+    match parse_program(source) {
+        Ok(program) => format!("{:#?}", program),
+        Err(e) => format!("PARSE ERROR: {}", e),
+    }
+}
+
+// ============================================================
+// Function Declaration Tests
+// ============================================================
+
+#[test]
+fn test_simple_function() {
+    let source = "fn foo() {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_function_with_params() {
+    let source = "fn add(a: i32, b: i32) -> i32 { a + b }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_function_with_effects() {
+    let source = "fn greet(name: String) / {IO} { println(name) }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_pure_function() {
+    let source = "fn pure_add(x: i32, y: i32) -> i32 / pure { x + y }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_async_function() {
+    let source = "async fn fetch_data(url: String) -> Data / {IO, Async} { data }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_const_function() {
+    let source = "const fn max(a: i32, b: i32) -> i32 { if a > b { a } else { b } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_generic_function() {
+    let source = "fn identity<T>(x: T) -> T { x }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_function_with_where_clause() {
+    let source = "fn process<T>(x: T) -> T where T: Clone + Debug { x.clone() }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Struct Tests
+// ============================================================
+
+#[test]
+fn test_unit_struct() {
+    let source = "struct Empty;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_tuple_struct() {
+    let source = "struct Point(i32, i32);";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_record_struct() {
+    let source = r#"
+struct Person {
+    name: String,
+    age: u32,
+    email: Option<String>,
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_generic_struct() {
+    let source = "struct Box<T> { value: T }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_pub_struct() {
+    let source = r#"
+pub struct PublicPerson {
+    pub name: String,
+    age: u32,
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Enum Tests
+// ============================================================
+
+#[test]
+fn test_simple_enum() {
+    let source = r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_enum_with_data() {
+    let source = r#"
+enum Option<T> {
+    Some(T),
+    None,
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_enum_with_records() {
+    let source = r#"
+enum Message {
+    Quit,
+    Move { x: i32, y: i32 },
+    Write(String),
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Effect Tests
+// ============================================================
+
+#[test]
+fn test_simple_effect() {
+    let source = r#"
+effect Console {
+    op print(msg: String) -> unit;
+    op read_line() -> String;
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_generic_effect() {
+    let source = r#"
+effect State<S> {
+    op get() -> S;
+    op put(s: S) -> unit;
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_effect_with_extends() {
+    let source = r#"
+effect Reader<R> extends State<R> {
+    op ask() -> R;
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Handler Tests
+// ============================================================
+
+#[test]
+fn test_deep_handler() {
+    let source = r#"
+deep handler CounterHandler for State<i32> {
+    let mut count: i32 = 0
+
+    return(x) { x }
+
+    op get() { resume(count) }
+    op put(s) { count = s; resume(()) }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_shallow_handler() {
+    let source = r#"
+shallow handler OnceReader<R> for State<R> {
+    let value: R
+
+    return(x) { x }
+
+    op get() { resume(value) }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Expression Tests
+// ============================================================
+
+#[test]
+fn test_arithmetic_expr() {
+    let source = "fn f() { 1 + 2 * 3 - 4 / 2 }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_comparison_expr() {
+    let source = "fn f() { a == b && c != d || e < f }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_pipe_expr() {
+    let source = "fn f() { data |> transform |> filter |> collect }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_method_chain() {
+    let source = "fn f() { x.foo().bar(1, 2).baz() }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_closure() {
+    let source = "fn f() { |x, y| x + y }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_move_closure() {
+    let source = "fn f() { move |x| x * 2 }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_if_else() {
+    let source = r#"
+fn f(x: i32) -> i32 {
+    if x > 0 {
+        1
+    } else if x < 0 {
+        -1
+    } else {
+        0
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_match_expr() {
+    let source = r#"
+fn f(opt: Option<i32>) -> i32 {
+    match opt {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_for_loop() {
+    let source = "fn f() { for i in 0..10 { println(i) } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_while_loop() {
+    let source = "fn f() { while x > 0 { x = x - 1 } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_loop_with_break() {
+    let source = "fn f() { loop { if done { break 42 } } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_array_literal() {
+    let source = "fn f() { [1, 2, 3, 4, 5] }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_array_repeat() {
+    let source = "fn f() { [0; 100] }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_tuple_expr() {
+    let source = "fn f() { (1, \"hello\", true) }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_struct_construction() {
+    let source = "fn f() { Point { x: 10, y: 20 } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_field_init_shorthand() {
+    let source = "fn f(x: i32, y: i32) { Point { x, y } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_range_expr() {
+    let source = "fn f() { 0..10 }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_inclusive_range() {
+    let source = "fn f() { 0..=10 }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_perform_effect() {
+    let source = "fn f() / {State<i32>} { let x = perform State.get(); x }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_with_handle() {
+    let source = r#"
+fn f() {
+    with handler handle {
+        perform State.get()
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Pattern Tests
+// ============================================================
+
+#[test]
+fn test_wildcard_pattern() {
+    let source = "fn f() { match x { _ => 0 } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_literal_pattern() {
+    let source = "fn f() { match x { 42 => true, _ => false } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_tuple_pattern() {
+    let source = "fn f() { match pair { (a, b) => a + b } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_struct_pattern() {
+    let source = "fn f() { match point { Point { x, y } => x + y } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_or_pattern() {
+    let source = "fn f() { match x { 1 | 2 | 3 => true, _ => false } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_range_pattern() {
+    let source = "fn f() { match x { 0..10 => true, _ => false } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_guard_pattern() {
+    let source = "fn f() { match x { n if n > 0 => true, _ => false } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_binding_pattern() {
+    let source = "fn f() { match opt { Some(x @ 1..10) => x, _ => 0 } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Type Tests
+// ============================================================
+
+#[test]
+fn test_reference_type() {
+    let source = "fn f(x: &i32, y: &mut i32) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_lifetime_type() {
+    let source = "fn f<'a>(x: &'a str) -> &'a str { x }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_array_type() {
+    let source = "fn f(arr: [i32; 10]) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_slice_type() {
+    let source = "fn f(slice: &[i32]) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_function_type() {
+    let source = "fn f(callback: fn(i32) -> bool) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_tuple_type() {
+    let source = "fn f() -> (i32, String, bool) { (1, s, true) }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_linear_type() {
+    let source = "fn f(resource: linear Handle) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_affine_type() {
+    let source = "fn f(resource: affine Handle) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Import Tests
+// ============================================================
+
+#[test]
+fn test_simple_import() {
+    let source = "use std.io;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_import_item() {
+    let source = "use std.io::println;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_group_import() {
+    let source = "use std.collections::{Vec, HashMap, HashSet};";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_glob_import() {
+    let source = "use std.ops::*;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_aliased_import() {
+    let source = "use std.collections::HashMap as Map;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Module Tests
+// ============================================================
+
+#[test]
+fn test_module_declaration() {
+    let source = "module myproject.utils.helpers;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Trait and Impl Tests
+// ============================================================
+
+#[test]
+fn test_trait_declaration() {
+    let source = r#"
+trait Printable {
+    fn print(&self);
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_trait_with_default() {
+    let source = r#"
+trait Debug {
+    fn debug(&self) -> String {
+        "Debug".to_string()
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_impl_block() {
+    let source = r#"
+impl Point {
+    fn new(x: i32, y: i32) -> Point {
+        Point { x, y }
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_trait_impl() {
+    let source = r#"
+impl Printable for Point {
+    fn print(&self) {
+        println(self.x);
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Attribute Tests
+// ============================================================
+
+#[test]
+fn test_simple_attribute() {
+    let source = r#"
+#[inline]
+fn fast() {}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_attribute_with_args() {
+    let source = r#"
+#[cfg(target_os = "linux")]
+fn linux_only() {}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Const and Static Tests
+// ============================================================
+
+#[test]
+fn test_const_decl() {
+    let source = "const PI: f64 = 3.14159;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_static_decl() {
+    let source = "static mut COUNTER: i32 = 0;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Complex Program Tests
+// ============================================================
+
+#[test]
+fn test_hello_world() {
+    let source = r#"
+module examples.hello;
+
+use std.io::println;
+
+fn main() / {IO} {
+    println("Hello, World!")
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_effect_example() {
+    let source = r#"
+effect State<S> {
+    op get() -> S;
+    op put(s: S) -> unit;
+}
+
+deep handler LocalState<S> for State<S> {
+    let mut state: S
+
+    return(x) { x }
+
+    op get() { resume(state) }
+    op put(s) { state = s; resume(()) }
+}
+
+fn counter() -> i32 / {State<i32>} {
+    let current = perform State.get();
+    perform State.put(current + 1);
+    current
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_fizzbuzz() {
+    let source = r#"
+fn fizzbuzz(n: i32) -> String / pure {
+    if n % 15 == 0 {
+        "FizzBuzz"
+    } else if n % 3 == 0 {
+        "Fizz"
+    } else if n % 5 == 0 {
+        "Buzz"
+    } else {
+        n.to_string()
+    }
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Error Recovery Tests
+// ============================================================
+
+#[test]
+fn test_missing_semicolon() {
+    let source = "fn f() { let x = 1 let y = 2; }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_unclosed_brace() {
+    let source = "fn f() { if true { 1 }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_unexpected_token() {
+    let source = "fn f() { + }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}

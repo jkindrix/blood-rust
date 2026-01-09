@@ -1,0 +1,5 @@
+---
+source: bloodc/src/parser/tests.rs
+expression: parse_to_debug(source)
+---
+PARSE ERROR: [Diagnostic { kind: Error, code: Some("E0100"), message: "expected `{`, found keyword `else`", span: Span { start: 53, end: 57, start_line: 1, start_col: 54 }, labels: [], suggestions: [] }]

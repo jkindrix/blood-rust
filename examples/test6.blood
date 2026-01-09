@@ -1,0 +1,5 @@
+fn main() {
+    let x = with handler handle {
+        counter()
+    };
+}

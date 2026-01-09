@@ -1,0 +1,110 @@
+// Blood Programming Language - Hello World Example
+// This demonstrates core Blood syntax and features
+
+module examples.hello;
+
+use std.io::println;
+
+// A simple struct
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+// An enum with variants
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// State effect for counter
+effect State<S> {
+    op get() -> S;
+    op put(s: S) -> unit;
+}
+
+// Deep handler for State effect
+deep handler LocalState<S> for State<S> {
+    let mut state: S
+
+    return(x) { x }
+
+    op get() {
+        resume(state)
+    }
+
+    op put(s) {
+        state = s;
+        resume(())
+    }
+}
+
+// Pure function - no effects
+fn add(a: i32, b: i32) -> i32 / pure {
+    a + b
+}
+
+// Function with IO effect
+fn greet(name: String) / {IO} {
+    println("Hello, " + name + "!")
+}
+
+// Function with State effect
+fn counter() -> i32 / {State<i32>} {
+    let current = get();
+    put(current + 1);
+    current
+}
+
+// FizzBuzz implementation
+fn fizzbuzz(n: i32) -> String / pure {
+    if n % 15 == 0 {
+        "FizzBuzz"
+    } else if n % 3 == 0 {
+        "Fizz"
+    } else if n % 5 == 0 {
+        "Buzz"
+    } else {
+        n.to_string()
+    }
+}
+
+// Pattern matching example
+fn describe_option<T>(opt: Option<T>) -> String / pure {
+    match opt {
+        Option::Some(x) => "Some value",
+        Option::None => "No value",
+    }
+}
+
+// Closure example
+fn map<A, B>(items: [A], f: fn(A) -> B) -> [B] / pure {
+    let mut result = [];
+    for item in items {
+        result = result + [f(item)];
+    }
+    result
+}
+
+// Main entry point with IO effect
+fn main() / {IO} {
+    greet("World");
+
+    // Using effects with handlers
+    let final_count = with LocalState { state: 0 } handle {
+        counter();
+        counter();
+        counter()
+    };
+
+    println("Final count: " + final_count.to_string());
+
+    // Using closures
+    let numbers = [1, 2, 3, 4, 5];
+    let doubled = map(numbers, |x| x * 2);
+
+    // FizzBuzz loop
+    for i in 1..=15 {
+        println(fizzbuzz(i));
+    }
+}

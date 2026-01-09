@@ -1,0 +1,4 @@
+effect State<S> {
+    op get() -> S;
+    op put(s: S) -> unit;
+}
