@@ -37,8 +37,8 @@
 //!
 //! | Phase | Description | Status |
 //! |-------|-------------|--------|
-//! | 2.1 | Basic evidence passing | Pending |
-//! | 2.2 | Tail-resumptive optimization | Pending |
+//! | 2.1 | Basic evidence passing | Complete |
+//! | 2.2 | Tail-resumptive optimization | Complete |
 //! | 2.3 | Segmented stack continuations | Pending |
 //! | 2.4 | Evidence fusion optimization | Pending |
 
@@ -46,8 +46,10 @@ pub mod evidence;
 pub mod handler;
 pub mod lowering;
 pub mod row;
+pub mod std_effects;
 
 pub use evidence::{Evidence, EvidenceVector, EvidenceEntry, EvidenceContext, TranslatedOp};
-pub use handler::{Handler, HandlerKind, Continuation};
+pub use handler::{Handler, HandlerKind, Continuation, ResumeMode};
+pub use handler::{analyze_tail_resumptive, analyze_handler_tail_resumptive, analyze_resume_mode};
 pub use lowering::{EffectLowering, EffectInfo, OperationInfo, EvidenceRequirement, HandlerInfo};
 pub use row::{EffectRow, RowVar, EffectRef};
