@@ -1,6 +1,6 @@
 # Blood Content-Addressed Storage Specification
 
-**Version**: 0.1.0-draft
+**Version**: 0.2.0-draft
 **Status**: Active Development
 **Last Updated**: 2026-01-09
 
@@ -106,14 +106,39 @@ Blood uses BLAKE3-256 for content addressing:
 
 | Factor | BLAKE3 | SHA3-512 (Unison) | SHA-256 |
 |--------|--------|-------------------|---------|
-| **Speed** | ~5x faster | Baseline | ~3x slower |
-| **Parallelism** | Native SIMD | Limited | None |
+| **Speed** | ~5x faster¹ | Baseline | ~3x slower |
+| **Parallelism** | Native SIMD/AVX2/AVX-512 | Limited | None |
 | **Security** | 128-bit (256/2) | 256-bit | 128-bit |
 | **Output Size** | 256 bits | 512 bits | 256 bits |
+| **Hardware Accel** | SSE4.1, AVX2, AVX-512, NEON | Limited | SHA-NI only |
+
+¹ Speed comparison based on [published BLAKE3 benchmarks](https://github.com/BLAKE3-team/BLAKE3) comparing against SHA3-256; relative performance vs SHA3-512 may vary by platform.
 
 BLAKE3 provides sufficient collision resistance for code identification while being significantly faster than alternatives.
 
-### 2.3 Collision Probability
+### 2.3 Divergence from Unison
+
+Blood deliberately diverges from [Unison's](https://www.unison-lang.org/) choice of SHA3-512:
+
+| Aspect | Unison | Blood | Rationale |
+|--------|--------|-------|-----------|
+| **Hash Algorithm** | SHA3-512 | BLAKE3-256 | Performance (~5x faster per published benchmarks) |
+| **Hash Size** | 512 bits | 256 bits | Sufficient security, smaller pointers |
+| **Security Level** | ~256 bits | ~128 bits | 128 bits adequate for code identity |
+
+**Why this divergence is sound:**
+
+1. **128-bit security is sufficient**: Code identity doesn't require post-quantum resistance. The threat model is accidental collision, not adversarial attack. At 128-bit security, collision probability is ~10⁻³⁸ at one million definitions.
+
+2. **Performance matters for systems programming**: Blood targets safety-critical systems where compilation speed affects developer productivity. BLAKE3's ~5x speedup over SHA3 (per published benchmarks) is significant for large codebases.
+
+3. **Smaller hash = smaller pointers**: 256-bit hashes fit better in cache and reduce memory overhead compared to 512-bit hashes. Given Blood's 128-bit fat pointers already impose overhead, minimizing hash size helps.
+
+4. **BLAKE3 is mature and validated**: BLAKE3 was published in 2020, has an [IETF Internet-Draft (January 2025)](https://www.ietf.org/archive/id/draft-aumasson-blake3-00.html), and is widely deployed in production systems including blockchain networks.
+
+**Migration path**: If future cryptanalysis weakens BLAKE3, Blood can extend to BLAKE3-512 using the collision-resistant storage mechanism (see §9.2). The format version field (§4.1) enables this upgrade.
+
+### 2.4 Collision Probability
 
 With 256-bit hashes and the birthday paradox:
 
@@ -127,7 +152,7 @@ First collision expected after ~10^31 years
 
 This is effectively zero probability for any practical codebase.
 
-### 2.4 Display Format
+### 2.5 Display Format
 
 Hashes are displayed in base32 for human readability:
 
@@ -819,6 +844,198 @@ effect Migrate {
     op migration_failed(reason: String) -> never;
 }
 ```
+
+### 8.5 In-Flight Request Handling
+
+A critical challenge in hot-swapping is handling requests that are in progress when code changes.
+
+#### 8.5.1 Request Lifecycle
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    REQUEST LIFECYCLE VS HOT-SWAP                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Request 1:  ┌───────────────────────────────────────┐               │
+│              │ Start │ Processing... │ Complete     │               │
+│              └───────────────────────────────────────┘               │
+│                              ↑                                       │
+│  Hot-Swap:   ─────────────── │ ────────────────────────────────     │
+│                              │                                       │
+│  Request 2:                  │  ┌────────────────────────────┐      │
+│                              │  │ Start │ Processing │ Done │      │
+│                              │  └────────────────────────────┘      │
+│                                                                      │
+│  Question: What code version does Request 2 use?                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 8.5.2 Swap Strategies
+
+**Strategy 1: Immediate (Default)**
+
+```rust
+fn swap_immediate(old_hash: Hash, new_hash: Hash) {
+    // Step 1: Register new code in VFT
+    vft.register(new_hash, compile(new_hash));
+
+    // Step 2: Atomic pointer update for dispatch
+    vft.redirect(old_hash, new_hash);  // Atomic CAS
+
+    // Step 3: In-flight calls continue with old code
+    // (they hold direct pointers, not going through VFT)
+
+    // Step 4: Old code GC'd when all references drop
+    vft.mark_for_gc(old_hash);
+}
+```
+
+**Semantics**:
+- Requests started before swap → complete with old code
+- Requests started after swap → use new code
+- No request sees mixed old/new code
+
+**Strategy 2: Barrier (Consistent)**
+
+```rust
+fn swap_barrier(old_hash: Hash, new_hash: Hash) {
+    // Step 1: Enter swap mode
+    swap_lock.write_lock();
+
+    // Step 2: Wait for in-flight requests to complete
+    while in_flight_count.load() > 0 {
+        wait();
+    }
+
+    // Step 3: Perform swap
+    vft.atomic_update(old_hash, new_hash);
+
+    // Step 4: Resume accepting requests
+    swap_lock.write_unlock();
+}
+```
+
+**Semantics**:
+- Brief pause in request acceptance
+- All requests after barrier use new code
+- Guaranteed consistency point
+
+**Strategy 3: Epoch (Scheduled)**
+
+```rust
+fn swap_epoch(old_hash: Hash, new_hash: Hash, epoch: EpochId) {
+    // Schedule swap for future epoch boundary
+    epoch_scheduler.schedule(epoch, move || {
+        // At epoch boundary, all requests complete
+        // Then swap occurs
+        vft.atomic_update(old_hash, new_hash);
+    });
+}
+```
+
+**Semantics**:
+- No disruption to current requests
+- Swap occurs at natural boundary (e.g., end of batch)
+- Useful for batch processing systems
+
+#### 8.5.3 Effect Handler Interaction
+
+When hot-swapping code with active effect handlers:
+
+```blood
+// Original handler installed
+with Logger handle {
+    process_request()  // Uses old 'process_request'
+    // ← Hot-swap occurs here
+    continue_processing()  // Which version?
+}
+```
+
+**Resolution**: Handler captures function references by hash at installation time.
+
+```rust
+struct EffectHandler {
+    // Function references captured at handler installation
+    captured_functions: HashMap<String, Hash>,
+
+    // These hashes don't change during hot-swap
+    // Handler continues using original code
+}
+```
+
+**Rule**: Effect handlers see a **consistent snapshot** of code at installation time.
+
+#### 8.5.4 Concurrent Fiber Handling
+
+When multiple fibers are active:
+
+```
+Fiber 1: [old_code] ────────────────────────────────► [complete]
+                              ↑
+Hot-Swap: ──────────────────── ────────────────────────────────
+                              ↓
+Fiber 2:                    [start] ───► [new_code] ──► [complete]
+```
+
+**Implementation**:
+
+```rust
+fn fiber_aware_swap(old_hash: Hash, new_hash: Hash) {
+    // Each fiber maintains its own VFT view
+    // Only fibers started AFTER swap see new VFT
+
+    let swap_generation = generation_counter.fetch_add(1);
+
+    // New VFT entry with generation
+    vft.insert_versioned(new_hash, swap_generation);
+
+    // Fibers check generation on function lookup
+    // generation < swap_generation → old code
+    // generation >= swap_generation → new code
+}
+```
+
+#### 8.5.5 Rollback on Failure
+
+If new code fails during swap:
+
+```rust
+fn swap_with_rollback(old_hash: Hash, new_hash: Hash) -> Result<()> {
+    // Step 1: Keep old code available
+    let old_entry = vft.get(old_hash).clone();
+
+    // Step 2: Attempt swap
+    vft.atomic_update(old_hash, new_hash);
+
+    // Step 3: Run health check
+    if let Err(e) = health_check() {
+        // Rollback
+        log::error!("Swap failed, rolling back: {}", e);
+        vft.atomic_update(new_hash, old_hash);
+        return Err(e);
+    }
+
+    Ok(())
+}
+```
+
+#### 8.5.6 Metrics and Observability
+
+Hot-swap events are tracked:
+
+```blood
+effect HotSwapMetrics {
+    op record_swap(old: Hash, new: Hash, duration: Duration);
+    op record_in_flight_wait(count: u32, duration: Duration);
+    op record_rollback(reason: String);
+}
+```
+
+**Exported Metrics**:
+- `blood_hotswap_total` — Total swaps
+- `blood_hotswap_duration_seconds` — Swap duration histogram
+- `blood_hotswap_in_flight_requests` — Requests during swap
+- `blood_hotswap_rollbacks` — Failed swap count
 
 ---
 
