@@ -75,6 +75,7 @@ fn main() / {IO, Error<AppError>} {
 | [FFI.md](./FFI.md) | Foreign function interface |
 | [STDLIB.md](./STDLIB.md) | Standard library design |
 | [DIAGNOSTICS.md](./DIAGNOSTICS.md) | Error messages and diagnostics |
+| [UCM.md](./UCM.md) | Codebase Manager (tooling) |
 
 ### Planning
 
