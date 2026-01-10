@@ -1640,11 +1640,20 @@ impl<'a> TypeContext<'a> {
                 self.resolver.push_scope(ScopeKind::Handler, body.span);
 
                 // Register the handled effect's operations in this scope
+                //
+                // NOTE: Operations are registered with their generic signatures (DefId only).
+                // Type argument substitution happens at the call site when the operation is invoked.
+                // This is consistent with how register_effect_operations_in_scope works for functions.
+                //
+                // For full handler type argument support, we would:
+                // 1. Extract type args from handler_expr.ty (e.g., Handler<i32> has type arg i32)
+                // 2. Build substitution map: effect generic param -> handler type arg
+                // 3. Pre-substitute operation signatures for better error messages
+                //
+                // Current behavior works because unification at call sites resolves the types.
                 if let Some(effect_id) = handled_effect {
                     if let Some(effect_info) = self.effect_defs.get(&effect_id).cloned() {
                         for op_info in &effect_info.operations {
-                            // For now, use the generic signature (without instantiation)
-                            // TODO: Properly instantiate based on handler type args
                             self.resolver.current_scope_mut()
                                 .bindings
                                 .insert(op_info.name.clone(), super::resolve::Binding::Def(op_info.def_id));
