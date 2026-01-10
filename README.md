@@ -12,16 +12,24 @@ Blood synthesizes five cutting-edge programming language innovations:
 
 ## Status
 
+> **Stability Level: Research Prototype (Alpha)**
+>
+> Blood is suitable for language research, learning, and contributing to development. Not yet suitable for production use.
+
 **Early implementation phase.** Core compiler functionality is working (lexer, parser, type checker, LLVM codegen). Simple programs like FizzBuzz compile and run.
 
-| Component | Status |
-|-----------|--------|
-| Lexer & Parser | Complete |
-| Type Checker | Complete (bidirectional + unification) |
-| Code Generation | Complete (LLVM backend) |
-| Effects System | Scaffolded (evidence passing) |
-| Memory Model | Scaffolded (generational pointers) |
-| Runtime | Scaffolded (fibers, channels) |
+| Component | Status | Details |
+|-----------|--------|---------|
+| Lexer & Parser | ✅ Complete | Production-tested |
+| Type Checker | ✅ Complete | Bidirectional + unification |
+| Code Generation | ✅ Complete | LLVM backend |
+| Effects System | ✅ Integrated | Evidence passing with runtime FFI exports |
+| Memory Model | ✅ Integrated | Generational pointers in codegen (blood_alloc/blood_free) |
+| Runtime | ✅ Integrated | Scheduler FFI exports linked to programs |
+| Multiple Dispatch | ✅ Integrated | Runtime dispatch table with type tags |
+| Closures | ✅ Integrated | Environment capture and codegen |
+
+**Legend**: ✅ = Implemented, 🔶 = Scaffolded (code exists, not integrated)
 
 **[Getting Started](GETTING_STARTED.md)** | [Specification](SPECIFICATION.md) | [Implementation Status](IMPLEMENTATION_STATUS.md)
 

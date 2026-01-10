@@ -1,8 +1,16 @@
 # Blood Diagnostics Specification
 
-**Version**: 0.2.0-draft
+**Version**: 0.3.0-draft
 **Status**: Active Development
-**Last Updated**: 2026-01-09
+**Implementation**: ✅ Implemented (Phase 0-1 diagnostics complete)
+**Last Updated**: 2026-01-10
+
+**Revision 0.3.0 Changes**:
+- Added implementation phase scope to error code registry (Appendix A)
+- Added phase status indicators to error code tables
+- Added cross-reference to IMPLEMENTATION_STATUS.md
+
+> **Implementation Scope**: This specification describes the complete diagnostic system. Currently, **Phase 0-1 error codes (E01xx, E02xx partial)** are fully implemented. Phase 2+ error codes (E03xx-E07xx) are specified but not yet integrated. See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
 
 This document specifies Blood's error messages, warnings, and diagnostic output format, designed for maximum developer productivity and clarity.
 
@@ -729,78 +737,80 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 
 ## Appendix A: Error Code Registry
 
-### Parse Errors (E01xx)
+> **Phase Legend**: ✅ = Implemented and tested, 🔶 = Code exists (scaffolded), 📋 = Specified only
 
-| Code | Description |
-|------|-------------|
-| E0101 | Expected token |
-| E0102 | Mismatched brackets |
-| E0103 | Unexpected token |
-| E0104 | Invalid literal |
-| E0105 | Unterminated string |
-| E0106 | Invalid escape sequence |
-| E0107 | Invalid number format |
+### Parse Errors (E01xx) — ✅ Phase 0 Implemented
 
-### Type Errors (E02xx)
+| Code | Description | Status |
+|------|-------------|--------|
+| E0101 | Expected token | ✅ |
+| E0102 | Mismatched brackets | ✅ |
+| E0103 | Unexpected token | ✅ |
+| E0104 | Invalid literal | ✅ |
+| E0105 | Unterminated string | ✅ |
+| E0106 | Invalid escape sequence | ✅ |
+| E0107 | Invalid number format | ✅ |
 
-| Code | Description |
-|------|-------------|
-| E0201 | Type mismatch |
-| E0202 | Cannot infer type |
-| E0203 | Missing type parameter |
-| E0204 | Invalid type application |
-| E0205 | Recursive type without indirection |
-| E0206 | Missing trait bound |
-| E0207 | Conflicting trait implementations |
+### Type Errors (E02xx) — ✅ Phase 1 Implemented (partial)
 
-### Effect Errors (E03xx)
+| Code | Description | Status |
+|------|-------------|--------|
+| E0201 | Type mismatch | ✅ |
+| E0202 | Cannot infer type | ✅ |
+| E0203 | Missing type parameter | ✅ |
+| E0204 | Invalid type application | ✅ |
+| E0205 | Recursive type without indirection | 🔶 |
+| E0206 | Missing trait bound | 🔶 |
+| E0207 | Conflicting trait implementations | 🔶 |
 
-| Code | Description |
-|------|-------------|
-| E0301 | Unhandled effect |
-| E0302 | Effect signature mismatch |
-| E0303 | Resume type mismatch |
-| E0304 | Linear value in multi-shot handler |
-| E0305 | Missing effect handler |
-| E0306 | Duplicate effect in row |
+### Effect Errors (E03xx) — 🔶 Phase 2 Scaffolded
 
-### Ownership Errors (E04xx)
+| Code | Description | Status |
+|------|-------------|--------|
+| E0301 | Unhandled effect | 🔶 |
+| E0302 | Effect signature mismatch | 🔶 |
+| E0303 | Resume type mismatch | 🔶 |
+| E0304 | Linear value in multi-shot handler | 📋 |
+| E0305 | Missing effect handler | 🔶 |
+| E0306 | Duplicate effect in row | 🔶 |
 
-| Code | Description |
-|------|-------------|
-| E0401 | Use of moved value |
-| E0402 | Cannot borrow as mutable |
-| E0403 | Linear value not consumed |
-| E0404 | Double-free |
-| E0405 | Mutable borrow while immutable borrow exists |
-| E0406 | Return of borrowed value |
+### Ownership Errors (E04xx) — 🔶 Phase 3 Scaffolded
 
-### Lifetime Errors (E05xx)
+| Code | Description | Status |
+|------|-------------|--------|
+| E0401 | Use of moved value | 🔶 |
+| E0402 | Cannot borrow as mutable | 🔶 |
+| E0403 | Linear value not consumed | 🔶 |
+| E0404 | Double-free | 📋 |
+| E0405 | Mutable borrow while immutable borrow exists | 📋 |
+| E0406 | Return of borrowed value | 📋 |
 
-| Code | Description |
-|------|-------------|
-| E0501 | Reference outlives value |
-| E0502 | Stale reference across effect |
-| E0503 | Lifetime bound not satisfied |
-| E0504 | Region escape |
+### Lifetime Errors (E05xx) — 🔶 Phase 3 Scaffolded
 
-### Dispatch Errors (E06xx)
+| Code | Description | Status |
+|------|-------------|--------|
+| E0501 | Reference outlives value | 🔶 |
+| E0502 | Stale reference across effect | 🔶 |
+| E0503 | Lifetime bound not satisfied | 📋 |
+| E0504 | Region escape | 📋 |
 
-| Code | Description |
-|------|-------------|
-| E0601 | Ambiguous method dispatch |
-| E0602 | No matching implementation |
-| E0603 | Type instability |
-| E0604 | Circular dispatch |
+### Dispatch Errors (E06xx) — 📋 Phase 6+ Specified
 
-### Name Resolution Errors (E07xx)
+| Code | Description | Status |
+|------|-------------|--------|
+| E0601 | Ambiguous method dispatch | 📋 |
+| E0602 | No matching implementation | 📋 |
+| E0603 | Type instability | 📋 |
+| E0604 | Circular dispatch | 📋 |
 
-| Code | Description |
-|------|-------------|
-| E0701 | Undefined name |
-| E0702 | Duplicate definition |
-| E0703 | Private item access |
-| E0704 | Circular import |
+### Name Resolution Errors (E07xx) — ✅ Phase 0-1 Implemented
+
+| Code | Description | Status |
+|------|-------------|--------|
+| E0701 | Undefined name | ✅ |
+| E0702 | Duplicate definition | ✅ |
+| E0703 | Private item access | 🔶 |
+| E0704 | Circular import | 📋 |
 
 ---
 

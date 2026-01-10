@@ -1,8 +1,8 @@
 # Blood Multiple Dispatch Specification
 
-**Version**: 0.2.0-draft
+**Version**: 0.3.0-draft
 **Status**: Active Development
-**Last Updated**: 2026-01-09
+**Last Updated**: 2026-01-10
 
 This document specifies Blood's multiple dispatch system, including method resolution, type stability enforcement, and ambiguity detection.
 
@@ -11,8 +11,10 @@ This document specifies Blood's multiple dispatch system, including method resol
 ## Table of Contents
 
 1. [Overview](#1-overview)
+   - 1.5 [Implementation Status](#15-implementation-status)
 2. [Method Declaration](#2-method-declaration)
 3. [Dispatch Resolution Algorithm](#3-dispatch-resolution-algorithm)
+   - 3.9 [Edge Cases and Special Scenarios](#39-edge-cases-and-special-scenarios)
 4. [Type Stability](#4-type-stability)
    - 4.1 [Definition](#41-definition)
    - 4.2 [Why Type Stability Matters](#42-why-type-stability-matters)
@@ -24,11 +26,17 @@ This document specifies Blood's multiple dispatch system, including method resol
    - 4.8 [Union Types for Controlled Instability](#48-union-types-for-controlled-instability)
 5. [Ambiguity Detection](#5-ambiguity-detection)
 6. [Compile-Time vs Runtime Dispatch](#6-compile-time-vs-runtime-dispatch)
+   - 6.5 [VFT Cache Invalidation](#65-vft-cache-invalidation)
 7. [Dispatch and Effects](#7-dispatch-and-effects)
 8. [Performance Considerations](#8-performance-considerations)
 9. [Constraint Solver Specification](#9-constraint-solver-specification)
 10. [Cross-Reference: Formal Typing Rules](#10-cross-reference-formal-typing-rules)
 11. [Related Work](#11-related-work)
+12. [Appendices](#12-appendices)
+    - A. [Dispatch Algorithm Pseudocode](#appendix-a-dispatch-algorithm-pseudocode)
+    - B. [Complexity Analysis](#appendix-b-complexity-analysis)
+    - C. [Worked Dispatch Examples](#appendix-c-worked-dispatch-examples)
+    - D. [Test Vectors](#appendix-d-test-vectors)
 
 ---
 
@@ -66,6 +74,27 @@ Blood combines Julia's multiple dispatch with strict type stability enforcement:
 - [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) — Typing rules for dispatch
 - [CONTENT_ADDRESSED.md](./CONTENT_ADDRESSED.md) — VFT and hash-based lookup
 - [DIAGNOSTICS.md](./DIAGNOSTICS.md) — Dispatch error messages (E06xx)
+
+### 1.5 Implementation Status
+
+The following table tracks implementation status of dispatch subsystems:
+
+| Component | Status | Location | Notes |
+|-----------|--------|----------|-------|
+| Method family collection | ✅ Implemented | `bloodc/src/typeck/methods.rs` | Basic collection works |
+| Applicability check | ✅ Implemented | `bloodc/src/typeck/dispatch.rs` | Subtype checking integrated |
+| Specificity ordering | ✅ Implemented | `bloodc/src/typeck/dispatch.rs` | Pairwise comparison |
+| Generic instantiation | 📋 Designed | — | Algorithm specified |
+| Constraint resolution | 📋 Designed | — | Algorithm specified |
+| Effect-aware dispatch | 📋 Designed | — | Algorithm specified, not implemented |
+| Diamond resolution | 📋 Designed | — | Requires trait system completion |
+| Type stability check | 📋 Designed | — | Algorithm specified |
+| Dynamic dispatch codegen | 📋 Designed | — | Awaits runtime completion |
+| VFT generation | 📋 Designed | — | Part of codegen phase 2 |
+| Fingerprint caching | 📋 Designed | — | Runtime feature |
+| Ambiguity detection | ✅ Implemented | `bloodc/src/typeck/ambiguity.rs` | Compile-time check |
+
+**Legend**: ✅ Implemented | ⚠️ Partial | 📋 Designed | ❌ Not Started
 
 ---
 
@@ -435,6 +464,201 @@ struct Diamond impl Left, Right {
         <Self as Left>::method(self)
     }
 }
+```
+
+### 3.9 Edge Cases and Special Scenarios
+
+This section documents dispatch behavior in edge cases and unusual scenarios.
+
+#### 3.9.1 Empty Method Families
+
+When a method name has no definitions:
+
+```
+RESOLVE_EMPTY_FAMILY(method_name, arg_types) → Error:
+    // No methods exist with this name at all
+    RETURN Error::UndefinedMethod {
+        name: method_name,
+        suggestion: SUGGEST_SIMILAR_NAMES(method_name)
+    }
+```
+
+**Behavior**: Compile-time error with suggestions for similar method names using edit distance.
+
+#### 3.9.2 Self-Recursive Dispatch
+
+When dispatch resolution triggers itself:
+
+```blood
+fn recursive<T>(x: T) -> T {
+    // During dispatch resolution for inner call,
+    // we're already resolving outer call
+    recursive(x)  // Must not cause infinite loop
+}
+```
+
+**Resolution Protocol**:
+
+```
+RESOLVE_WITH_RECURSION_GUARD(method_name, arg_types, visited) → Method | Error:
+    key ← (method_name, arg_types)
+
+    IF key IN visited:
+        // Recursive call detected - use cached partial result
+        RETURN visited[key].partial_result
+
+    visited[key] ← { status: "in_progress", partial_result: None }
+
+    result ← RESOLVE_DISPATCH(method_name, arg_types)
+    visited[key] ← { status: "complete", partial_result: result }
+
+    RETURN result
+```
+
+#### 3.9.3 Variadic Method Dispatch
+
+Blood supports variadic methods via array rest parameters:
+
+```blood
+fn printf(fmt: String, args: ..Any) -> () / {IO} { ... }
+fn printf(fmt: String, args: ..i32) -> () / {IO} { ... }  // Specialized
+```
+
+**Variadic Specificity Rules**:
+
+```
+VARIADIC_SPECIFICITY(m1, m2) → Ordering:
+    // Compare non-variadic parameters first
+    FOR i IN 0..min(m1.fixed_params.len(), m2.fixed_params.len()):
+        cmp ← PARAM_SPECIFICITY(m1.fixed_params[i], m2.fixed_params[i])
+        IF cmp ≠ Equal:
+            RETURN cmp
+
+    // If same fixed params, compare variadic element types
+    IF m1.has_variadic AND m2.has_variadic:
+        RETURN PARAM_SPECIFICITY(m1.variadic_elem_type, m2.variadic_elem_type)
+
+    // Non-variadic is more specific than variadic
+    IF m1.has_variadic AND NOT m2.has_variadic:
+        RETURN LessSpecific
+    IF NOT m1.has_variadic AND m2.has_variadic:
+        RETURN MoreSpecific
+
+    RETURN Equal
+```
+
+**Example**:
+
+```blood
+fn sum() -> i32 { 0 }                           // M1: no args
+fn sum(x: i32) -> i32 { x }                     // M2: one arg
+fn sum(args: ..i32) -> i32 { args.fold(0, +) } // M3: variadic
+
+sum()        // → M1 (exact, 0 args)
+sum(1)       // → M2 (exact, 1 arg, more specific than M3)
+sum(1, 2, 3) // → M3 (only match for 3 args)
+```
+
+#### 3.9.4 Higher-Kinded Type Dispatch
+
+When type parameters are themselves parameterized:
+
+```blood
+fn sequence<F<_>: Applicative, A>(xs: List<F<A>>) -> F<List<A>> { ... }
+fn sequence<A>(xs: List<Option<A>>) -> Option<List<A>> { ... }  // Specialized
+```
+
+**Resolution**:
+
+```
+HKT_SPECIFICITY(m1, m2) → Ordering:
+    // Concrete HKT application is more specific than HKT variable
+    // Option<A> is more specific than F<A> where F: Applicative
+
+    IF is_concrete_hkt(m1.type) AND is_hkt_variable(m2.type):
+        RETURN MoreSpecific
+    IF is_hkt_variable(m1.type) AND is_concrete_hkt(m2.type):
+        RETURN LessSpecific
+
+    // Both concrete or both variable - compare normally
+    RETURN PARAM_SPECIFICITY(m1.type, m2.type)
+```
+
+#### 3.9.5 Effect-Only Method Overloading
+
+When methods differ only in effects (not types):
+
+```blood
+fn load(path: Path) -> Data / pure { load_from_cache(path) }
+fn load(path: Path) -> Data / {IO} { load_from_disk(path) }
+fn load(path: Path) -> Data / {IO, Error<E>} { load_with_errors(path) }
+```
+
+**Dispatch in Effect Context**:
+
+```
+EFFECT_ONLY_DISPATCH(method_name, arg_types, effect_context) → Method:
+    // All methods have identical type signatures
+    // Select based on effect context:
+
+    candidates ← COLLECT_METHODS(method_name, arg_types)
+    compatible ← FILTER_BY_EFFECT_CONTEXT(candidates, effect_context)
+
+    // Among compatible, prefer fewest effects (most specific)
+    RETURN MIN_BY(compatible, |m| effect_count(m.effects))
+```
+
+#### 3.9.6 Mutual Recursion in Dispatch
+
+When two methods dispatch to each other:
+
+```blood
+fn even(n: u32) -> bool { if n == 0 { true } else { odd(n - 1) } }
+fn odd(n: u32) -> bool { if n == 0 { false } else { even(n - 1) } }
+```
+
+**Resolution**: Mutual recursion is handled by the recursion guard (§3.9.2). Both methods are resolved independently before execution.
+
+#### 3.9.7 Phantom Type Parameters
+
+Type parameters that don't appear in value positions:
+
+```blood
+fn cast<From, To>(x: PhantomData<From>) -> PhantomData<To> { ... }
+```
+
+**Rule**: Phantom type parameters participate in dispatch normally. They're instantiated based on inference context, not argument types.
+
+#### 3.9.8 Default Type Parameters
+
+When type parameters have defaults:
+
+```blood
+fn create<T = String>() -> T { T::default() }
+fn create<T: Numeric = i32>() -> T { T::zero() }
+```
+
+**Resolution**:
+
+```
+DEFAULT_PARAM_DISPATCH(method_name, explicit_types) → Method:
+    candidates ← COLLECT_METHODS(method_name)
+
+    FOR method IN candidates:
+        // Apply defaults for unspecified type params
+        instantiated_params ← []
+        FOR (param, default) IN method.type_params:
+            IF param IN explicit_types:
+                instantiated_params.push(explicit_types[param])
+            ELSE IF default.is_some():
+                instantiated_params.push(default)
+            ELSE:
+                // Cannot infer - method not applicable
+                CONTINUE to next method
+
+        method.instantiate(instantiated_params)
+
+    RETURN RESOLVE_AMONG(candidates)
 ```
 
 ---
@@ -1235,6 +1459,178 @@ identity(3.14)    // Generates: identity_f64
 
 Monomorphization ensures type-stable code has zero dispatch overhead.
 
+### 6.5 VFT Cache Invalidation
+
+Blood's content-addressed code model enables hot code reloading. When methods are added, removed, or modified at runtime (during development), the VFT (Virtual Function Table) caches must be invalidated correctly.
+
+#### 6.5.1 Cache Invalidation Events
+
+| Event | Scope | Action |
+|-------|-------|--------|
+| Method added | Method family | Invalidate family's dispatch table |
+| Method removed | Method family | Invalidate family's dispatch table |
+| Method modified | Single method | Replace entry, preserve fingerprint mappings |
+| Type added | Global | Update type registry, rebuild affected VFTs |
+| Type modified | Dependent methods | Invalidate methods that reference this type |
+
+#### 6.5.2 Invalidation Algorithm
+
+```
+INVALIDATE_DISPATCH_CACHE(event: CacheEvent) → ():
+    MATCH event:
+        MethodAdded { family, method } →
+            // The new method may affect existing dispatch decisions
+            table ← dispatch_tables.get(family)
+
+            // Find all argument type combinations that could match new method
+            affected_keys ← FIND_AFFECTED_ENTRIES(table, method.param_types)
+
+            // Invalidate affected entries
+            FOR key IN affected_keys:
+                table.fingerprint_map.remove(key)
+                table.full_type_cache.remove(key)
+
+            // Add new method to family
+            method_families[family].add(method)
+
+            // Rebuild bloom filter
+            table.collision_filter ← BUILD_COLLISION_FILTER(table)
+
+        MethodRemoved { family, method_hash } →
+            table ← dispatch_tables.get(family)
+
+            // Remove method from family
+            method_families[family].remove_by_hash(method_hash)
+
+            // Remove all cache entries that resolved to this method
+            FOR (key, entry) IN table.fingerprint_map:
+                IF entry.method.hash == method_hash:
+                    table.fingerprint_map.remove(key)
+
+            // Clear full type cache (conservative)
+            table.full_type_cache.clear()
+
+            // Rebuild bloom filter
+            table.collision_filter ← BUILD_COLLISION_FILTER(table)
+
+        MethodModified { family, old_hash, new_method } →
+            // Method body changed but signature unchanged
+            table ← dispatch_tables.get(family)
+
+            // Update method in family
+            method_families[family].replace(old_hash, new_method)
+
+            // Update cache entries in-place
+            FOR (key, entry) IN table.fingerprint_map:
+                IF entry.method.hash == old_hash:
+                    entry.method ← new_method
+                    entry.full_types ← entry.full_types  // Unchanged
+
+            // Full type cache entries also need updating
+            FOR (key, cached) IN table.full_type_cache:
+                IF cached.hash == old_hash:
+                    table.full_type_cache.put(key, new_method)
+
+        TypeModified { type_hash } →
+            // A type definition changed - affects all methods using this type
+            affected_families ← FIND_FAMILIES_USING_TYPE(type_hash)
+
+            FOR family IN affected_families:
+                // Conservative: clear all caches for affected families
+                table ← dispatch_tables.get(family)
+                table.fingerprint_map.clear()
+                table.full_type_cache.clear()
+                table.collision_filter ← BUILD_COLLISION_FILTER(table)
+
+
+FIND_AFFECTED_ENTRIES(table, new_param_types) → Set<Key>:
+    affected ← {}
+
+    FOR (key, entry) IN table.fingerprint_map:
+        // Check if existing entry could be superseded by new method
+        existing_types ← entry.full_types
+
+        // New method affects entry if:
+        // 1. New method is applicable to existing types, AND
+        // 2. New method might be more specific
+
+        IF APPLICABLE(new_param_types, existing_types):
+            affected.add(key)
+
+    RETURN affected
+```
+
+#### 6.5.3 Incremental VFT Rebuild
+
+For large codebases, full VFT rebuilds are expensive. Blood uses incremental rebuild:
+
+```
+INCREMENTAL_VFT_UPDATE(family, changes: List<Change>) → ():
+    table ← dispatch_tables.get(family)
+
+    // Phase 1: Collect all affected argument type combinations
+    affected_arg_combos ← {}
+    FOR change IN changes:
+        affected_arg_combos.union(change.affected_types)
+
+    // Phase 2: Re-resolve dispatch only for affected combinations
+    FOR arg_types IN affected_arg_combos:
+        new_method ← RESOLVE_DISPATCH(family, arg_types)
+        fingerprints ← COMPUTE_FINGERPRINTS(arg_types)
+
+        table.fingerprint_map.put(fingerprints, {
+            method: new_method,
+            full_types: arg_types
+        })
+        table.full_type_cache.put(arg_types, new_method)
+
+    // Phase 3: Rebuild bloom filter (always needed after changes)
+    table.collision_filter ← BUILD_COLLISION_FILTER(table)
+```
+
+#### 6.5.4 Consistency During Invalidation
+
+To ensure consistency during concurrent access:
+
+```
+ATOMIC_VFT_UPDATE(family, update_fn) → ():
+    // Acquire write lock on dispatch table
+    table ← dispatch_tables.get(family)
+    table.write_lock.acquire()
+
+    TRY:
+        // Perform update
+        update_fn(table)
+    FINALLY:
+        table.write_lock.release()
+
+    // Signal waiters that table has been updated
+    table.version.increment()
+    table.notify_waiters()
+```
+
+Readers use optimistic concurrency:
+
+```
+DISPATCH_WITH_VERSION_CHECK(family, arg_types) → Method:
+    table ← dispatch_tables.get(family)
+
+    LOOP:
+        version_before ← table.version.load()
+
+        // Perform dispatch lookup (no lock)
+        result ← HIERARCHICAL_DISPATCH(family, arg_types)
+
+        version_after ← table.version.load()
+
+        IF version_before == version_after:
+            // Table unchanged during lookup - result is valid
+            RETURN result
+        ELSE:
+            // Table changed - retry
+            CONTINUE
+```
+
 ---
 
 ## 7. Dispatch and Effects
@@ -1854,4 +2250,668 @@ EMIT_DYNAMIC_DISPATCH(method_name, call_site) → Code:
 
 ---
 
-*Last updated: 2026-01-09*
+## Appendix B: Complexity Analysis
+
+This appendix provides time and space complexity bounds for all dispatch algorithms.
+
+### B.1 Core Algorithm Complexities
+
+| Algorithm | Time Complexity | Space Complexity | Notes |
+|-----------|-----------------|------------------|-------|
+| `APPLICABLE` | O(n) | O(1) | n = parameter count |
+| `MORE_SPECIFIC` | O(n) | O(1) | n = parameter count |
+| `RESOLVE_DISPATCH` | O(m × n) | O(m) | m = methods, n = params |
+| `DETECT_AMBIGUITIES` | O(m² × n) | O(m²) | Pairwise comparison |
+| `UNIFY` | O(α(n)) | O(n) | α = inverse Ackermann |
+| `OCCURS` | O(size(type)) | O(depth) | Type AST traversal |
+
+### B.2 Detailed Analysis
+
+#### B.2.1 APPLICABLE Check
+
+```
+APPLICABLE(method, arg_types) → bool
+
+Time:  O(n) where n = len(arg_types)
+       - One subtype check per parameter
+       - Each subtype check is O(d) where d = type depth
+
+Space: O(1) if types are pre-computed
+       O(d) for recursive subtype checking
+```
+
+**Worst case**: Types with deep nesting (e.g., `List<List<List<...>>>`)
+
+#### B.2.2 MORE_SPECIFIC Comparison
+
+```
+MORE_SPECIFIC(m1, m2) → bool
+
+Time:  O(n × d) where n = params, d = max type depth
+       - n pairwise type comparisons
+       - Each comparison involves subtype checking
+
+Space: O(d) for recursion stack during subtype check
+```
+
+#### B.2.3 RESOLVE_DISPATCH (Full Resolution)
+
+```
+RESOLVE_DISPATCH(method_name, arg_types) → Method
+
+Time:  O(m × n × d) where:
+       - m = number of methods in family
+       - n = number of parameters
+       - d = maximum type depth
+
+       Breakdown:
+       - Collect candidates: O(m)
+       - Filter applicable:  O(m × n × d) -- m methods, n params each
+       - Find maximal:       O(m² × n × d) -- pairwise comparisons
+
+Space: O(m) for candidate list
+```
+
+**Optimization**: With fingerprint caching, expected time is O(1) for cache hit.
+
+#### B.2.4 Type Unification
+
+```
+UNIFY(t1, t2, subst) → Result<Substitution>
+
+Time:  O(n × α(n)) where n = size of type terms
+       - Uses union-find with path compression
+       - α(n) is inverse Ackermann (effectively constant)
+
+Space: O(n) for substitution map
+
+Without path compression: O(n²)
+With path compression:    O(n × α(n)) ≈ O(n)
+```
+
+**Reference**: The near-linear complexity is based on Tarjan's analysis of union-find.
+
+#### B.2.5 Constraint Solving
+
+```
+SOLVE_CONSTRAINTS(constraints) → Result<Substitution>
+
+Time:  O(c × u) where c = constraints, u = unification cost
+       - Each constraint may trigger unification
+       - Worst case: O(c × n × α(n))
+
+Space: O(c + n) for worklist and substitution
+```
+
+**Note**: HM type inference is DEXPTIME-complete in theory, but pathological cases are rare in practice. Real-world code exhibits near-linear behavior.
+
+### B.3 Runtime Dispatch Costs
+
+| Operation | Expected | Worst Case | When |
+|-----------|----------|------------|------|
+| Fingerprint lookup | O(1) | O(k) | k = collision chain |
+| Bloom filter check | O(1) | O(1) | Always constant |
+| Full type ID lookup | O(1) | O(m) | Cache miss |
+| Complete resolution | O(m × n) | O(m² × n) | Cache cold |
+
+### B.4 Space Overhead
+
+| Structure | Size | Notes |
+|-----------|------|-------|
+| Dispatch table (per family) | O(m × k) | m methods, k = avg type combos |
+| Fingerprint map | O(e) | e = distinct call site signatures |
+| Bloom filter | 8KB fixed | 64K bits, 3 hash functions |
+| Full type cache | O(c × n) | c = cache capacity, n = arg count |
+| Method entry | O(n) | n = parameter count |
+
+### B.5 Amortized Costs
+
+Over many dispatch operations:
+
+```
+Single operation cost (steady state):
+  - Cache hit:  O(1) expected
+  - Cache miss: O(m × n) then O(1) for subsequent
+
+Amortized per operation: O(1) assuming:
+  - Program has finite method families
+  - Call sites repeat with same type combinations
+  - Cache is warm after initial calls
+```
+
+---
+
+## Appendix C: Worked Dispatch Examples
+
+This appendix provides step-by-step traces of dispatch resolution to aid understanding and implementation verification.
+
+### C.1 Basic Specificity Resolution
+
+**Setup**: Method family `add` with three methods:
+
+```blood
+fn add(x: i32, y: i32) -> i32 { x + y }             // M1
+fn add(x: f64, y: f64) -> f64 { x + y }             // M2
+fn add<T: Numeric>(x: T, y: T) -> T { x + y }       // M3
+```
+
+**Call**: `add(1i32, 2i32)`
+
+**Step-by-step resolution**:
+
+```
+Step 1: COLLECT_CANDIDATES("add", 2)
+  → Found: {M1, M2, M3}
+
+Step 2: Check APPLICABLE for each candidate
+
+  M1: APPLICABLE(M1, [i32, i32])
+    - P1=i32, A1=i32: is_subtype(i32, i32) = true ✓
+    - P2=i32, A2=i32: is_subtype(i32, i32) = true ✓
+    → M1 is applicable ✓
+
+  M2: APPLICABLE(M2, [i32, i32])
+    - P1=f64, A1=i32: is_subtype(i32, f64) = false ✗
+    → M2 is NOT applicable
+
+  M3: APPLICABLE(M3, [i32, i32])
+    - Instantiate T=i32 (i32: Numeric ✓)
+    - P1=T=i32, A1=i32: is_subtype(i32, i32) = true ✓
+    - P2=T=i32, A2=i32: is_subtype(i32, i32) = true ✓
+    → M3 is applicable ✓
+
+  Applicable set: {M1, M3}
+
+Step 3: Find maximal by specificity
+
+  Compare M1 vs M3:
+    MORE_SPECIFIC(M1, M3):
+      - P1: i32 vs T
+        - is_concrete(i32) = true, is_type_param(T) = true
+        - Concrete more specific than type param ✓
+      - P2: i32 vs T
+        - Same reasoning ✓
+      - all_at_least = true, some_strictly = true
+    → M1 is more specific than M3
+
+  Compare M3 vs M1:
+    MORE_SPECIFIC(M3, M1):
+      - P1: T vs i32
+        - Type param is NOT more specific than concrete
+      → M3 is NOT more specific than M1
+
+  Maximal set: {M1}
+
+Step 4: Unique winner
+
+  → RETURN M1: fn add(x: i32, y: i32) -> i32
+```
+
+### C.2 Constraint-Based Resolution
+
+**Setup**:
+
+```blood
+fn process<T>(x: T) -> String { ... }                    // M1
+fn process<T: Display>(x: T) -> String { x.to_string() } // M2
+fn process<T: Debug + Display>(x: T) -> String { ... }   // M3
+```
+
+**Call**: `process(42i32)` where `i32: Debug + Display`
+
+```
+Step 1: COLLECT_CANDIDATES("process", 1)
+  → Found: {M1, M2, M3}
+
+Step 2: Check APPLICABLE
+
+  M1: T unconstrained → instantiate T=i32
+    → Applicable ✓
+
+  M2: T: Display → check i32: Display
+    → i32 implements Display ✓
+    → Applicable ✓
+
+  M3: T: Debug + Display → check i32: Debug + Display
+    → i32 implements Debug ✓
+    → i32 implements Display ✓
+    → Applicable ✓
+
+  Applicable set: {M1, M2, M3}
+
+Step 3: Compare by constraint specificity
+
+  M1 constraints: {}
+  M2 constraints: {Display}
+  M3 constraints: {Debug, Display}
+
+  PARAM_SPECIFICITY(M3, M2):
+    - M3 has {Debug, Display}, M2 has {Display}
+    - {Debug, Display} ⊃ {Display}
+    - M3 strictly more constrained
+    → M3 more specific than M2
+
+  PARAM_SPECIFICITY(M3, M1):
+    - M3 has {Debug, Display}, M1 has {}
+    - {Debug, Display} ⊃ {}
+    → M3 more specific than M1
+
+  PARAM_SPECIFICITY(M2, M1):
+    - M2 has {Display}, M1 has {}
+    → M2 more specific than M1
+
+  Maximal: {M3} (most constrained)
+
+Step 4: → RETURN M3
+```
+
+### C.3 Effect-Aware Dispatch
+
+**Setup**:
+
+```blood
+fn load(path: Path) -> Data / pure { cached(path) }           // M1
+fn load(path: Path) -> Data / {IO} { read_file(path) }        // M2
+fn load(path: Path) -> Data / {IO, Error<E>} { try_read(path) } // M3
+```
+
+**Call in pure context**: `load("config.toml")` within `fn pure_fn() / pure`
+
+```
+Step 1: COLLECT_CANDIDATES("load", 1)
+  → Found: {M1, M2, M3}
+
+Step 2: Filter by effect context
+
+  Context allows: pure (empty effect set)
+
+  M1 effects: pure (∅)
+    - ∅ ⊆ ∅ ✓
+    → Compatible ✓
+
+  M2 effects: {IO}
+    - {IO} ⊆ ∅ ✗
+    → NOT compatible
+
+  M3 effects: {IO, Error<E>}
+    - {IO, Error<E>} ⊆ ∅ ✗
+    → NOT compatible
+
+  Compatible set: {M1}
+
+Step 3: Type specificity (all same)
+  → All have identical type signatures
+
+Step 4: → RETURN M1 (only compatible method)
+```
+
+**Call in IO context**: `load("config.toml")` within `fn io_fn() / {IO}`
+
+```
+Step 2: Filter by effect context
+
+  Context allows: {IO}
+
+  M1 effects: ∅ ⊆ {IO} ✓ → Compatible
+  M2 effects: {IO} ⊆ {IO} ✓ → Compatible
+  M3 effects: {IO, Error<E>} ⊆ {IO} ✗ → NOT compatible
+
+  Compatible set: {M1, M2}
+
+Step 3: Effect specificity as tiebreaker
+
+  Type signatures identical, compare effects:
+
+  EFFECT_SPECIFICITY(M1, M2):
+    - M1 effects: ∅
+    - M2 effects: {IO}
+    - ∅ ⊂ {IO}
+    → M1 more specific (fewer effects)
+
+  → RETURN M1 (pure version preferred)
+```
+
+### C.4 Ambiguity Detection Example
+
+**Setup**:
+
+```blood
+fn process(x: i32, y: i32) -> i32 { ... }        // M1
+fn process<T: Numeric>(x: T, y: T) -> T { ... }  // M2
+```
+
+**Call**: `process(1i32, 2u8)` — mixed types
+
+```
+Step 1: COLLECT_CANDIDATES("process", 2)
+  → Found: {M1, M2}
+
+Step 2: Check APPLICABLE
+
+  M1: APPLICABLE(M1, [i32, u8])
+    - P1=i32, A1=i32: is_subtype(i32, i32) = true ✓
+    - P2=i32, A2=u8: is_subtype(u8, i32) = true (numeric promotion) ✓
+    → M1 is applicable ✓
+
+  M2: APPLICABLE(M2, [i32, u8])
+    - T=i32: i32: Numeric ✓
+    - But P2 requires T=i32, A2=u8
+    - u8 ≠ i32, T must be same for both
+    → M2 is NOT applicable (T cannot unify to both i32 and u8)
+
+  Applicable set: {M1}
+
+Step 3: Unique winner
+  → RETURN M1
+```
+
+**Alternative Call**: `process(1u8, 2u8)`
+
+```
+Step 2: Check APPLICABLE
+
+  M1: APPLICABLE(M1, [u8, u8])
+    - P1=i32, A1=u8: is_subtype(u8, i32) = true (promotion) ✓
+    - P2=i32, A2=u8: is_subtype(u8, i32) = true (promotion) ✓
+    → M1 is applicable ✓
+
+  M2: APPLICABLE(M2, [u8, u8])
+    - Instantiate T=u8: u8: Numeric ✓
+    - P1=u8, A1=u8: ✓
+    - P2=u8, A2=u8: ✓
+    → M2 is applicable ✓
+
+  Applicable set: {M1, M2}
+
+Step 3: Compare specificity
+
+  MORE_SPECIFIC(M1, M2):
+    - P1: i32 vs T=u8
+    - i32 is concrete, T is type param (pre-instantiation)
+    - Concrete generally more specific...
+    - But M1's i32 is NOT a subtype of u8
+    - all_at_least = false
+    → M1 NOT more specific than M2
+
+  MORE_SPECIFIC(M2, M1):
+    - P1: T=u8 vs i32
+    - Type param, even instantiated, less specific than concrete
+    → M2 NOT more specific than M1
+
+  Neither is more specific!
+  Maximal set: {M1, M2}
+
+Step 4: AMBIGUITY DETECTED
+  → ERROR: Ambiguous dispatch between M1 and M2
+  → Suggestion: Add fn process(x: u8, y: u8) -> u8 to resolve
+```
+
+### C.5 Diamond Problem Resolution
+
+**Setup**:
+
+```blood
+trait Drawable { fn render(&self) -> Image }
+trait Printable { fn render(&self) -> String }
+
+struct Document impl Drawable, Printable {
+    fn render(&self) -> Image { ... }   // Drawable::render
+    fn render(&self) -> String { ... }  // Printable::render
+}
+```
+
+**Call**: `doc.render()` without qualification
+
+```
+Step 1: Find applicable traits
+
+  doc: Document
+  Document implements: {Drawable, Printable}
+
+  Drawable has render(&self) -> Image
+  Printable has render(&self) -> String
+
+  applicable_traits = {Drawable, Printable}
+
+Step 2: Check for qualification
+
+  Call site has no trait qualification
+  len(applicable_traits) = 2 > 1
+
+Step 3: → ERROR: Ambiguous trait method
+
+  error[E0312]: ambiguous method `render`
+    --> src/main.blood:42:5
+     |
+  42 |     doc.render()
+     |         ^^^^^^
+     |
+     = note: multiple traits define `render`:
+       - Drawable::render(&self) -> Image
+       - Printable::render(&self) -> String
+     |
+     = help: use qualified syntax:
+       - <Document as Drawable>::render(&doc)
+       - <Document as Printable>::render(&doc)
+     |
+     = help: or use type ascription:
+       - let img: Image = doc.render()
+       - let txt: String = doc.render()
+```
+
+---
+
+## Appendix D: Test Vectors
+
+This appendix provides test cases for verifying dispatch implementation correctness.
+
+### D.1 Basic Dispatch Tests
+
+```yaml
+test_basic_exact_match:
+  methods:
+    - sig: "fn add(x: i32, y: i32) -> i32"
+    - sig: "fn add(x: f64, y: f64) -> f64"
+  call: "add(1i32, 2i32)"
+  expected: "fn add(x: i32, y: i32) -> i32"
+
+test_basic_subtype_match:
+  methods:
+    - sig: "fn process(x: Number) -> Number"
+  call: "process(42i32)"  # i32 <: Number
+  expected: "fn process(x: Number) -> Number"
+
+test_basic_no_match:
+  methods:
+    - sig: "fn add(x: i32, y: i32) -> i32"
+  call: "add(\"hello\", \"world\")"
+  expected: Error::NoMethodFound
+
+test_basic_generic:
+  methods:
+    - sig: "fn identity<T>(x: T) -> T"
+  call: "identity(42i32)"
+  expected: "fn identity<T>(x: T) -> T [T=i32]"
+```
+
+### D.2 Specificity Tests
+
+```yaml
+test_concrete_over_generic:
+  methods:
+    - sig: "fn f(x: i32) -> i32"
+    - sig: "fn f<T>(x: T) -> T"
+  call: "f(42i32)"
+  expected: "fn f(x: i32) -> i32"
+
+test_constrained_over_unconstrained:
+  methods:
+    - sig: "fn f<T>(x: T) -> String"
+    - sig: "fn f<T: Display>(x: T) -> String"
+  call: "f(42i32)"  # i32: Display
+  expected: "fn f<T: Display>(x: T) -> String"
+
+test_multi_constraint_most_specific:
+  methods:
+    - sig: "fn f<T>(x: T) -> String"
+    - sig: "fn f<T: Debug>(x: T) -> String"
+    - sig: "fn f<T: Debug + Display>(x: T) -> String"
+  call: "f(42i32)"  # i32: Debug + Display
+  expected: "fn f<T: Debug + Display>(x: T) -> String"
+
+test_more_params_equally_specific:
+  methods:
+    - sig: "fn f(x: i32, y: i32) -> i32"
+    - sig: "fn f(x: i32, y: i64) -> i64"
+  call: "f(1i32, 2i32)"
+  expected: "fn f(x: i32, y: i32) -> i32"
+```
+
+### D.3 Ambiguity Tests
+
+```yaml
+test_ambiguous_no_resolution:
+  methods:
+    - sig: "fn f<T: Serialize>(x: T) -> Bytes"
+    - sig: "fn f<T: Hash>(x: T) -> Bytes"
+  call: "f(value)"  # value: Serialize + Hash
+  expected: Error::AmbiguousDispatch
+
+test_ambiguous_resolved_by_specific:
+  methods:
+    - sig: "fn f<T: Serialize>(x: T) -> Bytes"
+    - sig: "fn f<T: Hash>(x: T) -> Bytes"
+    - sig: "fn f<T: Serialize + Hash>(x: T) -> Bytes"
+  call: "f(value)"
+  expected: "fn f<T: Serialize + Hash>(x: T) -> Bytes"
+
+test_incomparable_not_ambiguous:
+  methods:
+    - sig: "fn f(x: Cat) -> String"
+    - sig: "fn f(x: Dog) -> String"
+  call: "f(my_cat)"  # Cat and Dog unrelated
+  expected: "fn f(x: Cat) -> String"
+```
+
+### D.4 Effect-Aware Tests
+
+```yaml
+test_effect_filter_pure_context:
+  methods:
+    - sig: "fn load(p: Path) -> Data / pure"
+    - sig: "fn load(p: Path) -> Data / {IO}"
+  context: "pure"
+  call: "load(path)"
+  expected: "fn load(p: Path) -> Data / pure"
+
+test_effect_prefer_fewer:
+  methods:
+    - sig: "fn load(p: Path) -> Data / pure"
+    - sig: "fn load(p: Path) -> Data / {IO}"
+  context: "{IO}"  # allows IO
+  call: "load(path)"
+  expected: "fn load(p: Path) -> Data / pure"  # pure preferred
+
+test_effect_required:
+  methods:
+    - sig: "fn load(p: Path) -> Data / {IO}"
+  context: "pure"
+  call: "load(path)"
+  expected: Error::EffectNotAllowed
+```
+
+### D.5 Edge Case Tests
+
+```yaml
+test_empty_family:
+  methods: []
+  call: "nonexistent(42)"
+  expected: Error::UndefinedMethod
+
+test_variadic:
+  methods:
+    - sig: "fn sum() -> i32"
+    - sig: "fn sum(x: i32) -> i32"
+    - sig: "fn sum(args: ..i32) -> i32"
+  call: "sum(1, 2, 3)"
+  expected: "fn sum(args: ..i32) -> i32"
+
+test_variadic_prefer_fixed:
+  methods:
+    - sig: "fn sum(x: i32) -> i32"
+    - sig: "fn sum(args: ..i32) -> i32"
+  call: "sum(1)"
+  expected: "fn sum(x: i32) -> i32"
+
+test_recursive_dispatch:
+  methods:
+    - sig: "fn rec<T>(x: T) -> T"
+  call: "rec(rec(42))"
+  expected: "fn rec<T>(x: T) -> T [T=i32]"  # Both calls resolve
+
+test_hkt_dispatch:
+  methods:
+    - sig: "fn sequence<F<_>: Applicative, A>(xs: List<F<A>>) -> F<List<A>>"
+    - sig: "fn sequence<A>(xs: List<Option<A>>) -> Option<List<A>>"
+  call: "sequence(list_of_options)"
+  expected: "fn sequence<A>(xs: List<Option<A>>) -> Option<List<A>>"
+```
+
+### D.6 Type Stability Tests
+
+```yaml
+test_stable_simple:
+  method: "fn double(x: i32) -> i32 { x * 2 }"
+  expected: stable
+
+test_unstable_conditional_type:
+  method: |
+    fn unstable(x: i32) -> ??? {
+      if x > 0 { x } else { "negative" }
+    }
+  expected: Error::TypeUnstable
+
+test_stable_polymorphic:
+  method: "fn identity<T>(x: T) -> T { x }"
+  expected: stable
+
+test_unstable_undetermined_return:
+  method: "fn phantom<T, U>(x: T) -> U { ... }"
+  expected: Error::UndeterminedTypeVariable
+```
+
+### D.7 Performance Regression Tests
+
+```yaml
+# These tests verify dispatch doesn't regress in performance
+# Times are illustrative targets
+
+test_perf_fingerprint_hit:
+  setup: "warm cache with 1000 calls"
+  operation: "dispatch with cached fingerprint"
+  expected_cycles: "<10"
+
+test_perf_large_family:
+  setup: "method family with 100 methods"
+  operation: "dispatch to most specific"
+  expected_cycles: "<50"
+
+test_perf_deep_type:
+  setup: "argument type: List<List<List<i32>>>"
+  operation: "dispatch with deep type"
+  expected_cycles: "<100"
+```
+
+---
+
+*Last updated: 2026-01-10*
+
+---
+
+## References
+
+1. [Julia Multiple Dispatch Documentation](https://docs.julialang.org/en/v1/manual/methods/)
+2. [Hindley-Milner Type System - Wikipedia](https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system)
+3. [The Essence of ML Type Inference - Pottier & Rémy](http://gallium.inria.fr/~fpottier/publis/emlti-final.pdf)
+4. [De Bruijn Indices - Wikipedia](https://en.wikipedia.org/wiki/De_Bruijn_index)
+5. [Fast Flexible Function Dispatch in Julia](https://www.groundai.com/project/fast-flexible-function-dispatch-in-julia/1)

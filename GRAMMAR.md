@@ -1,8 +1,14 @@
 # Blood Surface Syntax Grammar
 
-**Version**: 0.2.0-draft
+**Version**: 0.3.0-draft
 **Status**: Active Development
-**Last Updated**: 2026-01-09
+**Implementation**: ✅ Implemented (lexer and parser complete)
+**Last Updated**: 2026-01-10
+
+**Revision 0.3.0 Changes**:
+- Added cross-references to FORMAL_SEMANTICS.md for effect syntax (§4.2, §8)
+- Added notation alignment notes
+- Added implementation status
 
 This document provides the complete grammar for Blood's surface syntax, including operator precedence, associativity, and lexical rules.
 
@@ -23,10 +29,21 @@ This document provides the complete grammar for Blood's surface syntax, includin
 ### Related Specifications
 
 - [SPECIFICATION.md](./SPECIFICATION.md) — Core language specification
-- [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) — Operational semantics for expressions
+- [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) — Operational semantics for expressions; see §1.3 for effect row notation and §5.5 for row polymorphism rules
 - [STDLIB.md](./STDLIB.md) — Standard library type signatures
 - [FFI.md](./FFI.md) — Bridge block syntax
 - [DIAGNOSTICS.md](./DIAGNOSTICS.md) — Parse error messages
+
+### Notation Alignment
+
+This document uses **surface syntax** notation. For **formal semantics** notation, see [FORMAL_SEMANTICS.md Appendix B](./FORMAL_SEMANTICS.md#appendix-b-notation-summary):
+
+| This Document | FORMAL_SEMANTICS.md | Meaning |
+|---------------|---------------------|---------|
+| `/ {IO, Error<E>}` | `ε = {IO, Error<E>}` | Effect row |
+| `/ {IO \| ε}` | `ε = {IO \| ρ}` | Open effect row with row variable |
+| `/ pure` | `ε = {}` or `pure` | Empty effect row |
+| `ε` (type parameter) | `ρ` | Row variable |
 
 ---
 
@@ -348,6 +365,8 @@ OwnershipType ::= 'linear' Type | 'affine' Type | 'Box' TypeArgs
 ```
 
 ### 4.2 Effect Types
+
+> **See Also**: [FORMAL_SEMANTICS.md §1.3](./FORMAL_SEMANTICS.md#13-syntax-definition) for formal effect row notation and [§5.5](./FORMAL_SEMANTICS.md#55-row-polymorphism-rules) for row polymorphism typing rules.
 
 ```ebnf
 EffectRow ::= 'pure'
@@ -734,6 +753,8 @@ let result = step3(step2(step1(input)));
 ---
 
 ## 8. Effect Syntax
+
+> **See Also**: [FORMAL_SEMANTICS.md §3](./FORMAL_SEMANTICS.md#3-expression-typing) for effect typing rules, [§4](./FORMAL_SEMANTICS.md#4-evaluation-semantics) for operational semantics, and [§8](./FORMAL_SEMANTICS.md#8-linear-types-and-effects-interaction) for linear types and effects interaction.
 
 ### 8.1 Effect Declaration
 

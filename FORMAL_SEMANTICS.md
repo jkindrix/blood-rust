@@ -1,8 +1,14 @@
 # Blood Formal Semantics
 
-**Version**: 0.2.0-draft
+**Version**: 0.3.0-draft
 **Status**: Active Development
-**Last Updated**: 2026-01-09
+**Implementation**: 🔶 Scaffolded (effect typing implemented, proofs not mechanized)
+**Last Updated**: 2026-01-10
+
+**Revision 0.3.0 Changes**:
+- Added notation alignment with GRAMMAR.md surface syntax
+- Added cross-references between formal and surface notations
+- Added implementation status
 
 This document provides the formal operational semantics for Blood, suitable for mechanized proof and compiler verification.
 
@@ -11,7 +17,7 @@ This document provides the formal operational semantics for Blood, suitable for 
 - [SPECIFICATION.md](./SPECIFICATION.md) — Core language specification
 - [MEMORY_MODEL.md](./MEMORY_MODEL.md) — Generation snapshot semantics
 - [DISPATCH.md](./DISPATCH.md) — Multiple dispatch typing rules
-- [GRAMMAR.md](./GRAMMAR.md) — Surface syntax grammar
+- [GRAMMAR.md](./GRAMMAR.md) — Surface syntax grammar; see [Notation Alignment](./GRAMMAR.md#notation-alignment) for surface-to-formal notation mapping
 - [STDLIB.md](./STDLIB.md) — Standard effect and type definitions
 
 ---
@@ -1265,6 +1271,8 @@ This preserves safety: each resume path is independently validated.
 
 ## Appendix A: Notation Reference
 
+### A.1 Formal Notation Symbols
+
 | Symbol | Meaning |
 |--------|---------|
 | `Γ` | Type context |
@@ -1279,6 +1287,19 @@ This preserves safety: each resume path is independently validated.
 | `⊗` | Linearity context combination |
 | `FV(e)` | Free variables in e |
 | `!a^g` | Generational reference to address a, generation g |
+
+### A.2 Surface Syntax to Formal Notation Mapping
+
+> **See Also**: [GRAMMAR.md Notation Alignment](./GRAMMAR.md#notation-alignment) for the complete mapping table.
+
+| Surface Syntax (Blood code) | Formal Notation | Example |
+|-----------------------------|-----------------|---------|
+| `/ {IO, Error<E>}` | `ε = {IO, Error<E>}` | Effect row annotation |
+| `/ {IO \| ε}` | `ε = {IO \| ρ}` | Open effect row with row variable |
+| `/ pure` | `ε = {}` | Empty effect row |
+| `fn(T) -> U / ε` | `T → U / ε` | Function type with effect |
+| `perform E.op(v)` | `perform op(v)` | Effect operation |
+| `with H handle { e }` | `handle e with H` | Handler expression |
 
 ---
 

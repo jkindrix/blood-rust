@@ -1,8 +1,8 @@
 # Blood Standard Library Specification
 
-**Version**: 0.2.0-draft
+**Version**: 0.3.0-draft
 **Status**: Active Development
-**Last Updated**: 2026-01-09
+**Last Updated**: 2026-01-10
 
 This document specifies Blood's standard library, including core types, traits, effects, and handlers.
 
@@ -13,6 +13,12 @@ This document specifies Blood's standard library, including core types, traits, 
 1. [Overview](#1-overview)
 2. [Primitive Types](#2-primitive-types)
 3. [Core Types](#3-core-types)
+   - 3.1 [Option\<T\>](#31-optiont)
+   - 3.2 [Result\<T, E\>](#32-resultt-e)
+   - 3.3 [Box\<T\>](#33-boxt)
+   - 3.4 [String](#34-string)
+   - 3.5 [Frozen\<T\>](#35-frozent)
+   - 3.6 [Range Types](#36-range-types)
 4. [Collections](#4-collections)
    - 4.0 [Complexity Notation](#40-complexity-notation)
    - 4.1 [Vec\<T\>](#41-vect)
@@ -21,11 +27,26 @@ This document specifies Blood's standard library, including core types, traits, 
    - 4.4 [VecDeque\<T\>](#44-vecdequt)
    - 4.5 [BTreeMap\<K, V\>](#45-btreemapk-v)
    - 4.6 [BTreeSet\<T\>](#46-btreesett)
+   - 4.7 [BinaryHeap\<T\>](#47-binaryheapt)
+   - 4.8 [Concurrent Collections](#48-concurrent-collections)
 5. [Core Traits](#5-core-traits)
-6. [Standard Effects](#6-standard-effects)
-7. [Standard Handlers](#7-standard-handlers)
-8. [Prelude](#8-prelude)
-9. [Implementation Notes](#9-implementation-notes)
+   - 5.1 [Comparison Traits](#51-comparison-traits)
+   - 5.2 [Conversion Traits](#52-conversion-traits)
+   - 5.3 [Operator Traits](#53-operator-traits)
+   - 5.4 [Iterator Traits](#54-iterator-traits)
+   - 5.5 [Ownership Traits](#55-ownership-traits)
+   - 5.6 [Hash Trait](#56-hash-trait)
+   - 5.7 [Display and Debug Traits](#57-display-and-debug-traits)
+   - 5.8 [Numeric Traits](#58-numeric-traits)
+   - 5.9 [Thread Safety Markers](#59-thread-safety-markers)
+6. [Iterator Adapters](#6-iterator-adapters)
+7. [IO Types](#7-io-types)
+8. [Time Types](#8-time-types)
+9. [Format Macros](#9-format-macros)
+10. [Standard Effects](#10-standard-effects)
+11. [Standard Handlers](#11-standard-handlers)
+12. [Prelude](#12-prelude)
+13. [Implementation Notes](#13-implementation-notes)
 
 ---
 
@@ -316,6 +337,215 @@ impl<T> Deref for Frozen<T> {
 }
 
 // Cannot DerefMut - frozen values are immutable
+```
+
+### 3.6 Range Types
+
+Blood provides a family of range types for expressing intervals, used extensively with iterators and slicing operations.
+
+```blood
+/// A range from `start` to `end` (exclusive): `start..end`
+struct Range<Idx> {
+    start: Idx,
+    end: Idx,
+}
+
+/// A range from `start` to `end` (inclusive): `start..=end`
+struct RangeInclusive<Idx> {
+    start: Idx,
+    end: Idx,
+    exhausted: bool,  // Tracks if iterator has completed
+}
+
+/// A range from `start` with no upper bound: `start..`
+struct RangeFrom<Idx> {
+    start: Idx,
+}
+
+/// A range up to `end` (exclusive): `..end`
+struct RangeTo<Idx> {
+    end: Idx,
+}
+
+/// A range up to `end` (inclusive): `..=end`
+struct RangeToInclusive<Idx> {
+    end: Idx,
+}
+
+/// The full range, unbounded: `..`
+struct RangeFull;
+```
+
+#### 3.6.1 Range Trait
+
+```blood
+/// Trait for types that can be used as range bounds.
+trait RangeBounds<T> {
+    fn start_bound(&self) -> Bound<&T> / pure
+    fn end_bound(&self) -> Bound<&T> / pure
+
+    fn contains<U>(&self, item: &U) -> bool / pure
+    where
+        T: PartialOrd<U>,
+        U: PartialOrd<T>
+}
+
+enum Bound<T> {
+    Included(T),
+    Excluded(T),
+    Unbounded,
+}
+```
+
+#### 3.6.2 Range Implementations
+
+```blood
+impl<Idx: PartialOrd> Range<Idx> {
+    fn new(start: Idx, end: Idx) -> Range<Idx> / pure
+    fn is_empty(&self) -> bool / pure { self.start >= self.end }
+    fn contains<U>(&self, item: &U) -> bool / pure
+    where
+        Idx: PartialOrd<U>,
+        U: PartialOrd<Idx>
+    {
+        self.start <= *item && *item < self.end
+    }
+}
+
+impl<Idx: Clone + PartialOrd + Step> Iterator for Range<Idx> {
+    type Item = Idx
+
+    fn next(&mut self) -> Option<Idx> / pure {
+        if self.start < self.end {
+            let n = self.start.clone()
+            self.start = Step::forward(self.start.clone(), 1)
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) / pure {
+        let len = Step::steps_between(&self.start, &self.end).unwrap_or(usize::MAX)
+        (len, Some(len))
+    }
+}
+
+impl<Idx: Clone + PartialOrd + Step> ExactSizeIterator for Range<Idx> {}
+impl<Idx: Clone + PartialOrd + Step> DoubleEndedIterator for Range<Idx> {
+    fn next_back(&mut self) -> Option<Idx> / pure {
+        if self.start < self.end {
+            self.end = Step::backward(self.end.clone(), 1)
+            Some(self.end.clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl<Idx: Clone + PartialOrd + Step> RangeInclusive<Idx> {
+    fn new(start: Idx, end: Idx) -> RangeInclusive<Idx> / pure
+    fn start(&self) -> &Idx / pure { &self.start }
+    fn end(&self) -> &Idx / pure { &self.end }
+    fn is_empty(&self) -> bool / pure { self.exhausted || self.start > self.end }
+}
+
+impl<Idx> RangeBounds<Idx> for Range<Idx> {
+    fn start_bound(&self) -> Bound<&Idx> / pure { Bound::Included(&self.start) }
+    fn end_bound(&self) -> Bound<&Idx> / pure { Bound::Excluded(&self.end) }
+}
+
+impl<Idx> RangeBounds<Idx> for RangeInclusive<Idx> {
+    fn start_bound(&self) -> Bound<&Idx> / pure { Bound::Included(&self.start) }
+    fn end_bound(&self) -> Bound<&Idx> / pure { Bound::Included(&self.end) }
+}
+
+impl<Idx> RangeBounds<Idx> for RangeFrom<Idx> {
+    fn start_bound(&self) -> Bound<&Idx> / pure { Bound::Included(&self.start) }
+    fn end_bound(&self) -> Bound<&Idx> / pure { Bound::Unbounded }
+}
+
+impl<Idx> RangeBounds<Idx> for RangeTo<Idx> {
+    fn start_bound(&self) -> Bound<&Idx> / pure { Bound::Unbounded }
+    fn end_bound(&self) -> Bound<&Idx> / pure { Bound::Excluded(&self.end) }
+}
+
+impl<Idx> RangeBounds<Idx> for RangeFull {
+    fn start_bound(&self) -> Bound<&Idx> / pure { Bound::Unbounded }
+    fn end_bound(&self) -> Bound<&Idx> / pure { Bound::Unbounded }
+}
+```
+
+#### 3.6.3 Step Trait
+
+The `Step` trait enables iteration over ranges:
+
+```blood
+trait Step: Clone + PartialOrd {
+    /// Returns the number of steps from `start` to `end`.
+    fn steps_between(start: &Self, end: &Self) -> Option<usize> / pure
+
+    /// Returns the value `count` steps forward from `start`.
+    fn forward(start: Self, count: usize) -> Self / pure
+
+    /// Returns the value `count` steps backward from `start`.
+    fn backward(start: Self, count: usize) -> Self / pure
+
+    /// Returns the value that would be obtained by taking one step forward.
+    fn forward_checked(start: Self, count: usize) -> Option<Self> / pure
+
+    /// Returns the value that would be obtained by taking one step backward.
+    fn backward_checked(start: Self, count: usize) -> Option<Self> / pure
+}
+
+// Implemented for all integer types
+impl Step for i32 {
+    fn steps_between(start: &i32, end: &i32) -> Option<usize> / pure {
+        if *end >= *start {
+            Some((*end - *start) as usize)
+        } else {
+            None
+        }
+    }
+
+    fn forward(start: i32, count: usize) -> i32 / pure {
+        start + count as i32
+    }
+
+    fn backward(start: i32, count: usize) -> i32 / pure {
+        start - count as i32
+    }
+
+    fn forward_checked(start: i32, count: usize) -> Option<i32> / pure {
+        start.checked_add(count as i32)
+    }
+
+    fn backward_checked(start: i32, count: usize) -> Option<i32> / pure {
+        start.checked_sub(count as i32)
+    }
+}
+
+// Also implemented for: i8, i16, i64, i128, isize, u8, u16, u32, u64, u128, usize, char
+```
+
+#### 3.6.4 Range Syntax Sugar
+
+```blood
+// Range syntax maps to constructors:
+1..10           // Range::new(1, 10)
+1..=10          // RangeInclusive::new(1, 10)
+1..             // RangeFrom { start: 1 }
+..10            // RangeTo { end: 10 }
+..=10           // RangeToInclusive { end: 10 }
+..              // RangeFull
+
+// Common patterns:
+for i in 0..n { ... }           // Iterate [0, n)
+for i in 0..=n { ... }          // Iterate [0, n]
+let slice = &arr[1..4]          // Slice elements 1, 2, 3
+let tail = &arr[2..]            // Slice from index 2 to end
+let head = &arr[..3]            // Slice first 3 elements
+let copy = &arr[..]             // Slice entire array
 ```
 
 ---
@@ -688,6 +918,525 @@ impl<T: Ord> BTreeSet<T> {
 
 **Complexity Bounds**: Same as BTreeMap for single-element operations. Set operations return lazy iterators that merge sorted sequences in O(n + m) time.
 
+### 4.7 BinaryHeap<T>
+
+Priority queue implemented as a binary max-heap.
+
+**Memory Layout**: Dense array representation where parent of node `i` is at `(i-1)/2`, left child at `2i+1`, right child at `2i+2`.
+
+**Heap Property**: Every parent node is greater than or equal to its children (max-heap). For min-heap behavior, use `Reverse<T>` wrapper.
+
+```blood
+struct BinaryHeap<T> {
+    data: Vec<T>,
+}
+
+impl<T: Ord> BinaryHeap<T> {
+    fn new() -> BinaryHeap<T> / pure
+    fn with_capacity(cap: usize) -> BinaryHeap<T> / {Allocate}
+
+    fn len(&self) -> usize / pure
+    fn is_empty(&self) -> bool / pure
+    fn capacity(&self) -> usize / pure
+
+    /// Pushes an element onto the heap.
+    fn push(&mut self, item: T) / {Allocate}
+
+    /// Removes and returns the maximum element.
+    fn pop(&mut self) -> Option<T> / pure
+
+    /// Returns a reference to the maximum element.
+    fn peek(&self) -> Option<&T> / pure
+
+    /// Returns a mutable reference to the maximum element.
+    /// Note: Caller must not modify the element in a way that violates heap property.
+    fn peek_mut(&mut self) -> Option<PeekMut<T>> / pure
+
+    /// Pushes an item and pops the largest (more efficient than separate push + pop).
+    fn push_pop(&mut self, item: T) -> T / pure
+
+    /// Pops the largest and pushes an item (more efficient than separate pop + push).
+    fn replace(&mut self, item: T) -> Option<T> / pure
+
+    /// Consumes the heap and returns a vector in sorted (ascending) order.
+    fn into_sorted_vec(self) -> Vec<T> / pure
+
+    /// Converts a vector into a heap (heapify).
+    fn from_vec(vec: Vec<T>) -> BinaryHeap<T> / pure
+
+    /// Moves all elements from `other` into `self`.
+    fn append(&mut self, other: &mut BinaryHeap<T>) / {Allocate}
+
+    fn clear(&mut self) / pure
+    fn reserve(&mut self, additional: usize) / {Allocate}
+    fn shrink_to_fit(&mut self) / {Allocate}
+
+    /// Returns an iterator visiting all values in arbitrary order.
+    fn iter(&self) -> impl Iterator<Item = &T> / pure
+
+    /// Returns an iterator visiting all values in heap order (largest first).
+    fn drain(&mut self) -> impl Iterator<Item = T> / pure
+
+    /// Drops all items in arbitrary order.
+    fn drain_sorted(&mut self) -> impl Iterator<Item = T> / pure
+
+    /// Consumes the heap, returning the underlying vector in arbitrary order.
+    fn into_vec(self) -> Vec<T> / pure
+
+    /// Retains only the elements specified by the predicate.
+    /// Note: Does not preserve heap ordering during iteration.
+    fn retain<F: fn(&T) -> bool>(&mut self, f: F) / pure
+}
+
+/// Wrapper for mutable peek access.
+struct PeekMut<'a, T: Ord> {
+    heap: &'a mut BinaryHeap<T>,
+    sift: bool,
+}
+
+impl<'a, T: Ord> PeekMut<'a, T> {
+    /// Removes the peeked value from the heap.
+    fn pop(self) -> T / pure
+}
+
+impl<'a, T: Ord> Deref for PeekMut<'a, T> {
+    type Target = T
+    fn deref(&self) -> &T / pure
+}
+
+impl<'a, T: Ord> DerefMut for PeekMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut T / pure
+}
+
+impl<'a, T: Ord> Drop for PeekMut<'a, T> {
+    fn drop(&mut self) / pure {
+        // Sift down if element was modified
+        if self.sift {
+            self.heap.sift_down(0)
+        }
+    }
+}
+
+/// Wrapper for creating min-heaps from max-heap implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Reverse<T>(T);
+
+impl<T: Ord> Ord for Reverse<T> {
+    fn cmp(&self, other: &Self) -> Ordering / pure {
+        other.0.cmp(&self.0)  // Reversed comparison
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for Reverse<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> / pure {
+        other.0.partial_cmp(&self.0)
+    }
+}
+```
+
+**Complexity Bounds**:
+
+| Operation | Time | Space | Notes |
+|-----------|------|-------|-------|
+| `new()` | O(1) | O(1) | No allocation |
+| `with_capacity(n)` | O(1) | O(n) | Single allocation |
+| `push(x)` | O(log n)† | O(1)† | Amortized, sift up |
+| `pop()` | O(log n) | O(1) | Sift down |
+| `peek()` | O(1) | O(1) | Read root |
+| `push_pop(x)` | O(log n) | O(1) | Combined operation |
+| `replace(x)` | O(log n) | O(1) | Combined operation |
+| `from_vec(v)` | O(n) | O(1) | Heapify in-place |
+| `into_sorted_vec()` | O(n log n) | O(1) | Heap sort |
+| `append(other)` | O(n + m) | O(1)† | Merge + heapify |
+| `drain_sorted()` | O(n log n) | O(1) | Yields in order |
+| `iter()` | O(1) | O(1) | Arbitrary order |
+
+**Use Cases**:
+- Priority queues (task scheduling, event systems)
+- Dijkstra's shortest path algorithm
+- K-largest/smallest elements (streaming)
+- Huffman coding (with min-heap via `Reverse<T>`)
+- Median maintenance (two heaps)
+
+**Example Usage**:
+
+```blood
+// Max-heap (default)
+let mut max_heap = BinaryHeap::new()
+max_heap.push(3)
+max_heap.push(1)
+max_heap.push(4)
+assert_eq!(max_heap.pop(), Some(4))
+assert_eq!(max_heap.pop(), Some(3))
+
+// Min-heap using Reverse wrapper
+let mut min_heap: BinaryHeap<Reverse<i32>> = BinaryHeap::new()
+min_heap.push(Reverse(3))
+min_heap.push(Reverse(1))
+min_heap.push(Reverse(4))
+assert_eq!(min_heap.pop(), Some(Reverse(1)))
+assert_eq!(min_heap.pop(), Some(Reverse(3)))
+
+// Priority queue for tasks
+struct Task {
+    priority: u32,
+    name: String,
+}
+
+impl Ord for Task {
+    fn cmp(&self, other: &Self) -> Ordering / pure {
+        self.priority.cmp(&other.priority)
+    }
+}
+
+let mut task_queue = BinaryHeap::new()
+task_queue.push(Task { priority: 1, name: "low".into() })
+task_queue.push(Task { priority: 10, name: "high".into() })
+// Highest priority task is processed first
+```
+
+### 4.8 Concurrent Collections
+
+Blood provides thread-safe collections for use across fibers and effect handlers.
+
+#### 4.8.1 Channel<T>
+
+Multi-producer, multi-consumer bounded channel for inter-fiber communication.
+
+```blood
+/// Bounded MPMC channel.
+struct Channel<T> {
+    // Internal: lock-free ring buffer with generation counters
+}
+
+/// Sender handle for a channel.
+struct Sender<T> {
+    channel: Arc<Channel<T>>,
+}
+
+/// Receiver handle for a channel.
+struct Receiver<T> {
+    channel: Arc<Channel<T>>,
+}
+
+impl<T: Send> Channel<T> {
+    /// Creates a bounded channel with the specified capacity.
+    fn bounded(capacity: usize) -> (Sender<T>, Receiver<T>) / {Allocate}
+
+    /// Creates an unbounded channel (use with caution - memory can grow).
+    fn unbounded() -> (Sender<T>, Receiver<T>) / {Allocate}
+}
+
+impl<T: Send> Sender<T> {
+    /// Sends a value, blocking if the channel is full.
+    fn send(&self, value: T) -> Result<(), SendError<T>> / {Async}
+
+    /// Attempts to send without blocking.
+    fn try_send(&self, value: T) -> Result<(), TrySendError<T>> / pure
+
+    /// Sends a value with a timeout.
+    fn send_timeout(&self, value: T, timeout: Duration) -> Result<(), SendTimeoutError<T>> / {Async}
+
+    /// Returns true if the channel is full.
+    fn is_full(&self) -> bool / pure
+
+    /// Returns the number of messages in the channel.
+    fn len(&self) -> usize / pure
+
+    /// Returns the channel's capacity.
+    fn capacity(&self) -> Option<usize> / pure
+
+    /// Closes the sender, preventing further sends.
+    fn close(&self) / pure
+}
+
+impl<T: Send> Clone for Sender<T> {
+    fn clone(&self) -> Sender<T> / pure
+}
+
+impl<T: Send> Receiver<T> {
+    /// Receives a value, blocking if the channel is empty.
+    fn recv(&self) -> Result<T, RecvError> / {Async}
+
+    /// Attempts to receive without blocking.
+    fn try_recv(&self) -> Result<T, TryRecvError> / pure
+
+    /// Receives a value with a timeout.
+    fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> / {Async}
+
+    /// Returns true if the channel is empty.
+    fn is_empty(&self) -> bool / pure
+
+    /// Returns the number of messages in the channel.
+    fn len(&self) -> usize / pure
+
+    /// Creates an iterator that receives messages until the channel is closed.
+    fn iter(&self) -> impl Iterator<Item = T> / {Async}
+
+    /// Closes the receiver, preventing further receives.
+    fn close(&self) / pure
+}
+
+impl<T: Send> Clone for Receiver<T> {
+    fn clone(&self) -> Receiver<T> / pure
+}
+
+/// Error types for channel operations.
+enum SendError<T> {
+    Disconnected(T),
+}
+
+enum TrySendError<T> {
+    Full(T),
+    Disconnected(T),
+}
+
+enum SendTimeoutError<T> {
+    Timeout(T),
+    Disconnected(T),
+}
+
+enum RecvError {
+    Disconnected,
+}
+
+enum TryRecvError {
+    Empty,
+    Disconnected,
+}
+
+enum RecvTimeoutError {
+    Timeout,
+    Disconnected,
+}
+```
+
+**Complexity Bounds** (for bounded channels):
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| `bounded(n)` | O(n) | Allocates ring buffer |
+| `send(v)` | O(1) | May block if full |
+| `try_send(v)` | O(1) | Never blocks |
+| `recv()` | O(1) | May block if empty |
+| `try_recv()` | O(1) | Never blocks |
+| `len()` | O(1) | Atomic read |
+| `clone()` | O(1) | Reference count increment |
+
+#### 4.8.2 OnceCell<T>
+
+Thread-safe cell that can be written to exactly once.
+
+```blood
+struct OnceCell<T> {
+    // Internal: atomic state + value storage
+}
+
+impl<T> OnceCell<T> {
+    /// Creates an empty OnceCell.
+    const fn new() -> OnceCell<T>
+
+    /// Gets the value, or initializes it with `f` if empty.
+    fn get_or_init<F: fn() -> T>(&self, f: F) -> &T / pure
+
+    /// Gets the value, or initializes it with fallible `f` if empty.
+    fn get_or_try_init<F: fn() -> Result<T, E>, E>(&self, f: F) -> Result<&T, E> / pure
+
+    /// Gets the value if initialized.
+    fn get(&self) -> Option<&T> / pure
+
+    /// Gets the value mutably if initialized.
+    fn get_mut(&mut self) -> Option<&mut T> / pure
+
+    /// Sets the value if empty, returning Err(value) if already set.
+    fn set(&self, value: T) -> Result<(), T> / pure
+
+    /// Takes the value, leaving the cell empty.
+    fn take(&mut self) -> Option<T> / pure
+
+    /// Consumes the cell and returns the value if initialized.
+    fn into_inner(self) -> Option<T> / pure
+}
+
+impl<T: Clone> Clone for OnceCell<T> {
+    fn clone(&self) -> OnceCell<T> / pure
+}
+```
+
+#### 4.8.3 RwLock<T>
+
+Reader-writer lock allowing multiple readers or single writer.
+
+```blood
+struct RwLock<T> {
+    // Internal: state machine + value
+}
+
+/// Read guard with shared access.
+struct RwLockReadGuard<'a, T> {
+    lock: &'a RwLock<T>,
+}
+
+/// Write guard with exclusive access.
+struct RwLockWriteGuard<'a, T> {
+    lock: &'a RwLock<T>,
+}
+
+impl<T> RwLock<T> {
+    /// Creates a new RwLock.
+    fn new(value: T) -> RwLock<T> / pure
+
+    /// Acquires shared read access, blocking if a writer holds the lock.
+    fn read(&self) -> RwLockReadGuard<T> / {Async}
+
+    /// Attempts to acquire read access without blocking.
+    fn try_read(&self) -> Option<RwLockReadGuard<T>> / pure
+
+    /// Acquires exclusive write access, blocking until no readers or writers.
+    fn write(&self) -> RwLockWriteGuard<T> / {Async}
+
+    /// Attempts to acquire write access without blocking.
+    fn try_write(&self) -> Option<RwLockWriteGuard<T>> / pure
+
+    /// Returns a mutable reference to the underlying data.
+    /// Requires exclusive ownership of the lock.
+    fn get_mut(&mut self) -> &mut T / pure
+
+    /// Consumes the lock and returns the inner value.
+    fn into_inner(self) -> T / pure
+}
+
+impl<'a, T> Deref for RwLockReadGuard<'a, T> {
+    type Target = T
+    fn deref(&self) -> &T / pure
+}
+
+impl<'a, T> Deref for RwLockWriteGuard<'a, T> {
+    type Target = T
+    fn deref(&self) -> &T / pure
+}
+
+impl<'a, T> DerefMut for RwLockWriteGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T / pure
+}
+```
+
+#### 4.8.4 Mutex<T>
+
+Mutual exclusion lock for exclusive access.
+
+```blood
+struct Mutex<T> {
+    // Internal: atomic state + value
+}
+
+struct MutexGuard<'a, T> {
+    mutex: &'a Mutex<T>,
+}
+
+impl<T> Mutex<T> {
+    /// Creates a new Mutex.
+    fn new(value: T) -> Mutex<T> / pure
+
+    /// Acquires the lock, blocking until available.
+    fn lock(&self) -> MutexGuard<T> / {Async}
+
+    /// Attempts to acquire the lock without blocking.
+    fn try_lock(&self) -> Option<MutexGuard<T>> / pure
+
+    /// Returns a mutable reference to the underlying data.
+    fn get_mut(&mut self) -> &mut T / pure
+
+    /// Consumes the mutex and returns the inner value.
+    fn into_inner(self) -> T / pure
+}
+
+impl<'a, T> Deref for MutexGuard<'a, T> {
+    type Target = T
+    fn deref(&self) -> &T / pure
+}
+
+impl<'a, T> DerefMut for MutexGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T / pure
+}
+
+impl<'a, T> Drop for MutexGuard<'a, T> {
+    fn drop(&mut self) / pure {
+        // Releases the lock
+    }
+}
+```
+
+#### 4.8.5 Atomic Types
+
+Lock-free atomic operations for primitive types.
+
+```blood
+struct AtomicBool { /* internal */ }
+struct AtomicI8 { /* internal */ }
+struct AtomicI16 { /* internal */ }
+struct AtomicI32 { /* internal */ }
+struct AtomicI64 { /* internal */ }
+struct AtomicIsize { /* internal */ }
+struct AtomicU8 { /* internal */ }
+struct AtomicU16 { /* internal */ }
+struct AtomicU32 { /* internal */ }
+struct AtomicU64 { /* internal */ }
+struct AtomicUsize { /* internal */ }
+struct AtomicPtr<T> { /* internal */ }
+
+/// Memory ordering for atomic operations.
+enum Ordering {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+impl AtomicI32 {
+    const fn new(value: i32) -> AtomicI32
+    fn load(&self, order: Ordering) -> i32 / pure
+    fn store(&self, value: i32, order: Ordering) / pure
+    fn swap(&self, value: i32, order: Ordering) -> i32 / pure
+    fn compare_exchange(
+        &self,
+        current: i32,
+        new: i32,
+        success: Ordering,
+        failure: Ordering
+    ) -> Result<i32, i32> / pure
+    fn compare_exchange_weak(
+        &self,
+        current: i32,
+        new: i32,
+        success: Ordering,
+        failure: Ordering
+    ) -> Result<i32, i32> / pure
+    fn fetch_add(&self, value: i32, order: Ordering) -> i32 / pure
+    fn fetch_sub(&self, value: i32, order: Ordering) -> i32 / pure
+    fn fetch_and(&self, value: i32, order: Ordering) -> i32 / pure
+    fn fetch_or(&self, value: i32, order: Ordering) -> i32 / pure
+    fn fetch_xor(&self, value: i32, order: Ordering) -> i32 / pure
+    fn fetch_max(&self, value: i32, order: Ordering) -> i32 / pure
+    fn fetch_min(&self, value: i32, order: Ordering) -> i32 / pure
+    fn get_mut(&mut self) -> &mut i32 / pure
+    fn into_inner(self) -> i32 / pure
+}
+
+// Similar implementations for other atomic types
+```
+
+**Ordering Guidelines**:
+
+| Ordering | Use When |
+|----------|----------|
+| `Relaxed` | No synchronization needed (just atomicity) |
+| `Acquire` | Reading shared data (pairs with Release) |
+| `Release` | Writing shared data (pairs with Acquire) |
+| `AcqRel` | Both reading and writing (RMW operations) |
+| `SeqCst` | Need global total ordering (rare, expensive) |
+
 ---
 
 ## 5. Core Traits
@@ -906,11 +1655,1990 @@ struct DefaultHasher {
 }
 ```
 
+### 5.7 Display and Debug Traits
+
+Traits for human-readable and programmer-oriented formatting.
+
+```blood
+/// Trait for user-facing display output.
+trait Display {
+    /// Formats the value for display.
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Trait for programmer-oriented debug output.
+trait Debug {
+    /// Formats the value for debugging.
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Write adapter for formatting operations.
+struct Formatter<'a> {
+    // Internal write buffer and formatting options
+}
+
+impl<'a> Formatter<'a> {
+    /// Writes a string slice to the output.
+    fn write_str(&mut self, s: &str) -> Result<(), FormatError> / pure
+
+    /// Writes a char to the output.
+    fn write_char(&mut self, c: char) -> Result<(), FormatError> / pure
+
+    /// Writes formatted arguments to the output.
+    fn write_fmt(&mut self, args: Arguments) -> Result<(), FormatError> / pure
+
+    /// Returns the fill character.
+    fn fill(&self) -> char / pure
+
+    /// Returns the alignment setting.
+    fn align(&self) -> Option<Alignment> / pure
+
+    /// Returns the width setting.
+    fn width(&self) -> Option<usize> / pure
+
+    /// Returns the precision setting.
+    fn precision(&self) -> Option<usize> / pure
+
+    /// Returns whether the sign should always be displayed.
+    fn sign_plus(&self) -> bool / pure
+
+    /// Returns whether the sign should be displayed for negative only.
+    fn sign_minus(&self) -> bool / pure
+
+    /// Returns whether the alternate flag is set.
+    fn alternate(&self) -> bool / pure
+
+    /// Returns whether zero-padding is requested.
+    fn sign_aware_zero_pad(&self) -> bool / pure
+
+    /// Creates a debug struct builder.
+    fn debug_struct(&mut self, name: &str) -> DebugStruct / pure
+
+    /// Creates a debug tuple builder.
+    fn debug_tuple(&mut self, name: &str) -> DebugTuple / pure
+
+    /// Creates a debug list builder.
+    fn debug_list(&mut self) -> DebugList / pure
+
+    /// Creates a debug set builder.
+    fn debug_set(&mut self) -> DebugSet / pure
+
+    /// Creates a debug map builder.
+    fn debug_map(&mut self) -> DebugMap / pure
+}
+
+/// Alignment options for formatting.
+enum Alignment {
+    Left,
+    Right,
+    Center,
+}
+
+/// Error type for formatting operations.
+struct FormatError;
+```
+
+#### 5.7.1 Debug Helpers
+
+Helper types for building complex debug output:
+
+```blood
+/// Helper for formatting structs in debug output.
+struct DebugStruct<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+}
+
+impl<'a, 'b> DebugStruct<'a, 'b> {
+    /// Adds a field to the struct output.
+    fn field(&mut self, name: &str, value: &dyn Debug) -> &mut Self / pure
+
+    /// Marks that there are additional unshown fields.
+    fn finish_non_exhaustive(&mut self) -> Result<(), FormatError> / pure
+
+    /// Finishes formatting the struct.
+    fn finish(&mut self) -> Result<(), FormatError> / pure
+}
+
+/// Helper for formatting tuples in debug output.
+struct DebugTuple<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+}
+
+impl<'a, 'b> DebugTuple<'a, 'b> {
+    /// Adds a field to the tuple output.
+    fn field(&mut self, value: &dyn Debug) -> &mut Self / pure
+
+    /// Finishes formatting the tuple.
+    fn finish(&mut self) -> Result<(), FormatError> / pure
+}
+
+/// Helper for formatting lists in debug output.
+struct DebugList<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+}
+
+impl<'a, 'b> DebugList<'a, 'b> {
+    /// Adds an entry to the list.
+    fn entry(&mut self, value: &dyn Debug) -> &mut Self / pure
+
+    /// Adds multiple entries to the list.
+    fn entries<I: Iterator<Item = D>, D: Debug>(&mut self, entries: I) -> &mut Self / pure
+
+    /// Finishes formatting the list.
+    fn finish(&mut self) -> Result<(), FormatError> / pure
+}
+
+/// Helper for formatting sets in debug output.
+struct DebugSet<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+}
+
+impl<'a, 'b> DebugSet<'a, 'b> {
+    /// Adds an entry to the set.
+    fn entry(&mut self, value: &dyn Debug) -> &mut Self / pure
+
+    /// Adds multiple entries to the set.
+    fn entries<I: Iterator<Item = D>, D: Debug>(&mut self, entries: I) -> &mut Self / pure
+
+    /// Finishes formatting the set.
+    fn finish(&mut self) -> Result<(), FormatError> / pure
+}
+
+/// Helper for formatting maps in debug output.
+struct DebugMap<'a, 'b> {
+    fmt: &'a mut Formatter<'b>,
+}
+
+impl<'a, 'b> DebugMap<'a, 'b> {
+    /// Adds a key to the map (must be followed by value).
+    fn key(&mut self, key: &dyn Debug) -> &mut Self / pure
+
+    /// Adds a value to the map (must follow key).
+    fn value(&mut self, value: &dyn Debug) -> &mut Self / pure
+
+    /// Adds a key-value pair to the map.
+    fn entry(&mut self, key: &dyn Debug, value: &dyn Debug) -> &mut Self / pure
+
+    /// Adds multiple entries to the map.
+    fn entries<K: Debug, V: Debug, I: Iterator<Item = (K, V)>>(&mut self, entries: I) -> &mut Self / pure
+
+    /// Finishes formatting the map.
+    fn finish(&mut self) -> Result<(), FormatError> / pure
+}
+```
+
+#### 5.7.2 Example Implementations
+
+```blood
+// Manual Display implementation
+impl Display for Point {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+// Manual Debug implementation
+impl Debug for Point {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure {
+        f.debug_struct("Point")
+            .field("x", &self.x)
+            .field("y", &self.y)
+            .finish()
+    }
+}
+
+// Derive macro (preferred for most types)
+#[derive(Debug)]
+struct Rectangle {
+    top_left: Point,
+    bottom_right: Point,
+}
+
+// Debug with alternate mode
+fn example() / {IO} {
+    let rect = Rectangle { ... }
+    println!("{:?}", rect)    // Single line
+    println!("{:#?}", rect)   // Pretty-printed with indentation
+}
+```
+
+### 5.8 Numeric Traits
+
+Traits for generic numeric programming.
+
+```blood
+/// Marker trait for numeric types.
+trait Numeric: Add + Sub + Mul + Div + PartialOrd + Clone {}
+
+/// Types that have an additive identity (zero).
+trait Zero: Numeric {
+    /// Returns the additive identity.
+    fn zero() -> Self / pure
+
+    /// Returns true if this value is zero.
+    fn is_zero(&self) -> bool / pure
+}
+
+/// Types that have a multiplicative identity (one).
+trait One: Numeric {
+    /// Returns the multiplicative identity.
+    fn one() -> Self / pure
+
+    /// Returns true if this value is one.
+    fn is_one(&self) -> bool / pure
+}
+
+/// Signed numeric types.
+trait Signed: Numeric + Neg<Output = Self> {
+    /// Returns the absolute value.
+    fn abs(&self) -> Self / pure
+
+    /// Returns the sign as -1, 0, or 1.
+    fn signum(&self) -> Self / pure
+
+    /// Returns true if this value is positive.
+    fn is_positive(&self) -> bool / pure
+
+    /// Returns true if this value is negative.
+    fn is_negative(&self) -> bool / pure
+}
+
+/// Unsigned numeric types.
+trait Unsigned: Numeric {
+    // Marker trait - all values are non-negative
+}
+
+/// Integer types.
+trait Integer: Numeric + Ord + Eq {
+    /// Returns the quotient of floor division.
+    fn div_floor(&self, other: &Self) -> Self / pure
+
+    /// Returns the remainder of floor division.
+    fn mod_floor(&self, other: &Self) -> Self / pure
+
+    /// Returns both quotient and remainder.
+    fn div_rem(&self, other: &Self) -> (Self, Self) / pure
+
+    /// Returns the greatest common divisor.
+    fn gcd(&self, other: &Self) -> Self / pure
+
+    /// Returns the least common multiple.
+    fn lcm(&self, other: &Self) -> Self / pure
+
+    /// Returns true if this value is even.
+    fn is_even(&self) -> bool / pure
+
+    /// Returns true if this value is odd.
+    fn is_odd(&self) -> bool / pure
+}
+
+/// Floating-point types.
+trait Float: Numeric + Signed + PartialEq {
+    /// Returns the infinity value.
+    fn infinity() -> Self / pure
+
+    /// Returns the negative infinity value.
+    fn neg_infinity() -> Self / pure
+
+    /// Returns NaN.
+    fn nan() -> Self / pure
+
+    /// Returns true if this value is NaN.
+    fn is_nan(&self) -> bool / pure
+
+    /// Returns true if this value is infinite.
+    fn is_infinite(&self) -> bool / pure
+
+    /// Returns true if this value is finite.
+    fn is_finite(&self) -> bool / pure
+
+    /// Returns true if this value is normal (not zero, subnormal, infinite, or NaN).
+    fn is_normal(&self) -> bool / pure
+
+    /// Returns the floor of this value.
+    fn floor(&self) -> Self / pure
+
+    /// Returns the ceiling of this value.
+    fn ceil(&self) -> Self / pure
+
+    /// Returns the rounded value.
+    fn round(&self) -> Self / pure
+
+    /// Returns the truncated value.
+    fn trunc(&self) -> Self / pure
+
+    /// Returns the fractional part.
+    fn fract(&self) -> Self / pure
+
+    /// Returns the square root.
+    fn sqrt(&self) -> Self / pure
+
+    /// Returns e raised to this power.
+    fn exp(&self) -> Self / pure
+
+    /// Returns the natural logarithm.
+    fn ln(&self) -> Self / pure
+
+    /// Returns the logarithm base 10.
+    fn log10(&self) -> Self / pure
+
+    /// Returns the logarithm base 2.
+    fn log2(&self) -> Self / pure
+
+    /// Returns the sine.
+    fn sin(&self) -> Self / pure
+
+    /// Returns the cosine.
+    fn cos(&self) -> Self / pure
+
+    /// Returns the tangent.
+    fn tan(&self) -> Self / pure
+
+    /// Returns this value raised to a power.
+    fn powf(&self, n: Self) -> Self / pure
+
+    /// Returns this value raised to an integer power.
+    fn powi(&self, n: i32) -> Self / pure
+}
+
+/// Bounded types with minimum and maximum values.
+trait Bounded {
+    /// Returns the smallest value.
+    fn min_value() -> Self / pure
+
+    /// Returns the largest value.
+    fn max_value() -> Self / pure
+}
+```
+
+#### 5.8.1 Numeric Constants
+
+```blood
+impl Bounded for i32 {
+    fn min_value() -> i32 / pure { -2147483648 }
+    fn max_value() -> i32 / pure { 2147483647 }
+}
+
+impl Zero for i32 {
+    fn zero() -> i32 / pure { 0 }
+    fn is_zero(&self) -> bool / pure { *self == 0 }
+}
+
+impl One for i32 {
+    fn one() -> i32 / pure { 1 }
+    fn is_one(&self) -> bool / pure { *self == 1 }
+}
+
+// Mathematical constants for floats
+impl f64 {
+    const PI: f64 = 3.14159265358979323846
+    const E: f64 = 2.71828182845904523536
+    const TAU: f64 = 6.28318530717958647692
+    const SQRT_2: f64 = 1.41421356237309504880
+    const LN_2: f64 = 0.693147180559945309417
+    const LN_10: f64 = 2.30258509299404568402
+
+    // Special values
+    const INFINITY: f64 = f64::infinity()
+    const NEG_INFINITY: f64 = f64::neg_infinity()
+    const NAN: f64 = f64::nan()
+    const EPSILON: f64 = 2.2204460492503131e-16
+    const MIN: f64 = -1.7976931348623157e+308
+    const MAX: f64 = 1.7976931348623157e+308
+    const MIN_POSITIVE: f64 = 2.2250738585072014e-308
+}
+```
+
+#### 5.8.2 Checked Arithmetic
+
+```blood
+/// Trait for types that support checked arithmetic.
+trait CheckedAdd: Sized {
+    /// Returns Some(result) or None on overflow.
+    fn checked_add(&self, other: &Self) -> Option<Self> / pure
+}
+
+trait CheckedSub: Sized {
+    fn checked_sub(&self, other: &Self) -> Option<Self> / pure
+}
+
+trait CheckedMul: Sized {
+    fn checked_mul(&self, other: &Self) -> Option<Self> / pure
+}
+
+trait CheckedDiv: Sized {
+    fn checked_div(&self, other: &Self) -> Option<Self> / pure
+}
+
+trait CheckedRem: Sized {
+    fn checked_rem(&self, other: &Self) -> Option<Self> / pure
+}
+
+/// Trait for saturating arithmetic.
+trait Saturating: Sized {
+    /// Returns result clamped to min/max on overflow.
+    fn saturating_add(&self, other: Self) -> Self / pure
+    fn saturating_sub(&self, other: Self) -> Self / pure
+    fn saturating_mul(&self, other: Self) -> Self / pure
+}
+
+/// Trait for wrapping arithmetic.
+trait Wrapping: Sized {
+    /// Returns result with wrapping on overflow.
+    fn wrapping_add(&self, other: Self) -> Self / pure
+    fn wrapping_sub(&self, other: Self) -> Self / pure
+    fn wrapping_mul(&self, other: Self) -> Self / pure
+}
+
+/// Trait for overflowing arithmetic.
+trait Overflowing: Sized {
+    /// Returns (result, overflowed).
+    fn overflowing_add(&self, other: Self) -> (Self, bool) / pure
+    fn overflowing_sub(&self, other: Self) -> (Self, bool) / pure
+    fn overflowing_mul(&self, other: Self) -> (Self, bool) / pure
+}
+```
+
+### 5.9 Thread Safety Markers
+
+Marker traits for thread-safe data sharing.
+
+```blood
+/// Types that can be transferred across fiber boundaries.
+///
+/// A type is `Send` if it is safe to send it to another fiber.
+/// This property is checked by the compiler and cannot be implemented manually.
+///
+/// # Auto-implementation
+/// Types are automatically `Send` if all of their components are `Send`.
+///
+/// # Non-Send Types
+/// - `*const T`, `*mut T` (raw pointers)
+/// - `Rc<T>` (non-atomic reference counting)
+/// - Types containing non-Send fields
+///
+/// # Example
+/// ```blood
+/// fn spawn_work<T: Send>(data: T) / {Async} {
+///     spawn(|| {
+///         // data can be safely used in the new fiber
+///         process(data)
+///     })
+/// }
+/// ```
+#[lang = "send"]
+unsafe trait Send {
+    // Marker trait - compiler verifies automatically
+}
+
+/// Types that can be safely shared between fibers via shared references.
+///
+/// A type is `Sync` if `&T` is `Send`. This means multiple fibers can
+/// hold references to the same value simultaneously.
+///
+/// # Auto-implementation
+/// Types are automatically `Sync` if all of their components are `Sync`.
+///
+/// # Non-Sync Types
+/// - `Cell<T>`, `RefCell<T>` (interior mutability without synchronization)
+/// - `Rc<T>` (non-atomic reference counting)
+/// - Types containing non-Sync fields
+///
+/// # Relationship with Send
+/// - `T: Sync` implies `&T: Send`
+/// - `T: Send + Sync` means the type can be both moved and shared
+///
+/// # Example
+/// ```blood
+/// fn share_data<T: Sync>(data: &T) / {Async} {
+///     let data1 = data
+///     let data2 = data
+///     spawn(|| use_data(data1))
+///     spawn(|| use_data(data2))
+/// }
+/// ```
+#[lang = "sync"]
+unsafe trait Sync {
+    // Marker trait - compiler verifies automatically
+}
+
+// Standard implementations
+
+// All primitive types are Send + Sync
+unsafe impl Send for bool {}
+unsafe impl Sync for bool {}
+unsafe impl Send for i8 {}
+unsafe impl Sync for i8 {}
+// ... (all primitive types)
+
+// Box<T> is Send if T is Send
+unsafe impl<T: Send> Send for Box<T> {}
+// Box<T> is Sync if T is Sync
+unsafe impl<T: Sync> Sync for Box<T> {}
+
+// Vec<T> is Send if T is Send
+unsafe impl<T: Send> Send for Vec<T> {}
+// Vec<T> is Sync if T is Sync
+unsafe impl<T: Sync> Sync for Vec<T> {}
+
+// Arc<T> is Send if T is Send + Sync
+unsafe impl<T: Send + Sync> Send for Arc<T> {}
+// Arc<T> is Sync if T is Send + Sync
+unsafe impl<T: Send + Sync> Sync for Arc<T> {}
+
+// Mutex<T> provides Sync even if T is not Sync (but requires T: Send)
+unsafe impl<T: Send> Send for Mutex<T> {}
+unsafe impl<T: Send> Sync for Mutex<T> {}
+
+// RwLock<T> provides Sync if T is Send + Sync
+unsafe impl<T: Send> Send for RwLock<T> {}
+unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
+
+// Channel endpoints are Send if T is Send
+unsafe impl<T: Send> Send for Sender<T> {}
+unsafe impl<T: Send> Send for Receiver<T> {}
+
+// Atomic types are always Send + Sync
+unsafe impl Send for AtomicI32 {}
+unsafe impl Sync for AtomicI32 {}
+// ... (all atomic types)
+
+// Frozen<T> is always Sync (immutable after creation)
+unsafe impl<T: Freeze> Send for Frozen<T> {}
+unsafe impl<T: Freeze> Sync for Frozen<T> {}
+```
+
+#### 5.9.1 Negative Implementations
+
+Some types explicitly opt out of Send/Sync:
+
+```blood
+// Raw pointers are not Send or Sync
+impl<T> !Send for *const T {}
+impl<T> !Sync for *const T {}
+impl<T> !Send for *mut T {}
+impl<T> !Sync for *mut T {}
+
+// Rc is not Send or Sync (use Arc for thread-safe sharing)
+impl<T> !Send for Rc<T> {}
+impl<T> !Sync for Rc<T> {}
+
+// Cell and RefCell are not Sync (interior mutability without sync)
+impl<T> !Sync for Cell<T> {}
+impl<T> !Sync for RefCell<T> {}
+
+// MutexGuard is not Send (must be released on same fiber)
+impl<T> !Send for MutexGuard<'_, T> {}
+
+// PhantomData markers
+struct PhantomNotSend(PhantomData<*const ()>);
+struct PhantomNotSync(PhantomData<Cell<()>>);
+```
+
+#### 5.9.2 Thread Safety Guidelines
+
+| Type | Send | Sync | Notes |
+|------|------|------|-------|
+| Primitives (i32, bool, etc.) | Yes | Yes | No interior mutability |
+| Box<T> | If T: Send | If T: Sync | Owned heap data |
+| Vec<T> | If T: Send | If T: Sync | Owned collection |
+| Arc<T> | If T: Send+Sync | If T: Send+Sync | Shared ownership |
+| Rc<T> | No | No | Use Arc instead |
+| Mutex<T> | If T: Send | If T: Send | Provides Sync |
+| RwLock<T> | If T: Send | If T: Send+Sync | Multiple readers |
+| Cell<T> | If T: Send | No | Single-threaded interior mut |
+| RefCell<T> | If T: Send | No | Single-threaded borrow checking |
+| AtomicT | Yes | Yes | Lock-free operations |
+| Channel<T> | If T: Send | If T: Send | Inter-fiber communication |
+| Frozen<T> | If T: Freeze | Yes | Deeply immutable |
+
 ---
 
-## 6. Standard Effects
+## 6. Iterator Adapters
 
-### 6.0 Error Handling Philosophy: Panic vs Error
+Blood provides a rich set of iterator adapters for functional-style data processing.
+
+### 6.1 Adapter Types
+
+```blood
+/// Maps each element using a function.
+struct Map<I, F> {
+    iter: I,
+    f: F,
+}
+
+impl<B, I: Iterator, F: fn(I::Item) -> B> Iterator for Map<I, F> {
+    type Item = B
+
+    fn next(&mut self) -> Option<B> / pure {
+        self.iter.next().map(self.f)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) / pure {
+        self.iter.size_hint()
+    }
+}
+
+/// Filters elements using a predicate.
+struct Filter<I, P> {
+    iter: I,
+    predicate: P,
+}
+
+impl<I: Iterator, P: fn(&I::Item) -> bool> Iterator for Filter<I, P> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        loop {
+            match self.iter.next() {
+                Some(item) if (self.predicate)(&item) => return Some(item),
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    }
+}
+
+/// Maps and filters in one pass.
+struct FilterMap<I, F> {
+    iter: I,
+    f: F,
+}
+
+impl<B, I: Iterator, F: fn(I::Item) -> Option<B>> Iterator for FilterMap<I, F> {
+    type Item = B
+
+    fn next(&mut self) -> Option<B> / pure {
+        loop {
+            match self.iter.next() {
+                Some(item) => {
+                    if let Some(b) = (self.f)(item) {
+                        return Some(b)
+                    }
+                }
+                None => return None,
+            }
+        }
+    }
+}
+
+/// Chains two iterators together.
+struct Chain<A, B> {
+    a: Option<A>,
+    b: B,
+}
+
+impl<T, A: Iterator<Item = T>, B: Iterator<Item = T>> Iterator for Chain<A, B> {
+    type Item = T
+
+    fn next(&mut self) -> Option<T> / pure {
+        match &mut self.a {
+            Some(a) => match a.next() {
+                Some(item) => Some(item),
+                None => {
+                    self.a = None
+                    self.b.next()
+                }
+            },
+            None => self.b.next(),
+        }
+    }
+}
+
+/// Zips two iterators into pairs.
+struct Zip<A, B> {
+    a: A,
+    b: B,
+}
+
+impl<A: Iterator, B: Iterator> Iterator for Zip<A, B> {
+    type Item = (A::Item, B::Item)
+
+    fn next(&mut self) -> Option<(A::Item, B::Item)> / pure {
+        let a = self.a.next()?
+        let b = self.b.next()?
+        Some((a, b))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) / pure {
+        let (a_min, a_max) = self.a.size_hint()
+        let (b_min, b_max) = self.b.size_hint()
+        let min = a_min.min(b_min)
+        let max = match (a_max, b_max) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            _ => None,
+        }
+        (min, max)
+    }
+}
+
+/// Adds indices to iterator elements.
+struct Enumerate<I> {
+    iter: I,
+    count: usize,
+}
+
+impl<I: Iterator> Iterator for Enumerate<I> {
+    type Item = (usize, I::Item)
+
+    fn next(&mut self) -> Option<(usize, I::Item)> / pure {
+        let item = self.iter.next()?
+        let i = self.count
+        self.count += 1
+        Some((i, item))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) / pure {
+        self.iter.size_hint()
+    }
+}
+
+/// Takes first n elements.
+struct Take<I> {
+    iter: I,
+    remaining: usize,
+}
+
+impl<I: Iterator> Iterator for Take<I> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        if self.remaining > 0 {
+            self.remaining -= 1
+            self.iter.next()
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) / pure {
+        let (min, max) = self.iter.size_hint()
+        let min = min.min(self.remaining)
+        let max = max.map(|m| m.min(self.remaining)).or(Some(self.remaining))
+        (min, max)
+    }
+}
+
+/// Skips first n elements.
+struct Skip<I> {
+    iter: I,
+    n: usize,
+}
+
+impl<I: Iterator> Iterator for Skip<I> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        while self.n > 0 {
+            self.iter.next()?
+            self.n -= 1
+        }
+        self.iter.next()
+    }
+}
+
+/// Takes while predicate is true.
+struct TakeWhile<I, P> {
+    iter: I,
+    predicate: P,
+    done: bool,
+}
+
+impl<I: Iterator, P: fn(&I::Item) -> bool> Iterator for TakeWhile<I, P> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        if self.done {
+            return None
+        }
+        match self.iter.next() {
+            Some(item) if (self.predicate)(&item) => Some(item),
+            _ => {
+                self.done = true
+                None
+            }
+        }
+    }
+}
+
+/// Skips while predicate is true.
+struct SkipWhile<I, P> {
+    iter: I,
+    predicate: P,
+    done: bool,
+}
+
+impl<I: Iterator, P: fn(&I::Item) -> bool> Iterator for SkipWhile<I, P> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        if !self.done {
+            loop {
+                match self.iter.next() {
+                    Some(item) if (self.predicate)(&item) => continue,
+                    Some(item) => {
+                        self.done = true
+                        return Some(item)
+                    }
+                    None => return None,
+                }
+            }
+        }
+        self.iter.next()
+    }
+}
+
+/// Flattens nested iterators.
+struct Flatten<I: Iterator>
+where
+    I::Item: IntoIterator,
+{
+    outer: I,
+    inner: Option<<I::Item as IntoIterator>::IntoIter>,
+}
+
+impl<I: Iterator> Iterator for Flatten<I>
+where
+    I::Item: IntoIterator,
+{
+    type Item = <I::Item as IntoIterator>::Item
+
+    fn next(&mut self) -> Option<Self::Item> / pure {
+        loop {
+            if let Some(ref mut inner) = self.inner {
+                if let Some(item) = inner.next() {
+                    return Some(item)
+                }
+            }
+            match self.outer.next() {
+                Some(inner) => self.inner = Some(inner.into_iter()),
+                None => return None,
+            }
+        }
+    }
+}
+
+/// Maps then flattens.
+struct FlatMap<I, F, U: IntoIterator> {
+    inner: Flatten<Map<I, F>>,
+}
+
+/// Peekable iterator that can look ahead.
+struct Peekable<I: Iterator> {
+    iter: I,
+    peeked: Option<Option<I::Item>>,
+}
+
+impl<I: Iterator> Peekable<I> {
+    /// Returns a reference to the next element without consuming it.
+    fn peek(&mut self) -> Option<&I::Item> / pure {
+        if self.peeked.is_none() {
+            self.peeked = Some(self.iter.next())
+        }
+        self.peeked.as_ref().unwrap().as_ref()
+    }
+
+    /// Returns a mutable reference to the next element.
+    fn peek_mut(&mut self) -> Option<&mut I::Item> / pure {
+        if self.peeked.is_none() {
+            self.peeked = Some(self.iter.next())
+        }
+        self.peeked.as_mut().unwrap().as_mut()
+    }
+
+    /// Consumes the next element if it matches the predicate.
+    fn next_if<P: fn(&I::Item) -> bool>(&mut self, predicate: P) -> Option<I::Item> / pure {
+        match self.peek() {
+            Some(item) if predicate(item) => self.next(),
+            _ => None,
+        }
+    }
+}
+
+impl<I: Iterator> Iterator for Peekable<I> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        match self.peeked.take() {
+            Some(v) => v,
+            None => self.iter.next(),
+        }
+    }
+}
+
+/// Fuses an iterator after it returns None once.
+struct Fuse<I> {
+    iter: Option<I>,
+}
+
+impl<I: Iterator> Iterator for Fuse<I> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        match &mut self.iter {
+            Some(iter) => match iter.next() {
+                Some(item) => Some(item),
+                None => {
+                    self.iter = None
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+}
+
+/// Calls a closure on each element.
+struct Inspect<I, F> {
+    iter: I,
+    f: F,
+}
+
+impl<I: Iterator, F: fn(&I::Item)> Iterator for Inspect<I, F> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        let item = self.iter.next()?
+        (self.f)(&item)
+        Some(item)
+    }
+}
+
+/// Interleaves elements from two iterators.
+struct Interleave<I, J> {
+    a: I,
+    b: J,
+    flag: bool,
+}
+
+impl<T, I: Iterator<Item = T>, J: Iterator<Item = T>> Iterator for Interleave<I, J> {
+    type Item = T
+
+    fn next(&mut self) -> Option<T> / pure {
+        self.flag = !self.flag
+        if self.flag {
+            self.a.next().or_else(|| self.b.next())
+        } else {
+            self.b.next().or_else(|| self.a.next())
+        }
+    }
+}
+
+/// Cycles through an iterator infinitely.
+struct Cycle<I: Clone + Iterator> {
+    orig: I,
+    iter: I,
+}
+
+impl<I: Clone + Iterator> Iterator for Cycle<I> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        match self.iter.next() {
+            Some(item) => Some(item),
+            None => {
+                self.iter = self.orig.clone()
+                self.iter.next()
+            }
+        }
+    }
+}
+
+/// Repeats an element infinitely.
+struct Repeat<T> {
+    element: T,
+}
+
+impl<T: Clone> Iterator for Repeat<T> {
+    type Item = T
+
+    fn next(&mut self) -> Option<T> / pure {
+        Some(self.element.clone())
+    }
+}
+
+/// Generates elements from a closure.
+struct FromFn<F> {
+    f: F,
+}
+
+impl<T, F: fn() -> Option<T>> Iterator for FromFn<F> {
+    type Item = T
+
+    fn next(&mut self) -> Option<T> / pure {
+        (self.f)()
+    }
+}
+
+/// Generates elements with state.
+struct Unfold<St, F> {
+    state: St,
+    f: F,
+}
+
+impl<St, T, F: fn(&mut St) -> Option<T>> Iterator for Unfold<St, F> {
+    type Item = T
+
+    fn next(&mut self) -> Option<T> / pure {
+        (self.f)(&mut self.state)
+    }
+}
+
+/// Iterates in reverse.
+struct Rev<I> {
+    iter: I,
+}
+
+impl<I: DoubleEndedIterator> Iterator for Rev<I> {
+    type Item = I::Item
+
+    fn next(&mut self) -> Option<I::Item> / pure {
+        self.iter.next_back()
+    }
+}
+```
+
+### 6.2 Iterator Extension Methods
+
+The full set of methods available on `Iterator`:
+
+```blood
+trait Iterator {
+    type Item
+
+    // Core method (must be implemented)
+    fn next(&mut self) -> Option<Self::Item> / pure
+
+    // Size hints
+    fn size_hint(&self) -> (usize, Option<usize>) / pure { (0, None) }
+    fn count(self) -> usize / pure
+    fn last(self) -> Option<Self::Item> / pure
+    fn nth(&mut self, n: usize) -> Option<Self::Item> / pure
+
+    // Adapters (return new iterators)
+    fn map<B, F: fn(Self::Item) -> B>(self, f: F) -> Map<Self, F> / pure
+    fn filter<P: fn(&Self::Item) -> bool>(self, predicate: P) -> Filter<Self, P> / pure
+    fn filter_map<B, F: fn(Self::Item) -> Option<B>>(self, f: F) -> FilterMap<Self, F> / pure
+    fn chain<U: Iterator<Item = Self::Item>>(self, other: U) -> Chain<Self, U> / pure
+    fn zip<U: Iterator>(self, other: U) -> Zip<Self, U> / pure
+    fn enumerate(self) -> Enumerate<Self> / pure
+    fn take(self, n: usize) -> Take<Self> / pure
+    fn skip(self, n: usize) -> Skip<Self> / pure
+    fn take_while<P: fn(&Self::Item) -> bool>(self, predicate: P) -> TakeWhile<Self, P> / pure
+    fn skip_while<P: fn(&Self::Item) -> bool>(self, predicate: P) -> SkipWhile<Self, P> / pure
+    fn flatten(self) -> Flatten<Self> / pure where Self::Item: IntoIterator
+    fn flat_map<U: IntoIterator, F: fn(Self::Item) -> U>(self, f: F) -> FlatMap<Self, F, U> / pure
+    fn peekable(self) -> Peekable<Self> / pure
+    fn fuse(self) -> Fuse<Self> / pure
+    fn inspect<F: fn(&Self::Item)>(self, f: F) -> Inspect<Self, F> / pure
+    fn interleave<J: Iterator<Item = Self::Item>>(self, other: J) -> Interleave<Self, J> / pure
+    fn cycle(self) -> Cycle<Self> / pure where Self: Clone
+    fn rev(self) -> Rev<Self> / pure where Self: DoubleEndedIterator
+    fn step_by(self, step: usize) -> StepBy<Self> / pure
+
+    // Consumers (collect/reduce to a value)
+    fn collect<B: FromIterator<Self::Item>>(self) -> B / pure
+    fn fold<B, F: fn(B, Self::Item) -> B>(self, init: B, f: F) -> B / pure
+    fn reduce<F: fn(Self::Item, Self::Item) -> Self::Item>(self, f: F) -> Option<Self::Item> / pure
+    fn sum<S: Sum<Self::Item>>(self) -> S / pure
+    fn product<P: Product<Self::Item>>(self) -> P / pure
+    fn min(self) -> Option<Self::Item> / pure where Self::Item: Ord
+    fn max(self) -> Option<Self::Item> / pure where Self::Item: Ord
+    fn min_by<F: fn(&Self::Item, &Self::Item) -> Ordering>(self, compare: F) -> Option<Self::Item> / pure
+    fn max_by<F: fn(&Self::Item, &Self::Item) -> Ordering>(self, compare: F) -> Option<Self::Item> / pure
+    fn min_by_key<B: Ord, F: fn(&Self::Item) -> B>(self, f: F) -> Option<Self::Item> / pure
+    fn max_by_key<B: Ord, F: fn(&Self::Item) -> B>(self, f: F) -> Option<Self::Item> / pure
+
+    // Searching
+    fn find<P: fn(&Self::Item) -> bool>(&mut self, predicate: P) -> Option<Self::Item> / pure
+    fn find_map<B, F: fn(Self::Item) -> Option<B>>(&mut self, f: F) -> Option<B> / pure
+    fn position<P: fn(Self::Item) -> bool>(&mut self, predicate: P) -> Option<usize> / pure
+    fn rposition<P: fn(Self::Item) -> bool>(&mut self, predicate: P) -> Option<usize> / pure
+        where Self: DoubleEndedIterator + ExactSizeIterator
+
+    // Boolean operations
+    fn any<F: fn(Self::Item) -> bool>(&mut self, f: F) -> bool / pure
+    fn all<F: fn(Self::Item) -> bool>(&mut self, f: F) -> bool / pure
+
+    // Comparison
+    fn eq<I: Iterator<Item = Self::Item>>(self, other: I) -> bool / pure where Self::Item: PartialEq
+    fn ne<I: Iterator<Item = Self::Item>>(self, other: I) -> bool / pure where Self::Item: PartialEq
+    fn lt<I: Iterator<Item = Self::Item>>(self, other: I) -> bool / pure where Self::Item: PartialOrd
+    fn le<I: Iterator<Item = Self::Item>>(self, other: I) -> bool / pure where Self::Item: PartialOrd
+    fn gt<I: Iterator<Item = Self::Item>>(self, other: I) -> bool / pure where Self::Item: PartialOrd
+    fn ge<I: Iterator<Item = Self::Item>>(self, other: I) -> bool / pure where Self::Item: PartialOrd
+    fn cmp<I: Iterator<Item = Self::Item>>(self, other: I) -> Ordering / pure where Self::Item: Ord
+
+    // Partitioning
+    fn partition<B: Default + Extend<Self::Item>, F: fn(&Self::Item) -> bool>(self, f: F) -> (B, B) / pure
+    fn unzip<A, B, FromA: Default + Extend<A>, FromB: Default + Extend<B>>(self) -> (FromA, FromB) / pure
+        where Self: Iterator<Item = (A, B)>
+
+    // Side effects
+    fn for_each<F: fn(Self::Item)>(self, f: F) / pure
+}
+
+/// Double-ended iterators can iterate from both ends.
+trait DoubleEndedIterator: Iterator {
+    fn next_back(&mut self) -> Option<Self::Item> / pure
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> / pure
+    fn rfold<B, F: fn(B, Self::Item) -> B>(self, init: B, f: F) -> B / pure
+    fn rfind<P: fn(&Self::Item) -> bool>(&mut self, predicate: P) -> Option<Self::Item> / pure
+}
+
+/// Iterators that know their exact length.
+trait ExactSizeIterator: Iterator {
+    fn len(&self) -> usize / pure
+    fn is_empty(&self) -> bool / pure { self.len() == 0 }
+}
+
+/// Iterators that can be trusted for exact size (used for optimization).
+unsafe trait TrustedLen: Iterator {}
+```
+
+---
+
+## 7. IO Types
+
+Blood provides types for file system and I/O operations.
+
+### 7.1 Path and PathBuf
+
+```blood
+/// Borrowed path slice.
+struct Path {
+    inner: [u8],  // OsStr-like representation
+}
+
+impl Path {
+    /// Creates a Path from a string slice.
+    fn new<S: AsRef<str>>(s: &S) -> &Path / pure
+
+    /// Returns the path as a string slice (may fail for non-UTF8).
+    fn to_str(&self) -> Option<&str> / pure
+
+    /// Returns the path as a byte slice.
+    fn as_bytes(&self) -> &[u8] / pure
+
+    /// Converts to an owned PathBuf.
+    fn to_path_buf(&self) -> PathBuf / {Allocate}
+
+    /// Returns the parent directory.
+    fn parent(&self) -> Option<&Path> / pure
+
+    /// Returns the final component (file name).
+    fn file_name(&self) -> Option<&str> / pure
+
+    /// Returns the file stem (name without extension).
+    fn file_stem(&self) -> Option<&str> / pure
+
+    /// Returns the file extension.
+    fn extension(&self) -> Option<&str> / pure
+
+    /// Joins this path with another path.
+    fn join<P: AsRef<Path>>(&self, path: P) -> PathBuf / {Allocate}
+
+    /// Returns true if the path is absolute.
+    fn is_absolute(&self) -> bool / pure
+
+    /// Returns true if the path is relative.
+    fn is_relative(&self) -> bool / pure
+
+    /// Returns true if the path has a root.
+    fn has_root(&self) -> bool / pure
+
+    /// Returns an iterator over the components.
+    fn components(&self) -> Components / pure
+
+    /// Returns an iterator over the ancestors.
+    fn ancestors(&self) -> Ancestors / pure
+
+    /// Strips a prefix from the path.
+    fn strip_prefix<P: AsRef<Path>>(&self, base: P) -> Result<&Path, StripPrefixError> / pure
+
+    /// Returns true if the path starts with the given prefix.
+    fn starts_with<P: AsRef<Path>>(&self, base: P) -> bool / pure
+
+    /// Returns true if the path ends with the given suffix.
+    fn ends_with<P: AsRef<Path>>(&self, child: P) -> bool / pure
+
+    /// Queries file system metadata.
+    fn metadata(&self) -> Result<Metadata, IoError> / {IO}
+
+    /// Returns true if the path exists.
+    fn exists(&self) -> bool / {IO}
+
+    /// Returns true if the path is a file.
+    fn is_file(&self) -> bool / {IO}
+
+    /// Returns true if the path is a directory.
+    fn is_dir(&self) -> bool / {IO}
+
+    /// Returns true if the path is a symbolic link.
+    fn is_symlink(&self) -> bool / {IO}
+
+    /// Reads the entire file as bytes.
+    fn read(&self) -> Result<Vec<u8>, IoError> / {IO}
+
+    /// Reads the entire file as a string.
+    fn read_to_string(&self) -> Result<String, IoError> / {IO}
+
+    /// Reads directory entries.
+    fn read_dir(&self) -> Result<ReadDir, IoError> / {IO}
+}
+
+/// Owned path buffer.
+struct PathBuf {
+    inner: Vec<u8>,
+}
+
+impl PathBuf {
+    /// Creates an empty PathBuf.
+    fn new() -> PathBuf / pure
+
+    /// Creates a PathBuf with the given capacity.
+    fn with_capacity(capacity: usize) -> PathBuf / {Allocate}
+
+    /// Returns a borrowed Path.
+    fn as_path(&self) -> &Path / pure
+
+    /// Pushes a component onto the path.
+    fn push<P: AsRef<Path>>(&mut self, path: P) / {Allocate}
+
+    /// Pops the last component.
+    fn pop(&mut self) -> bool / pure
+
+    /// Sets the file name.
+    fn set_file_name<S: AsRef<str>>(&mut self, file_name: S) / {Allocate}
+
+    /// Sets the file extension.
+    fn set_extension<S: AsRef<str>>(&mut self, extension: S) -> bool / {Allocate}
+
+    /// Clears the path.
+    fn clear(&mut self) / pure
+
+    /// Returns the capacity.
+    fn capacity(&self) -> usize / pure
+
+    /// Reserves capacity for at least `additional` more bytes.
+    fn reserve(&mut self, additional: usize) / {Allocate}
+
+    /// Shrinks capacity to fit the current length.
+    fn shrink_to_fit(&mut self) / {Allocate}
+}
+
+/// Path component.
+enum Component<'a> {
+    Prefix(PrefixComponent<'a>),  // Windows drive letters
+    RootDir,                       // `/` or `\`
+    CurDir,                        // `.`
+    ParentDir,                     // `..`
+    Normal(&'a str),               // Regular component
+}
+
+impl Deref for PathBuf {
+    type Target = Path
+    fn deref(&self) -> &Path / pure
+}
+```
+
+### 7.2 File and OpenOptions
+
+```blood
+/// File handle for reading and writing.
+struct File {
+    fd: Fd,
+}
+
+impl File {
+    /// Opens a file in read-only mode.
+    fn open<P: AsRef<Path>>(path: P) -> Result<File, IoError> / {IO}
+
+    /// Creates a new file or truncates an existing one.
+    fn create<P: AsRef<Path>>(path: P) -> Result<File, IoError> / {IO}
+
+    /// Opens a file with the given options.
+    fn open_with<P: AsRef<Path>>(path: P, options: &OpenOptions) -> Result<File, IoError> / {IO}
+
+    /// Reads bytes into the buffer, returning bytes read.
+    fn read(&self, buf: &mut [u8]) -> Result<usize, IoError> / {IO}
+
+    /// Reads the entire file into a vector.
+    fn read_to_end(&self, buf: &mut Vec<u8>) -> Result<usize, IoError> / {IO}
+
+    /// Reads the entire file into a string.
+    fn read_to_string(&self, buf: &mut String) -> Result<usize, IoError> / {IO}
+
+    /// Writes bytes from the buffer, returning bytes written.
+    fn write(&self, buf: &[u8]) -> Result<usize, IoError> / {IO}
+
+    /// Writes all bytes from the buffer.
+    fn write_all(&self, buf: &[u8]) -> Result<(), IoError> / {IO}
+
+    /// Flushes any buffered data.
+    fn flush(&self) -> Result<(), IoError> / {IO}
+
+    /// Seeks to a position.
+    fn seek(&self, pos: SeekFrom) -> Result<u64, IoError> / {IO}
+
+    /// Returns the current position.
+    fn stream_position(&self) -> Result<u64, IoError> / {IO}
+
+    /// Truncates or extends the file to the given length.
+    fn set_len(&self, size: u64) -> Result<(), IoError> / {IO}
+
+    /// Returns file metadata.
+    fn metadata(&self) -> Result<Metadata, IoError> / {IO}
+
+    /// Attempts to clone the file handle.
+    fn try_clone(&self) -> Result<File, IoError> / {IO}
+
+    /// Syncs all data and metadata to disk.
+    fn sync_all(&self) -> Result<(), IoError> / {IO}
+
+    /// Syncs data (but not necessarily metadata) to disk.
+    fn sync_data(&self) -> Result<(), IoError> / {IO}
+}
+
+impl Drop for File {
+    fn drop(&mut self) / pure {
+        // Closes the file descriptor
+    }
+}
+
+/// Options for opening files.
+struct OpenOptions {
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
+    mode: u32,
+}
+
+impl OpenOptions {
+    /// Creates a new set of options (all false).
+    fn new() -> OpenOptions / pure
+
+    /// Sets read access.
+    fn read(&mut self, read: bool) -> &mut Self / pure
+
+    /// Sets write access.
+    fn write(&mut self, write: bool) -> &mut Self / pure
+
+    /// Sets append mode.
+    fn append(&mut self, append: bool) -> &mut Self / pure
+
+    /// Sets truncate mode.
+    fn truncate(&mut self, truncate: bool) -> &mut Self / pure
+
+    /// Sets create mode.
+    fn create(&mut self, create: bool) -> &mut Self / pure
+
+    /// Sets create_new mode (fails if file exists).
+    fn create_new(&mut self, create_new: bool) -> &mut Self / pure
+
+    /// Sets the file mode (Unix permissions).
+    fn mode(&mut self, mode: u32) -> &mut Self / pure
+
+    /// Opens the file with these options.
+    fn open<P: AsRef<Path>>(&self, path: P) -> Result<File, IoError> / {IO}
+}
+
+/// Seek position.
+enum SeekFrom {
+    Start(u64),
+    End(i64),
+    Current(i64),
+}
+
+/// File metadata.
+struct Metadata {
+    // Internal: stat-like data
+}
+
+impl Metadata {
+    fn is_file(&self) -> bool / pure
+    fn is_dir(&self) -> bool / pure
+    fn is_symlink(&self) -> bool / pure
+    fn len(&self) -> u64 / pure
+    fn permissions(&self) -> Permissions / pure
+    fn modified(&self) -> Result<SystemTime, IoError> / pure
+    fn accessed(&self) -> Result<SystemTime, IoError> / pure
+    fn created(&self) -> Result<SystemTime, IoError> / pure
+}
+
+/// File permissions.
+struct Permissions {
+    mode: u32,
+}
+
+impl Permissions {
+    fn readonly(&self) -> bool / pure
+    fn set_readonly(&mut self, readonly: bool) / pure
+    fn mode(&self) -> u32 / pure  // Unix only
+    fn set_mode(&mut self, mode: u32) / pure  // Unix only
+}
+```
+
+### 7.3 File Descriptor
+
+```blood
+/// Raw file descriptor.
+struct Fd(i32);
+
+impl Fd {
+    const STDIN: Fd = Fd(0)
+    const STDOUT: Fd = Fd(1)
+    const STDERR: Fd = Fd(2)
+
+    /// Creates from a raw descriptor.
+    fn from_raw(fd: i32) -> Fd / pure
+
+    /// Returns the raw descriptor.
+    fn as_raw(&self) -> i32 / pure
+}
+```
+
+### 7.4 IO Error
+
+```blood
+/// I/O error type.
+struct IoError {
+    kind: IoErrorKind,
+    message: Option<String>,
+}
+
+impl IoError {
+    fn new(kind: IoErrorKind, msg: &str) -> IoError / {Allocate}
+    fn kind(&self) -> IoErrorKind / pure
+    fn raw_os_error(&self) -> Option<i32> / pure
+}
+
+impl Display for IoError {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Categories of I/O errors.
+enum IoErrorKind {
+    NotFound,
+    PermissionDenied,
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionAborted,
+    NotConnected,
+    AddrInUse,
+    AddrNotAvailable,
+    BrokenPipe,
+    AlreadyExists,
+    WouldBlock,
+    InvalidInput,
+    InvalidData,
+    TimedOut,
+    WriteZero,
+    Interrupted,
+    UnexpectedEof,
+    Other,
+}
+```
+
+---
+
+## 8. Time Types
+
+Blood provides types for time representation and measurement.
+
+### 8.1 Duration
+
+```blood
+/// A span of time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct Duration {
+    secs: u64,
+    nanos: u32,  // 0 <= nanos < 1_000_000_000
+}
+
+impl Duration {
+    /// Zero duration.
+    const ZERO: Duration = Duration { secs: 0, nanos: 0 }
+
+    /// Maximum duration.
+    const MAX: Duration = Duration { secs: u64::MAX, nanos: 999_999_999 }
+
+    /// One second.
+    const SECOND: Duration = Duration { secs: 1, nanos: 0 }
+
+    /// One millisecond.
+    const MILLISECOND: Duration = Duration { secs: 0, nanos: 1_000_000 }
+
+    /// One microsecond.
+    const MICROSECOND: Duration = Duration { secs: 0, nanos: 1_000 }
+
+    /// One nanosecond.
+    const NANOSECOND: Duration = Duration { secs: 0, nanos: 1 }
+
+    /// Creates a duration from seconds.
+    fn from_secs(secs: u64) -> Duration / pure
+
+    /// Creates a duration from milliseconds.
+    fn from_millis(millis: u64) -> Duration / pure
+
+    /// Creates a duration from microseconds.
+    fn from_micros(micros: u64) -> Duration / pure
+
+    /// Creates a duration from nanoseconds.
+    fn from_nanos(nanos: u64) -> Duration / pure
+
+    /// Creates a duration from seconds as f64.
+    fn from_secs_f64(secs: f64) -> Duration / pure
+
+    /// Creates a duration from seconds as f32.
+    fn from_secs_f32(secs: f32) -> Duration / pure
+
+    /// Creates a new duration from seconds and nanoseconds.
+    fn new(secs: u64, nanos: u32) -> Duration / pure
+
+    /// Returns true if this duration is zero.
+    fn is_zero(&self) -> bool / pure
+
+    /// Returns the number of whole seconds.
+    fn as_secs(&self) -> u64 / pure
+
+    /// Returns the fractional part in milliseconds.
+    fn subsec_millis(&self) -> u32 / pure
+
+    /// Returns the fractional part in microseconds.
+    fn subsec_micros(&self) -> u32 / pure
+
+    /// Returns the fractional part in nanoseconds.
+    fn subsec_nanos(&self) -> u32 / pure
+
+    /// Returns the total number of milliseconds.
+    fn as_millis(&self) -> u128 / pure
+
+    /// Returns the total number of microseconds.
+    fn as_micros(&self) -> u128 / pure
+
+    /// Returns the total number of nanoseconds.
+    fn as_nanos(&self) -> u128 / pure
+
+    /// Returns the duration as seconds (f64).
+    fn as_secs_f64(&self) -> f64 / pure
+
+    /// Returns the duration as seconds (f32).
+    fn as_secs_f32(&self) -> f32 / pure
+
+    /// Checked addition.
+    fn checked_add(&self, rhs: Duration) -> Option<Duration> / pure
+
+    /// Saturating addition.
+    fn saturating_add(&self, rhs: Duration) -> Duration / pure
+
+    /// Checked subtraction.
+    fn checked_sub(&self, rhs: Duration) -> Option<Duration> / pure
+
+    /// Saturating subtraction.
+    fn saturating_sub(&self, rhs: Duration) -> Duration / pure
+
+    /// Checked multiplication.
+    fn checked_mul(&self, rhs: u32) -> Option<Duration> / pure
+
+    /// Saturating multiplication.
+    fn saturating_mul(&self, rhs: u32) -> Duration / pure
+
+    /// Checked division.
+    fn checked_div(&self, rhs: u32) -> Option<Duration> / pure
+
+    /// Multiplies by a float.
+    fn mul_f64(&self, rhs: f64) -> Duration / pure
+
+    /// Divides by a float.
+    fn div_f64(&self, rhs: f64) -> Duration / pure
+
+    /// Returns the absolute difference between two durations.
+    fn abs_diff(&self, other: Duration) -> Duration / pure
+}
+
+impl Add for Duration {
+    type Output = Duration
+    fn add(self, rhs: Duration) -> Duration / pure
+}
+
+impl Sub for Duration {
+    type Output = Duration
+    fn sub(self, rhs: Duration) -> Duration / pure
+}
+
+impl Mul<u32> for Duration {
+    type Output = Duration
+    fn mul(self, rhs: u32) -> Duration / pure
+}
+
+impl Div<u32> for Duration {
+    type Output = Duration
+    fn div(self, rhs: u32) -> Duration / pure
+}
+```
+
+### 8.2 Instant
+
+```blood
+/// A monotonically non-decreasing clock.
+/// Used for measuring elapsed time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct Instant {
+    // Internal: platform-specific representation
+}
+
+impl Instant {
+    /// Returns the current instant.
+    fn now() -> Instant / {IO}
+
+    /// Returns the elapsed time since this instant.
+    fn elapsed(&self) -> Duration / {IO}
+
+    /// Returns the duration since an earlier instant.
+    fn duration_since(&self, earlier: Instant) -> Duration / pure
+
+    /// Checked duration since an earlier instant.
+    fn checked_duration_since(&self, earlier: Instant) -> Option<Duration> / pure
+
+    /// Saturating duration since an earlier instant.
+    fn saturating_duration_since(&self, earlier: Instant) -> Duration / pure
+
+    /// Checked addition.
+    fn checked_add(&self, duration: Duration) -> Option<Instant> / pure
+
+    /// Checked subtraction.
+    fn checked_sub(&self, duration: Duration) -> Option<Instant> / pure
+}
+
+impl Add<Duration> for Instant {
+    type Output = Instant
+    fn add(self, duration: Duration) -> Instant / pure
+}
+
+impl Sub<Duration> for Instant {
+    type Output = Instant
+    fn sub(self, duration: Duration) -> Instant / pure
+}
+
+impl Sub<Instant> for Instant {
+    type Output = Duration
+    fn sub(self, other: Instant) -> Duration / pure
+}
+```
+
+### 8.3 SystemTime
+
+```blood
+/// Wall clock time (can go backwards due to clock adjustments).
+/// Use Instant for measuring elapsed time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct SystemTime {
+    // Internal: platform-specific representation
+}
+
+impl SystemTime {
+    /// The Unix epoch (1970-01-01 00:00:00 UTC).
+    const UNIX_EPOCH: SystemTime = SystemTime { /* ... */ }
+
+    /// Returns the current system time.
+    fn now() -> SystemTime / {IO}
+
+    /// Returns the duration since the given time.
+    fn duration_since(&self, earlier: SystemTime) -> Result<Duration, SystemTimeError> / pure
+
+    /// Returns the elapsed time since this time.
+    fn elapsed(&self) -> Result<Duration, SystemTimeError> / {IO}
+
+    /// Checked addition.
+    fn checked_add(&self, duration: Duration) -> Option<SystemTime> / pure
+
+    /// Checked subtraction.
+    fn checked_sub(&self, duration: Duration) -> Option<SystemTime> / pure
+}
+
+impl Add<Duration> for SystemTime {
+    type Output = SystemTime
+    fn add(self, duration: Duration) -> SystemTime / pure
+}
+
+impl Sub<Duration> for SystemTime {
+    type Output = SystemTime
+    fn sub(self, duration: Duration) -> SystemTime / pure
+}
+
+/// Error when calculating duration between system times.
+struct SystemTimeError {
+    duration: Duration,  // The absolute difference
+}
+
+impl SystemTimeError {
+    /// Returns the positive duration difference.
+    fn duration(&self) -> Duration / pure
+}
+```
+
+### 8.4 Time Usage Examples
+
+```blood
+// Measuring elapsed time
+fn benchmark<T, F: fn() -> T>(f: F) -> (T, Duration) / {IO} {
+    let start = Instant::now()
+    let result = f()
+    let elapsed = start.elapsed()
+    (result, elapsed)
+}
+
+// Timeouts
+fn with_timeout<T, F: fn() -> T>(
+    f: F,
+    timeout: Duration
+) -> Result<T, TimeoutError> / {Async} {
+    // Implementation uses async runtime
+}
+
+// Delays
+fn sleep(duration: Duration) / {IO} {
+    // Platform-specific sleep
+}
+
+// Rate limiting
+struct RateLimiter {
+    last: Instant,
+    interval: Duration,
+}
+
+impl RateLimiter {
+    fn new(interval: Duration) -> RateLimiter / {IO}
+
+    fn wait(&mut self) / {IO} {
+        let elapsed = self.last.elapsed()
+        if elapsed < self.interval {
+            sleep(self.interval - elapsed)
+        }
+        self.last = Instant::now()
+    }
+}
+```
+
+---
+
+## 9. Format Macros
+
+Blood provides compile-time format string processing.
+
+### 9.1 Format Syntax
+
+```blood
+// Basic formatting
+format!("Hello, {}!", name)          // Display formatting
+format!("Debug: {:?}", value)        // Debug formatting
+format!("Pretty: {:#?}", value)      // Pretty-print debug
+
+// Positional arguments
+format!("{0} {} {0}", a, b)          // Explicit and implicit positions
+format!("{1} {0}", a, b)             // Reversed order
+
+// Named arguments
+format!("{name} is {age} years old", name="Alice", age=30)
+
+// Width and alignment
+format!("{:10}", s)                  // Right-align in 10 chars
+format!("{:<10}", s)                 // Left-align
+format!("{:^10}", s)                 // Center-align
+format!("{:>10}", s)                 // Right-align (explicit)
+format!("{:*^10}", s)                // Center with '*' fill
+
+// Precision
+format!("{:.3}", 3.14159)            // 3 decimal places
+format!("{:.3}", "hello")            // First 3 chars
+format!("{:10.3}", 3.14159)          // Width 10, 3 decimals
+
+// Sign
+format!("{:+}", 42)                  // Always show sign
+format!("{:-}", -42)                 // Negative only (default)
+
+// Number bases
+format!("{:b}", 42)                  // Binary
+format!("{:o}", 42)                  // Octal
+format!("{:x}", 42)                  // Lowercase hex
+format!("{:X}", 42)                  // Uppercase hex
+format!("{:#x}", 42)                 // Hex with 0x prefix
+format!("{:#b}", 42)                 // Binary with 0b prefix
+
+// Pointer
+format!("{:p}", &value)              // Pointer address
+
+// Escape braces
+format!("{{literal braces}}")        // Prints: {literal braces}
+```
+
+### 9.2 Format Macros
+
+```blood
+/// Formats arguments into a String.
+macro format!($fmt:literal $(, $args:expr)*) -> String / {Allocate}
+
+/// Writes formatted string to a writer.
+macro write!($dst:expr, $fmt:literal $(, $args:expr)*) -> Result<(), FormatError> / pure
+
+/// Writes formatted string with newline to a writer.
+macro writeln!($dst:expr, $fmt:literal $(, $args:expr)*) -> Result<(), FormatError> / pure
+
+/// Prints to stdout.
+macro print!($fmt:literal $(, $args:expr)*) / {IO}
+
+/// Prints to stdout with newline.
+macro println!($fmt:literal $(, $args:expr)*) / {IO}
+
+/// Prints to stderr.
+macro eprint!($fmt:literal $(, $args:expr)*) / {IO}
+
+/// Prints to stderr with newline.
+macro eprintln!($fmt:literal $(, $args:expr)*) / {IO}
+
+/// Panics with formatted message.
+macro panic!($fmt:literal $(, $args:expr)*) -> ! / {Panic}
+
+/// Debug print (includes source location).
+macro dbg!($val:expr) -> T / {IO}
+
+/// Compile-time format string for later use.
+macro format_args!($fmt:literal $(, $args:expr)*) -> Arguments / pure
+```
+
+### 9.3 Implementation Details
+
+```blood
+/// Compiled format arguments.
+struct Arguments<'a> {
+    pieces: &'a [&'a str],
+    fmt: Option<&'a [Argument]>,
+    args: &'a [ArgumentV1<'a>],
+}
+
+/// Format argument metadata.
+struct Argument {
+    position: usize,
+    format: FormatSpec,
+}
+
+/// Format specification.
+struct FormatSpec {
+    fill: char,
+    align: Alignment,
+    flags: u32,
+    precision: Count,
+    width: Count,
+}
+
+enum Count {
+    Is(usize),
+    Param(usize),
+    Implied,
+}
+
+/// Type-erased format argument.
+struct ArgumentV1<'a> {
+    value: &'a dyn Display,  // Or Debug, depending on format spec
+    formatter: fn(&dyn Display, &mut Formatter) -> Result<(), FormatError>,
+}
+
+impl<'a> Arguments<'a> {
+    /// Returns estimated output length.
+    fn estimated_capacity(&self) -> usize / pure
+}
+```
+
+### 9.4 Custom Formatting
+
+```blood
+// Implementing Display for a custom type
+impl Display for IpAddress {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure {
+        write!(f, "{}.{}.{}.{}", self.0, self.1, self.2, self.3)
+    }
+}
+
+// Implementing Debug with helpers
+impl Debug for HashMap<K, V>
+where
+    K: Debug,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure {
+        f.debug_map()
+            .entries(self.iter())
+            .finish()
+    }
+}
+
+// Custom formatter for special needs
+impl LowerHex for MyType {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure {
+        write!(f, "{:x}", self.inner)
+    }
+}
+```
+
+### 9.5 Formatting Traits
+
+```blood
+/// Format with `{}`.
+trait Display {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:?}`.
+trait Debug {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:o}`.
+trait Octal {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:x}`.
+trait LowerHex {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:X}`.
+trait UpperHex {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:b}`.
+trait Binary {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:e}`.
+trait LowerExp {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:E}`.
+trait UpperExp {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+
+/// Format with `{:p}`.
+trait Pointer {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), FormatError> / pure
+}
+```
+
+---
+
+## 10. Standard Effects
+
+### 10.0 Error Handling Philosophy: Panic vs Error
 
 Blood distinguishes between two categories of failures:
 
@@ -921,7 +3649,7 @@ Blood distinguishes between two categories of failures:
 
 *Panics can be caught at coarse boundaries but should not be used for control flow.
 
-#### 6.0.1 When to Use Error<E>
+#### 10.0.1 When to Use Error<E>
 
 Use `Error<E>` for **expected failures** that callers should handle:
 
@@ -936,7 +3664,7 @@ fn parse_json(input: &str) -> Json / {Error<ParseError>} { ... }
 fn fetch_url(url: &Url) -> Response / {Async, Error<HttpError>} { ... }
 ```
 
-#### 6.0.2 When to Use Panic
+#### 10.0.2 When to Use Panic
 
 Use `Panic` for **bugs and invariant violations** that indicate programmer error:
 
@@ -959,7 +3687,7 @@ fn process(variant: MyEnum) -> i32 / {Panic} {
 }
 ```
 
-#### 6.0.3 The `#[no_panic]` Attribute
+#### 10.0.3 The `#[no_panic]` Attribute
 
 For safety-critical code, Blood provides compile-time panic prevention:
 
@@ -979,7 +3707,7 @@ fn compute_signal(value: f64) -> ControlSignal / pure {
 }
 ```
 
-#### 6.0.4 Converting Between Panic and Error
+#### 10.0.4 Converting Between Panic and Error
 
 ```blood
 // Panic → Error: Catch panics at boundaries
@@ -999,7 +3727,7 @@ fn expect<T, E: Display>(result: Result<T, E>, msg: &str) -> T / {Panic} {
 }
 ```
 
-#### 6.0.5 Guidelines by Domain
+#### 10.0.5 Guidelines by Domain
 
 | Domain | Preferred Approach |
 |--------|-------------------|
@@ -1008,7 +3736,7 @@ fn expect<T, E: Display>(result: Result<T, E>, msg: &str) -> T / {Panic} {
 | CLI tools | `Panic` acceptable for startup, `Error<E>` for user input |
 | Libraries | `Error<E>` for public API, `Panic` for internal bugs |
 
-### 6.1 Error<E>
+### 10.1 Error<E>
 
 Recoverable errors.
 
@@ -1026,7 +3754,7 @@ fn parse_int(s: &str) -> i32 / {Error<ParseError>} {
 }
 ```
 
-### 6.2 State<S>
+### 10.2 State<S>
 
 Mutable state threading.
 
@@ -1045,11 +3773,11 @@ fn increment() -> i32 / {State<i32>} {
 }
 ```
 
-### 6.3 IO
+### 10.3 IO
 
 Input/output operations. IO is a **compound effect** that subsumes several simpler effects.
 
-#### 6.3.1 Effect Hierarchy and Subsumption
+#### 10.3.1 Effect Hierarchy and Subsumption
 
 ```blood
 /// IO subsumes Error<IoError>, Log, and implicitly State for internal buffers
@@ -1071,7 +3799,7 @@ effect IO extends Log {
 }
 ```
 
-#### 6.3.2 Subsumption Semantics
+#### 10.3.2 Subsumption Semantics
 
 When an effect `E1 extends E2`, handlers for `E1` automatically handle `E2` operations:
 
@@ -1099,7 +3827,7 @@ fn example() / {IO} {
 }
 ```
 
-#### 6.3.3 Effect Hierarchy Rules
+#### 10.3.3 Effect Hierarchy Rules
 
 The standard effect subsumption hierarchy:
 
@@ -1127,7 +3855,7 @@ fn io_context() / {IO} {
 }
 ```
 
-#### 6.3.4 Convenience Functions
+#### 10.3.4 Convenience Functions
 
 ```blood
 // Convenience functions
@@ -1175,7 +3903,7 @@ fn write_file(path: &Path, data: &[u8]) -> unit / {IO, Error<IoError>} {
 }
 ```
 
-### 6.4 Async
+### 10.4 Async
 
 Asynchronous operations.
 
@@ -1208,7 +3936,7 @@ impl<T> TaskHandle<T> {
 }
 ```
 
-### 6.5 Yield<T>
+### 10.5 Yield<T>
 
 Generator/coroutine support.
 
@@ -1232,7 +3960,7 @@ fn fibonacci() -> impl Iterator<Item = u64> / pure {
 }
 ```
 
-### 6.6 NonDet
+### 10.6 NonDet
 
 Non-determinism (for backtracking search).
 
@@ -1251,7 +3979,7 @@ fn solve_puzzle() -> Solution / {NonDet} {
 }
 ```
 
-### 6.7 Allocate
+### 10.7 Allocate
 
 Memory allocation (for tracking).
 
@@ -1266,7 +3994,7 @@ effect Allocate {
 // User code rarely handles it directly
 ```
 
-### 6.8 Panic
+### 10.8 Panic
 
 Unrecoverable errors.
 
@@ -1281,7 +4009,7 @@ fn panic(msg: &str) -> ! / {Panic} {
 }
 ```
 
-### 6.9 Log
+### 10.9 Log
 
 Structured logging.
 
@@ -1306,7 +4034,7 @@ enum LogLevel {
 // error!("message")
 ```
 
-### 6.10 StaleReference
+### 10.10 StaleReference
 
 Blood's novel effect for handling generational reference invalidation.
 
@@ -1340,7 +4068,7 @@ struct StaleReferenceInfo {
 }
 ```
 
-#### 6.10.1 When StaleReference is Raised
+#### 10.10.1 When StaleReference is Raised
 
 This effect is raised by the runtime in these scenarios:
 
@@ -1358,7 +4086,7 @@ fn example() / {StaleReference} {
 }
 ```
 
-#### 6.10.2 Integration with Generation Snapshots
+#### 10.10.2 Integration with Generation Snapshots
 
 When an effect handler resumes a continuation, the Generation Snapshot is validated:
 
@@ -1380,7 +4108,7 @@ fn example() / {State<i32>, StaleReference} {
 }
 ```
 
-### 6.11 Resource<R>
+### 10.11 Resource<R>
 
 Linear resource acquisition and release tracking.
 
@@ -1406,7 +4134,7 @@ fn with_file<T>(
 }
 ```
 
-### 6.12 Random
+### 10.12 Random
 
 Randomness as an effect (for reproducibility and testing).
 
@@ -1438,9 +4166,9 @@ fn shuffle<T>(slice: &mut [T]) / {Random} {
 
 ---
 
-## 7. Standard Handlers
+## 11. Standard Handlers
 
-### 7.1 Error Handlers
+### 11.1 Error Handlers
 
 ```blood
 // Propagate errors as Result
@@ -1467,7 +4195,7 @@ deep handler LogErrors<E: Display> for Error<E> {
 }
 ```
 
-### 7.2 State Handlers
+### 11.2 State Handlers
 
 ```blood
 // In-memory state
@@ -1491,7 +4219,7 @@ deep handler ReadOnlyState<S: Clone> for State<S> {
 }
 ```
 
-#### 7.2.1 Generation Snapshots in State Handlers
+#### 11.2.1 Generation Snapshots in State Handlers
 
 When a handler calls `resume(value)`, the runtime captures a **Generation Snapshot** of all generational references in the suspended continuation. This snapshot is validated when the continuation actually resumes.
 
@@ -1536,7 +4264,7 @@ fn example() / {State<i32>, StaleReference} {
 
 See FORMAL_SEMANTICS.md Section 5 for the formal operational semantics of Generation Snapshots.
 
-### 7.3 IO Handlers
+### 11.3 IO Handlers
 
 ```blood
 // Real IO (production)
@@ -1563,7 +4291,7 @@ deep handler MockIO for IO {
 }
 ```
 
-### 7.4 Async Handlers
+### 11.4 Async Handlers
 
 ```blood
 // Single-threaded executor
@@ -1596,7 +4324,7 @@ deep handler SingleThreadExecutor for Async {
 }
 ```
 
-### 7.5 Yield Handlers
+### 11.5 Yield Handlers
 
 ```blood
 // Collect all yielded values
@@ -1624,7 +4352,7 @@ enum GeneratorState<T, R> {
 }
 ```
 
-### 7.6 NonDet Handlers
+### 11.6 NonDet Handlers
 
 ```blood
 // Find first solution
@@ -1723,7 +4451,7 @@ deep handler BoundedSearch for NonDet {
 }
 ```
 
-### 7.7 StaleReference Handlers
+### 11.7 StaleReference Handlers
 
 ```blood
 // Panic on stale reference (default for safety-critical code)
@@ -1766,7 +4494,7 @@ deep handler LogStaleAndRecover<T: Default> for StaleReference {
 }
 ```
 
-### 7.8 Resource Handlers
+### 11.8 Resource Handlers
 
 ```blood
 // Bracket pattern for file resources
@@ -1830,7 +4558,7 @@ deep handler ResourcePool<R: Linear> for Resource<R> {
 }
 ```
 
-### 7.9 Random Handlers
+### 11.9 Random Handlers
 
 ```blood
 // Cryptographically secure random (production)
@@ -1906,9 +4634,9 @@ deep handler DeterministicRandom for Random {
 
 ---
 
-## 8. Prelude
+## 12. Prelude
 
-### 8.1 Auto-Imported Items
+### 12.1 Auto-Imported Items
 
 The prelude is automatically imported into every module:
 
@@ -1931,7 +4659,7 @@ pub use std::effects::{Error, IO, Panic};
 pub use std::handlers::{PropagateError};
 ```
 
-### 8.2 Excluding Prelude
+### 12.2 Excluding Prelude
 
 To exclude the prelude:
 
@@ -1974,15 +4702,15 @@ Effects lower in the hierarchy subsume those above:
 
 ---
 
-## 9. Implementation Notes
+## 13. Implementation Notes
 
 This section provides implementation guidance for compiler writers and advanced users.
 
-### 9.1 Effect Compilation Strategy
+### 13.1 Effect Compilation Strategy
 
 Blood effects are compiled using **evidence passing**, similar to Koka's approach. This transforms effect operations into explicit dictionary parameters.
 
-#### 9.1.1 Monomorphization
+#### 13.1.1 Monomorphization
 
 For monomorphic effect usage, the compiler eliminates effect overhead entirely:
 
@@ -2002,7 +4730,7 @@ fn increment(state: &mut i32) -> i32 {
 }
 ```
 
-#### 9.1.2 Polymorphic Effects
+#### 13.1.2 Polymorphic Effects
 
 For polymorphic effect rows, evidence dictionaries are passed:
 
@@ -2025,7 +4753,7 @@ fn map_with_effect<T, U>(
 }
 ```
 
-#### 9.1.3 Handler Compilation
+#### 13.1.3 Handler Compilation
 
 Handlers compile to different implementations based on their characteristics:
 
@@ -2064,9 +4792,9 @@ fn count_ops<T>(computation: fn() -> T) -> (T, usize) {
 }
 ```
 
-### 9.2 Memory Management Implementation
+### 13.2 Memory Management Implementation
 
-#### 9.2.1 Generational Reference Layout
+#### 13.2.1 Generational Reference Layout
 
 The 128-bit generational pointer format:
 
@@ -2084,7 +4812,7 @@ The 128-bit generational pointer format:
 
 **Generation Check Cost**: On modern x86-64, the generation check adds approximately 2-3 cycles per dereference (single cache line, branch prediction favorable).
 
-#### 9.2.2 Slot Allocator Design
+#### 13.2.2 Slot Allocator Design
 
 Each memory tier uses optimized allocators:
 
@@ -2103,7 +4831,7 @@ struct Slot {
 }
 ```
 
-#### 9.2.3 Collection Memory Patterns
+#### 13.2.3 Collection Memory Patterns
 
 **Vec Growth**: Geometric (2x) growth with configurable initial capacity:
 
@@ -2119,9 +4847,9 @@ probe(i) = (h + i * (i + 1) / 2) mod capacity
 
 **BTreeMap Node Size**: Targeting cache-line alignment (6-12 keys per node on 64-byte cache lines).
 
-### 9.3 Effect Safety Invariants
+### 13.3 Effect Safety Invariants
 
-#### 9.3.1 Generation Snapshot Invariants
+#### 13.3.1 Generation Snapshot Invariants
 
 The runtime maintains these invariants for generation snapshots:
 
@@ -2129,7 +4857,7 @@ The runtime maintains these invariants for generation snapshots:
 2. **Validation Atomicity**: All generations checked before any continuation code runs
 3. **Monotonicity**: Generations only increase; snapshot gen ≤ current gen always
 
-#### 9.3.2 Linear Type Enforcement
+#### 13.3.2 Linear Type Enforcement
 
 Linear values have additional compile-time tracking:
 
@@ -2145,9 +4873,9 @@ fn process_file(file: File @linear) / {IO, Error<IoError>} {
 
 **Compilation Strategy**: Linear values tracked through abstract interpretation; error if any path drops without use or uses more than once.
 
-### 9.4 Standard Handler Implementation Patterns
+### 13.4 Standard Handler Implementation Patterns
 
-#### 9.4.1 State Handler Memory
+#### 13.4.1 State Handler Memory
 
 The `LocalState<S>` handler stores state in handler activation:
 
@@ -2160,7 +4888,7 @@ struct LocalStateHandler<S> {
 
 For large state, consider `Box<S>` or passing by reference.
 
-#### 9.4.2 Async Handler Internals
+#### 13.4.2 Async Handler Internals
 
 The async runtime uses:
 
@@ -2175,7 +4903,7 @@ Created → Ready ⟷ Running → Completed
               ↘ Waiting ↗
 ```
 
-#### 9.4.3 NonDet Handler Search Strategies
+#### 13.4.3 NonDet Handler Search Strategies
 
 | Handler | Strategy | Memory | Use Case |
 |---------|----------|--------|----------|
@@ -2184,7 +4912,7 @@ Created → Ready ⟷ Running → Completed
 | `BoundedSearch` | DFS + depth limit | O(max_depth) | Prevent infinite |
 | `MonteCarloSampler` | Random | O(1) | Probabilistic |
 
-### 9.5 FFI Integration
+### 13.5 FFI Integration
 
 For C interop, effects must be explicitly handled at the boundary:
 
@@ -2206,9 +4934,9 @@ extern "C" fn callback_wrapper(
 
 See [FFI.md](./FFI.md) for complete FFI specification.
 
-### 9.6 Performance Guidelines
+### 13.6 Performance Guidelines
 
-#### 9.6.1 Effect Overhead Guidelines
+#### 13.6.1 Effect Overhead Guidelines
 
 | Scenario | Overhead | Mitigation |
 |----------|----------|------------|
@@ -2217,7 +4945,7 @@ See [FFI.md](./FFI.md) for complete FFI specification.
 | Polymorphic (unknown) | ~15-30% | Evidence dictionary |
 | Multi-shot handlers | O(continuation size) | Avoid in hot paths |
 
-#### 9.6.2 Collection Selection Guide
+#### 13.6.2 Collection Selection Guide
 
 | Need | Use | Rationale |
 |------|-----|-----------|
@@ -2229,7 +4957,7 @@ See [FFI.md](./FFI.md) for complete FFI specification.
 | Set membership | `HashSet<T>` | O(1) expected |
 | Ordered set ops | `BTreeSet<T>` | Efficient range queries |
 
-#### 9.6.3 Memory Tier Selection
+#### 13.6.3 Memory Tier Selection
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

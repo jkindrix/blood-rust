@@ -1,8 +1,15 @@
 # Blood Foreign Function Interface (FFI) Specification
 
-**Version**: 0.2.0-draft
+**Version**: 0.3.0-draft
 **Status**: Active Development
-**Last Updated**: 2026-01-09
+**Implementation**: 🔶 Scaffolded (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
+**Last Updated**: 2026-01-10
+
+> ⚠️ **Validation Status**: This specification describes design targets. Platform-specific considerations (§9) are validated only for x86-64 Linux. Other platforms are design targets pending validation. FFI code exists in `blood-runtime/src/ffi.rs` but integration with compiled programs is incomplete.
+
+**Revision 0.3.0 Changes**:
+- Added validation status box and implementation status link
+- Clarified platform support as design targets pending validation
 
 This document specifies Blood's Foreign Function Interface, enabling interoperability with C, C++, and other languages through a safety-preserving bridge dialect.
 
