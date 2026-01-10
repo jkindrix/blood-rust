@@ -984,17 +984,60 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
             Rvalue::Len(place) => {
                 // Array/slice length computation
-                // For arrays, we need to look up the type and extract the static size
-                // For slices, we need to load the length from the fat pointer
-                let _ptr = self.compile_mir_place(place, body)?;
+                // For arrays, we extract the static size from the type
+                // For slices, we load the length from the fat pointer (not yet implemented)
 
-                // Get the type of the place to determine if it's an array or slice
-                // For now, return an explicit error since length computation is not yet implemented
-                Err(vec![Diagnostic::error(
-                    "Rvalue::Len is not yet implemented. Array/slice length computation \
-                     requires type information to extract static array size or slice length.",
-                    Span::dummy()
-                )])
+                // Get the base type from the local
+                let base_ty = body.locals[place.local.index() as usize].ty.clone();
+
+                // Compute the effective type after applying projections
+                let effective_ty = self.compute_place_type(&base_ty, &place.projection);
+
+                // Extract length based on the type
+                match effective_ty.kind() {
+                    TypeKind::Array { size, .. } => {
+                        // For arrays, return the static size as a usize (i64)
+                        let len_val = self.context.i64_type().const_int(*size, false);
+                        Ok(len_val.into())
+                    }
+                    TypeKind::Slice { .. } => {
+                        // For slices, we need to extract the length from the fat pointer
+                        // A slice is represented as (ptr, len), so we need to load the second element
+                        // This requires fat pointer support which is complex to implement correctly
+                        Err(vec![Diagnostic::error(
+                            "Slice length extraction not yet implemented. \
+                             Slices are fat pointers requiring special handling.",
+                            Span::dummy()
+                        )])
+                    }
+                    TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                        // For references/pointers to arrays, extract from the inner type
+                        match inner.kind() {
+                            TypeKind::Array { size, .. } => {
+                                let len_val = self.context.i64_type().const_int(*size, false);
+                                Ok(len_val.into())
+                            }
+                            TypeKind::Slice { .. } => {
+                                Err(vec![Diagnostic::error(
+                                    "Slice length extraction through reference not yet implemented.",
+                                    Span::dummy()
+                                )])
+                            }
+                            _ => {
+                                Err(vec![Diagnostic::error(
+                                    format!("Cannot compute length of type {:?}", inner.kind()),
+                                    Span::dummy()
+                                )])
+                            }
+                        }
+                    }
+                    _ => {
+                        Err(vec![Diagnostic::error(
+                            format!("Cannot compute length of type {:?}", effective_ty.kind()),
+                            Span::dummy()
+                        )])
+                    }
+                }
             }
 
             Rvalue::Aggregate { kind, operands } => {
@@ -1429,6 +1472,62 @@ fn tier_name(tier: MemoryTier) -> &'static str {
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
+    /// Compute the effective type of a place after applying projections.
+    ///
+    /// This walks through the projection chain and computes what type the
+    /// place represents after all field accesses, dereferences, and indexing.
+    fn compute_place_type(&self, base_ty: &Type, projections: &[PlaceElem]) -> Type {
+        let mut current_ty = base_ty.clone();
+
+        for proj in projections {
+            current_ty = match proj {
+                PlaceElem::Deref => {
+                    // Dereference: unwrap Ref, Ptr, or Box types
+                    match current_ty.kind() {
+                        TypeKind::Ref { inner, .. } => inner.clone(),
+                        TypeKind::Ptr { inner, .. } => inner.clone(),
+                        // For other types, keep the type (should not happen in valid MIR)
+                        _ => current_ty,
+                    }
+                }
+                PlaceElem::Field(idx) => {
+                    // Field access: get the field type from struct/tuple
+                    match current_ty.kind() {
+                        TypeKind::Tuple(tys) => {
+                            tys.get(*idx as usize).cloned().unwrap_or(current_ty)
+                        }
+                        // For ADT types, we'd need DefId lookup to get field types
+                        // For now, return current type (length queries on ADT fields
+                        // will fail with an appropriate error message)
+                        TypeKind::Adt { .. } => current_ty,
+                        // For other types, keep the type
+                        _ => current_ty,
+                    }
+                }
+                PlaceElem::Index(_) | PlaceElem::ConstantIndex { .. } => {
+                    // Array/slice indexing: get the element type
+                    match current_ty.kind() {
+                        TypeKind::Array { element, .. } => element.clone(),
+                        TypeKind::Slice { element } => element.clone(),
+                        // For other types, keep the type
+                        _ => current_ty,
+                    }
+                }
+                PlaceElem::Subslice { .. } => {
+                    // Subslice keeps the same slice type
+                    current_ty
+                }
+                PlaceElem::Downcast(variant_idx) => {
+                    // Downcast to a specific enum variant - keep the type
+                    let _ = variant_idx;
+                    current_ty
+                }
+            };
+        }
+
+        current_ty
+    }
+
     /// Get the size of an LLVM type in bytes.
     ///
     /// This will be used for blood_alloc when Region tier allocation is properly
