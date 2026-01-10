@@ -570,7 +570,7 @@ mod tests {
         assert!(Value::Unit.is_unit());
         assert_eq!(Value::Bool(true).as_bool(), Some(true));
         assert_eq!(Value::Int(42).as_int(), Some(42));
-        assert_eq!(Value::Float(3.14).as_float(), Some(3.14));
+        assert_eq!(Value::Float(2.5).as_float(), Some(2.5));
         assert_eq!(Value::String("hello".into()).as_string(), Some("hello"));
     }
 
@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(int::parse(" -123 ").unwrap(), -123);
         assert!(int::parse("abc").is_err());
 
-        assert_eq!(float::parse("3.14").unwrap(), 3.14);
+        assert_eq!(float::parse("2.5").unwrap(), 2.5);
         assert_eq!(float::parse(" -2.5 ").unwrap(), -2.5);
         assert!(float::parse("abc").is_err());
     }

@@ -464,7 +464,7 @@ mod tests {
     fn test_ffi_value_type() {
         assert_eq!(FfiValue::Void.ffi_type(), FfiType::Void);
         assert_eq!(FfiValue::I32(42).ffi_type(), FfiType::I32);
-        assert_eq!(FfiValue::F64(3.14).ffi_type(), FfiType::F64);
+        assert_eq!(FfiValue::F64(2.5).ffi_type(), FfiType::F64);
         assert_eq!(FfiValue::Bool(true).ffi_type(), FfiType::Bool);
     }
 
@@ -472,7 +472,7 @@ mod tests {
     fn test_ffi_value_conversions() {
         assert_eq!(FfiValue::I32(42).as_i32(), Some(42));
         assert_eq!(FfiValue::I64(100).as_i64(), Some(100));
-        assert_eq!(FfiValue::F64(3.14).as_f64(), Some(3.14));
+        assert_eq!(FfiValue::F64(2.5).as_f64(), Some(2.5));
         assert_eq!(FfiValue::Bool(true).as_i32(), Some(1));
         assert_eq!(FfiValue::Bool(false).as_i32(), Some(0));
     }

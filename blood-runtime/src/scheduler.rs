@@ -367,7 +367,7 @@ mod tests {
         let counter = Arc::new(AtomicI32::new(0));
         let counter_clone = counter.clone();
 
-        let mut scheduler = Scheduler::new(SchedulerConfig {
+        let scheduler = Scheduler::new(SchedulerConfig {
             num_workers: 1,
             ..Default::default()
         });

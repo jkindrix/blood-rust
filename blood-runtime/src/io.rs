@@ -474,7 +474,7 @@ mod tests {
         let op = IoOp::Timeout {
             duration: Duration::from_millis(10),
         };
-        let op_id = reactor.submit(op).unwrap();
+        let _op_id = reactor.submit(op).unwrap();
 
         assert_eq!(reactor.pending_count(), 1);
         assert!(reactor.has_pending());

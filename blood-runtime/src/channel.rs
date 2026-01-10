@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_timeout() {
-        let (tx, rx) = bounded::<i32>(1);
+        let (_tx, rx) = bounded::<i32>(1);
 
         let start = std::time::Instant::now();
         let result = rx.recv_timeout(Duration::from_millis(50));
