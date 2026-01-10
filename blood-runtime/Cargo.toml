@@ -1,0 +1,40 @@
+[package]
+name = "blood-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Runtime library for the Blood programming language"
+
+[dependencies]
+# Concurrency primitives
+crossbeam-deque = "0.8"
+crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+
+# Atomic operations
+parking_lot = "0.12"
+
+# FFI
+libloading = "0.8"
+
+# Utilities
+pin-project-lite = "0.2"
+
+# I/O (platform-specific)
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.6", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["event", "fs", "net"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = ["Win32_Foundation", "Win32_System_IO"] }
+
+[features]
+default = []
+io_uring = ["io-uring"]
+
+[dev-dependencies]
+pretty_assertions.workspace = true
