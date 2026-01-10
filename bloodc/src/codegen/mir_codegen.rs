@@ -178,7 +178,8 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
             let alloca = match tier {
                 MemoryTier::Stack => {
-                    // Stack allocation - thin pointer, no generation
+                    // Stack allocation - thin pointer, no generation check needed
+                    // This is the fast path for non-escaping values
                     self.builder.build_alloca(
                         llvm_ty,
                         &format!("_{}_{}", local.id.index, tier_name(tier))
@@ -187,14 +188,47 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     )])?
                 }
                 MemoryTier::Region | MemoryTier::Persistent | MemoryTier::Reserved => {
-                    // Region allocation - would use blood_alloc in full implementation
-                    // For now, still use stack allocation but mark differently
-                    self.builder.build_alloca(
+                    // Region allocation - use blood_alloc for proper generational tracking
+                    // This enables generation checks on dereference
+                    //
+                    // For now, we still use stack allocation for simplicity.
+                    // Full blood_alloc integration requires:
+                    // 1. Computing type size at compile time
+                    // 2. Storing the generation alongside the pointer
+                    // 3. Extracting generation for validation
+                    //
+                    // TODO: When we have full 128-bit BloodPtr support:
+                    // - Call blood_alloc(size, &addr, &gen_meta)
+                    // - Store BloodPtr{addr, gen, meta} in the local slot
+                    // - Extract generation at dereference sites
+                    //
+                    // Current implementation: stack allocate but register for tracking
+                    let alloca = self.builder.build_alloca(
                         llvm_ty,
                         &format!("_{}_{}", local.id.index, tier_name(tier))
                     ).map_err(|e| vec![Diagnostic::error(
                         format!("LLVM alloca error: {}", e), body.span
-                    )])?
+                    )])?;
+
+                    // Register the allocation for generation tracking
+                    // This allows the runtime to validate references on effect resume
+                    if let Some(register_fn) = self.module.get_function("blood_register_allocation") {
+                        let i64_ty = self.context.i64_type();
+                        let ptr_as_int = self.builder.build_ptr_to_int(alloca, i64_ty, "addr")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                        // Size is the LLVM type size - approximate with 8 for now
+                        // TODO: Use proper type size calculation
+                        let size = i64_ty.const_int(8, false);
+
+                        self.builder.build_call(
+                            register_fn,
+                            &[ptr_as_int.into(), size.into()],
+                            &format!("gen_{}", local.id.index)
+                        ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), body.span)])?;
+                    }
+
+                    alloca
                 }
             };
 
@@ -1012,27 +1046,30 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         let ptr = self.compile_mir_place(place, body)?;
 
-        // Generation checks are only needed when loading through generational pointers.
+        // Generation checks are needed for region-tier allocations to detect
+        // stale references (use-after-free). Based on escape analysis:
         //
-        // Currently, all allocations use stack allocation (thin pointers), even those
-        // marked as "region" tier. Generation checks will be enabled when we implement:
-        // 1. Actual 128-bit generational pointer representation
-        // 2. Region-based allocation with blood_alloc
-        // 3. Generation slot management in the runtime
+        // - Stack tier: No generation check needed (value doesn't escape)
+        // - Region/Persistent tier: Must validate generation before dereference
         //
-        // For now, only emit generation checks if:
-        // 1. The local's tier is Region or Persistent (not Stack)
-        // 2. Escape analysis says we can't skip the check
-        // 3. We have actual generational pointer support (TODO: currently disabled)
-        //
-        // Once 128-bit pointers are implemented, uncomment this:
-        // let tier = self.get_local_tier(place.local, escape_results);
-        // if !matches!(tier, MemoryTier::Stack) && !self.should_skip_gen_check(place.local, escape_results) {
-        //     let i32_ty = self.context.i32_type();
-        //     let expected_gen = i32_ty.const_int(0, false); // Extract from 128-bit ptr
-        //     self.emit_generation_check(ptr, expected_gen, body.span)?;
-        // }
-        let _ = escape_results; // Silence unused warning for now
+        // The check is skipped if escape analysis indicates the value is purely
+        // local (NoEscape) and not captured by any effect operation.
+        let tier = self.get_local_tier(place.local, escape_results);
+
+        if !matches!(tier, MemoryTier::Stack) && !self.should_skip_gen_check(place.local, escape_results) {
+            // Emit generation validation for region-tier references
+            //
+            // Currently we use FIRST (1) as the expected generation because:
+            // 1. Our stack-based allocations are registered with FIRST generation
+            // 2. Full 128-bit pointers would embed the generation in the pointer
+            //
+            // In the full implementation, the expected generation would be
+            // extracted from the 128-bit BloodPtr structure.
+            let i32_ty = self.context.i32_type();
+            let expected_gen = i32_ty.const_int(1, false); // generation::FIRST
+
+            self.emit_generation_check(ptr, expected_gen, body.span)?;
+        }
 
         // Load value from pointer
         let loaded = self.builder.build_load(ptr, "load")
@@ -1077,42 +1114,35 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     ) -> Result<(), Vec<Diagnostic>> {
         // Emit a generation check by calling the runtime function.
         //
-        // For 128-bit Blood pointers, the generation is embedded in the pointer.
-        // For stack allocations (thin pointers), we skip this check entirely.
-        //
-        // The runtime function `blood_check_generation` handles:
-        // 1. Looking up the current generation from the allocation slot
+        // The runtime function `blood_validate_generation` handles:
+        // 1. Looking up the current generation from the slot registry
         // 2. Comparing with the expected generation
-        // 3. Returns 1 if valid, 0 if stale
+        // 3. Returns 0 if valid, 1 if stale
         //
-        // If the check fails, we call `blood_stale_reference_panic`.
+        // If the check fails, we call `blood_stale_reference_panic` which aborts.
 
         let i32_ty = self.context.i32_type();
         let i64_ty = self.context.i64_type();
 
-        // Get or declare the check function
-        let check_fn = self.module.get_function("blood_check_generation")
+        // Get the validation function - uses slot registry for address-based lookup
+        let validate_fn = self.module.get_function("blood_validate_generation")
             .ok_or_else(|| vec![Diagnostic::error(
-                "blood_check_generation not declared", span
+                "blood_validate_generation not declared", span
             )])?;
 
-        // Convert pointer to i64 for the runtime call
-        let ptr_as_int = self.builder.build_ptr_to_int(ptr, i64_ty, "ptr_int")
+        // Convert pointer to i64 address for the runtime call
+        let address = self.builder.build_ptr_to_int(ptr, i64_ty, "ptr_addr")
             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
 
-        // We need to extract slot_index from the address - for now use simplified approach
-        // In full implementation, this would extract from the 128-bit pointer structure
-        let slot_index = self.builder.build_int_truncate(ptr_as_int, i32_ty, "slot")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
-
-        // Call blood_check_generation(slot_index, expected_gen) -> i32
+        // Call blood_validate_generation(address: i64, expected_gen: i32) -> i32
+        // Returns: 0 = valid, 1 = stale (generation mismatch)
         let result = self.builder.build_call(
-            check_fn,
-            &[slot_index.into(), expected_gen.into()],
+            validate_fn,
+            &[address.into(), expected_gen.into()],
             "gen_check"
         ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
 
-        let is_valid = result.try_as_basic_value()
+        let is_stale = result.try_as_basic_value()
             .left()
             .ok_or_else(|| vec![Diagnostic::error("Generation check returned void", span)])?
             .into_int_value();
@@ -1125,16 +1155,16 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         let valid_bb = self.context.append_basic_block(fn_value, "gen_valid");
         let stale_bb = self.context.append_basic_block(fn_value, "gen_stale");
 
-        // Compare: is_valid != 0
+        // Compare: is_stale == 0 (valid if result is 0)
         let zero = i32_ty.const_int(0, false);
-        let cond = self.builder.build_int_compare(
-            IntPredicate::NE,
-            is_valid,
+        let is_valid = self.builder.build_int_compare(
+            IntPredicate::EQ,
+            is_stale,
             zero,
             "is_valid"
         ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
 
-        self.builder.build_conditional_branch(cond, valid_bb, stale_bb)
+        self.builder.build_conditional_branch(is_valid, valid_bb, stale_bb)
             .map_err(|e| vec![Diagnostic::error(format!("LLVM branch error: {}", e), span)])?;
 
         // Stale path: call panic handler
@@ -1144,8 +1174,25 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 "blood_stale_reference_panic not declared", span
             )])?;
 
-        self.builder.build_call(panic_fn, &[slot_index.into(), expected_gen.into()], "")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
+        // Get current generation for the error message
+        if let Some(get_gen_fn) = self.module.get_function("blood_get_generation") {
+            let actual_gen = self.builder.build_call(
+                get_gen_fn,
+                &[address.into()],
+                "actual_gen"
+            ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?
+            .try_as_basic_value()
+            .left()
+            .map(|v| v.into_int_value())
+            .unwrap_or_else(|| i32_ty.const_int(0, false));
+
+            self.builder.build_call(panic_fn, &[expected_gen.into(), actual_gen.into()], "")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
+        } else {
+            // Fallback: just pass expected as both args
+            self.builder.build_call(panic_fn, &[expected_gen.into(), expected_gen.into()], "")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
+        }
 
         self.builder.build_unreachable()
             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;

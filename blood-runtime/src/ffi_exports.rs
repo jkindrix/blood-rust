@@ -82,6 +82,13 @@ pub unsafe extern "C" fn println_str(s: *const c_char) {
 /// Returns a 128-bit Blood pointer (as two 64-bit values via out parameters).
 /// Returns 0 on success, non-zero on failure.
 ///
+/// The allocation is automatically registered in the global slot registry,
+/// enabling generation validation for stale reference detection.
+///
+/// # Layout of out_gen_meta
+/// - Bits 0-31: Metadata (tier, flags, type fingerprint)
+/// - Bits 32-63: Generation
+///
 /// # Safety
 ///
 /// `out_addr` and `out_gen_meta` must be valid pointers to writable u64 locations.
@@ -95,8 +102,9 @@ pub unsafe extern "C" fn blood_alloc(
         return -1;
     }
 
-    // Use standard allocation for now
-    let layout = match std::alloc::Layout::from_size_align(size, 8) {
+    // Use 16-byte alignment for BloodPtr compatibility
+    let align = 16.max(std::mem::align_of::<usize>());
+    let layout = match std::alloc::Layout::from_size_align(size, align) {
         Ok(l) => l,
         Err(_) => return -2,
     };
@@ -106,10 +114,16 @@ pub unsafe extern "C" fn blood_alloc(
         return -3;
     }
 
-    // Create a BloodPtr with initial generation (region allocation)
+    let address = ptr as u64;
+
+    // Register the allocation in the global slot registry
+    // This enables generation validation on dereference
+    let gen = register_allocation(address, size);
+
+    // Create a BloodPtr with the assigned generation (region allocation)
     let blood_ptr = BloodPtr::new(
         ptr as usize,
-        generation::FIRST,
+        gen,
         PointerMetadata::REGION,
     );
 
@@ -121,6 +135,10 @@ pub unsafe extern "C" fn blood_alloc(
 
 /// Free memory allocated with blood_alloc.
 ///
+/// This function unregisters the allocation from the slot registry (which
+/// increments the generation) before deallocating the memory. Any subsequent
+/// dereference of a pointer with the old generation will fail validation.
+///
 /// # Safety
 /// The address must have been allocated with blood_alloc.
 #[no_mangle]
@@ -129,7 +147,13 @@ pub unsafe extern "C" fn blood_free(addr: u64, size: usize) {
         return;
     }
 
-    let layout = match std::alloc::Layout::from_size_align(size, 8) {
+    // Unregister from slot registry BEFORE deallocation
+    // This increments the generation, invalidating any existing references
+    unregister_allocation(addr);
+
+    // Use matching alignment from blood_alloc
+    let align = 16.max(std::mem::align_of::<usize>());
+    let layout = match std::alloc::Layout::from_size_align(size, align) {
         Ok(l) => l,
         Err(_) => return,
     };

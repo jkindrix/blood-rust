@@ -822,6 +822,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let panic_msg_type = void_type.fn_type(&[i8_ptr_type.into()], false);
         self.module.add_function("blood_panic", panic_msg_type, None);
 
+        // blood_register_allocation(address: i64, size: i64) -> i32 (generation)
+        let register_alloc_type = i32_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_register_allocation", register_alloc_type, None);
+
+        // blood_unregister_allocation(address: i64) -> void
+        let unregister_alloc_type = void_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_unregister_allocation", unregister_alloc_type, None);
+
+        // blood_validate_generation(address: i64, expected_gen: i32) -> i32 (0 = valid, 1 = stale)
+        let validate_gen_type = i32_type.fn_type(&[i64_type.into(), i32_type.into()], false);
+        self.module.add_function("blood_validate_generation", validate_gen_type, None);
+
+        // blood_get_generation(address: i64) -> i32 (current generation from slot registry)
+        let get_gen_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_get_generation", get_gen_type, None);
+
         // === Effect Runtime ===
 
         // blood_evidence_create() -> *void (EvidenceHandle)

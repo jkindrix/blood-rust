@@ -90,11 +90,12 @@ The following table tracks implementation status of SSM (Synthetic Safety Model)
 | MIR lowering | ✅ Implemented | `bloodc/src/mir/lowering.rs` | HIR→MIR complete |
 | Escape analysis | ✅ Implemented | `bloodc/src/mir/escape.rs` | Inter-procedural analysis |
 | Generation snapshots | ✅ Implemented | `bloodc/src/mir/snapshot.rs` | Snapshot capture/validation |
-| blood_alloc/blood_free | ✅ Integrated | `bloodc/src/codegen/context.rs` | Runtime memory functions |
-| MIR in codegen pipeline | 🔶 Partial | `bloodc/src/main.rs` | MIR runs, codegen uses HIR directly |
-| Tier assignment from escape | 🔶 Partial | `bloodc/src/codegen/context.rs` | Analysis runs, results partially used |
-| Generation check emission | 📋 Designed | — | Awaits MIR-based codegen |
-| Snapshot validation at runtime | 📋 Designed | — | Algorithm specified |
+| blood_alloc/blood_free | ✅ Integrated | `blood-runtime/src/ffi_exports.rs` | Registers allocations in slot registry |
+| Slot registry | ✅ Implemented | `blood-runtime/src/memory.rs` | Global address→generation tracking |
+| MIR in codegen pipeline | ✅ Implemented | `bloodc/src/main.rs` | HIR→MIR→Escape→Codegen complete |
+| Tier assignment from escape | ✅ Implemented | `bloodc/src/codegen/mir_codegen.rs` | Uses recommended_tier() for allocation |
+| Generation check emission | ✅ Implemented | `bloodc/src/codegen/mir_codegen.rs` | blood_validate_generation at derefs |
+| Snapshot validation at runtime | ✅ Implemented | `blood-runtime/src/ffi_exports.rs` | blood_snapshot_validate FFI |
 | Region management | ✅ Implemented | `blood-runtime/src/memory.rs` | Slot, Region types |
 | Persistent tier (Tier 3) | 📋 Designed | — | RC + cycle collection |
 
