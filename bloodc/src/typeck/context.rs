@@ -1351,21 +1351,156 @@ impl<'a> TypeContext<'a> {
                     pattern.span,
                 ))
             }
-            ast::PatternKind::Struct { .. } => {
-                Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "struct patterns in let bindings".to_string(),
-                    },
-                    pattern.span,
-                ))
+            ast::PatternKind::Struct { path, fields, rest } => {
+                // Struct pattern: let Point { x, y } = point;
+                // First verify the type is a struct matching the pattern's path
+                if path.segments.len() != 1 {
+                    return Err(TypeError::new(
+                        TypeErrorKind::UnsupportedFeature {
+                            feature: "qualified struct pattern paths".to_string(),
+                        },
+                        pattern.span,
+                    ));
+                }
+                let struct_name = self.symbol_to_string(path.segments[0].name.node);
+
+                // Get the struct definition from the type
+                let struct_def_id = match ty.kind() {
+                    TypeKind::Adt { def_id, .. } => *def_id,
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotAStruct { ty: ty.clone() },
+                            pattern.span,
+                        ));
+                    }
+                };
+
+                let struct_info = self.struct_defs.get(&struct_def_id).cloned().ok_or_else(|| {
+                    TypeError::new(
+                        TypeErrorKind::TypeNotFound { name: struct_name.clone() },
+                        pattern.span,
+                    )
+                })?;
+
+                // Create a hidden local for the whole struct value
+                let hidden_name = format!("__struct_{}", pattern.span.start);
+                let hidden_local = self.resolver.next_local_id();
+                self.locals.push(hir::Local {
+                    id: hidden_local,
+                    name: Some(hidden_name),
+                    ty: ty.clone(),
+                    mutable: false,
+                    span: pattern.span,
+                });
+
+                // Process each field pattern
+                let mut bound_fields = std::collections::HashSet::new();
+                for field_pattern in fields {
+                    let field_name = self.symbol_to_string(field_pattern.name.node);
+
+                    // Look up the field in the struct
+                    let field_info = struct_info.fields.iter()
+                        .find(|f| f.name == field_name)
+                        .ok_or_else(|| TypeError::new(
+                            TypeErrorKind::NoField {
+                                ty: ty.clone(),
+                                field: field_name.clone(),
+                            },
+                            field_pattern.span,
+                        ))?;
+
+                    bound_fields.insert(field_name.clone());
+
+                    // Define the pattern for this field
+                    if let Some(ref inner_pattern) = field_pattern.pattern {
+                        // Field with explicit pattern: `x: pat`
+                        self.define_pattern(inner_pattern, field_info.ty.clone())?;
+                    } else {
+                        // Shorthand field: `x` means `x: x`
+                        let local_id = self.resolver.define_local(
+                            field_name.clone(),
+                            field_info.ty.clone(),
+                            false, // mutable
+                            pattern.span,
+                        )?;
+                        self.locals.push(hir::Local {
+                            id: local_id,
+                            name: Some(field_name),
+                            ty: field_info.ty.clone(),
+                            mutable: false,
+                            span: field_pattern.span,
+                        });
+                    }
+                }
+
+                // If not using rest (..), verify all fields are bound
+                if !*rest {
+                    for field_info in &struct_info.fields {
+                        if !bound_fields.contains(&field_info.name) {
+                            return Err(TypeError::new(
+                                TypeErrorKind::MissingField {
+                                    ty: ty.clone(),
+                                    field: field_info.name.clone(),
+                                },
+                                pattern.span,
+                            ));
+                        }
+                    }
+                }
+
+                Ok(hidden_local)
             }
-            ast::PatternKind::Slice { .. } => {
-                Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "slice patterns in let bindings".to_string(),
-                    },
-                    pattern.span,
-                ))
+            ast::PatternKind::Slice { elements, rest_pos } => {
+                // Slice pattern: let [first, second, ..] = arr;
+                // Get the element type from the array/slice type
+                let elem_ty = match ty.kind() {
+                    TypeKind::Array { element, size } => {
+                        // Validate: number of non-rest patterns must be <= array size
+                        let num_patterns = if rest_pos.is_some() { elements.len() - 1 } else { elements.len() };
+                        if num_patterns as u64 > *size {
+                            return Err(TypeError::new(
+                                TypeErrorKind::PatternMismatch {
+                                    expected: ty.clone(),
+                                    pattern: format!("slice pattern with {} elements", num_patterns),
+                                },
+                                pattern.span,
+                            ));
+                        }
+                        element.clone()
+                    }
+                    TypeKind::Slice { element } => element.clone(),
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotIndexable { ty: ty.clone() },
+                            pattern.span,
+                        ));
+                    }
+                };
+
+                // Create a hidden local for the whole array/slice value
+                let hidden_name = format!("__slice_{}", pattern.span.start);
+                let hidden_local = self.resolver.next_local_id();
+                self.locals.push(hir::Local {
+                    id: hidden_local,
+                    name: Some(hidden_name),
+                    ty: ty.clone(),
+                    mutable: false,
+                    span: pattern.span,
+                });
+
+                // Process each element pattern
+                for (i, elem_pattern) in elements.iter().enumerate() {
+                    // Handle rest pattern (..)
+                    if rest_pos.is_some() && Some(i) == *rest_pos {
+                        // Rest pattern - skip (it binds the middle slice, handled elsewhere)
+                        if let ast::PatternKind::Rest = &elem_pattern.kind {
+                            continue;
+                        }
+                    }
+                    self.define_pattern(elem_pattern, elem_ty.clone())?;
+                }
+
+                Ok(hidden_local)
             }
             ast::PatternKind::Or { .. } => {
                 Err(TypeError::new(
