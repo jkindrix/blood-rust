@@ -17,13 +17,13 @@ enum Option<T> {
     None,
 }
 
-// State effect for counter
+// State effect for counter (declaration - runtime not yet implemented)
 effect State<S> {
     op get() -> S;
     op put(s: S) -> unit;
 }
 
-// Deep handler for State effect
+// Deep handler for State effect (declaration - runtime not yet implemented)
 deep handler LocalState<S> for State<S> {
     let mut state: S
 
@@ -45,66 +45,30 @@ fn add(a: i32, b: i32) -> i32 / pure {
 }
 
 // Function with IO effect
-fn greet(name: String) / {IO} {
-    println("Hello, " + name + "!")
-}
-
-// Function with State effect
-fn counter() -> i32 / {State<i32>} {
-    let current = get();
-    put(current + 1);
-    current
-}
-
-// FizzBuzz implementation
-fn fizzbuzz(n: i32) -> String / pure {
-    if n % 15 == 0 {
-        "FizzBuzz"
-    } else if n % 3 == 0 {
-        "Fizz"
-    } else if n % 5 == 0 {
-        "Buzz"
-    } else {
-        n.to_string()
-    }
-}
-
-// Pattern matching example
-fn describe_option<T>(opt: Option<T>) -> String / pure {
-    match opt {
-        Option::Some(x) => "Some value",
-        Option::None => "No value",
-    }
-}
-
-// Closure example
-fn map<A, B>(items: [A], f: fn(A) -> B) -> [B] / pure {
-    let mut result = [];
-    for item in items {
-        result = result + [f(item)];
-    }
-    result
+fn greet() / {IO} {
+    println("Hello, World!")
 }
 
 // Main entry point with IO effect
 fn main() / {IO} {
-    greet("World");
+    greet();
+    println("Testing basic features...");
 
-    // Using effects with handlers
-    let final_count = with LocalState { state: 0 } handle {
-        counter();
-        counter();
-        counter()
-    };
-
-    println("Final count: " + final_count.to_string());
-
-    // Using closures
-    let numbers = [1, 2, 3, 4, 5];
-    let doubled = map(numbers, |x| x * 2);
+    // Test arithmetic
+    let sum = add(10, 20);
 
     // FizzBuzz loop
     for i in 1..=15 {
-        println(fizzbuzz(i));
+        if i % 15 == 0 {
+            println("FizzBuzz");
+        } else if i % 3 == 0 {
+            println("Fizz");
+        } else if i % 5 == 0 {
+            println("Buzz");
+        } else {
+            println("number");
+        }
     }
+
+    println("Done!");
 }
