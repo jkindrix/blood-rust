@@ -21,7 +21,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::{self, Write};
 
-use crate::memory::{BloodPtr, PointerMetadata, generation};
+use crate::memory::{BloodPtr, PointerMetadata, generation, get_slot_generation};
 
 // ============================================================================
 // I/O Functions
@@ -634,29 +634,58 @@ pub unsafe extern "C" fn blood_snapshot_add_entry(
 /// of the first stale entry found. A return value > 0 indicates a
 /// stale reference at entry (return_value - 1).
 ///
+/// This function uses the global slot registry to look up the current
+/// generation for each address and compare it against the expected
+/// generation captured in the snapshot. If any generation mismatches
+/// (indicating the memory was freed and potentially reallocated), the
+/// reference is considered stale.
+///
 /// # Safety
 /// The snapshot handle must be valid.
 #[no_mangle]
 pub unsafe extern "C" fn blood_snapshot_validate(snapshot: SnapshotHandle) -> i64 {
     if snapshot.is_null() {
-        return 0; // Empty snapshot is valid
+        return 0; // Empty/null snapshot is valid
     }
 
     let snap = &*(snapshot as *const GenerationSnapshot);
 
+    // Empty snapshot is valid
+    if snap.entries.is_empty() {
+        return 0;
+    }
+
     for (i, entry) in snap.entries.iter().enumerate() {
-        // Get current generation from memory slot header
-        // In a real implementation, this would read from the allocation header
-        // For now, we'll return valid (0) as a placeholder
-        // Real validation would compare entry.generation against actual slot generation
-        let _ = entry;
-        // Placeholder: assume all references are valid
-        // A real implementation would:
-        // let actual_gen = read_slot_generation(entry.address);
-        // if actual_gen != entry.generation {
-        //     return (i + 1) as i64; // 1-based index of stale entry
-        // }
-        let _ = i;
+        // Skip persistent references (generation = 0xFFFFFFFF)
+        if entry.generation == generation::PERSISTENT {
+            continue;
+        }
+
+        // Look up the current generation from the slot registry
+        match get_slot_generation(entry.address) {
+            Some(actual_gen) => {
+                if actual_gen != entry.generation {
+                    // Generation mismatch - reference is stale
+                    // Return 1-based index of the stale entry
+                    return (i + 1) as i64;
+                }
+            }
+            None => {
+                // Address not found in registry - could be:
+                // 1. Memory was freed and slot entry was removed
+                // 2. Address was never registered (stack/static memory)
+                //
+                // For now, treat unregistered addresses as potentially valid
+                // (they might be stack or static memory which isn't tracked).
+                // A stricter implementation could require all genrefs be registered.
+                //
+                // However, if the captured generation is not FIRST (1), the address
+                // was likely heap memory that has been freed and its entry cleaned up.
+                if entry.generation > generation::FIRST {
+                    return (i + 1) as i64;
+                }
+            }
+        }
     }
 
     0 // All valid
@@ -683,6 +712,109 @@ pub unsafe extern "C" fn blood_snapshot_len(snapshot: SnapshotHandle) -> usize {
 pub unsafe extern "C" fn blood_snapshot_destroy(snapshot: SnapshotHandle) {
     if !snapshot.is_null() {
         let _ = Box::from_raw(snapshot as *mut GenerationSnapshot);
+    }
+}
+
+/// Get the stale entry details from a snapshot after validation failure.
+///
+/// This function retrieves information about which entry failed validation,
+/// useful for generating detailed error messages.
+///
+/// # Arguments
+/// * `snapshot` - Handle to the snapshot
+/// * `index` - 1-based index returned by blood_snapshot_validate (must be > 0)
+/// * `out_address` - Output pointer for the stale address
+/// * `out_expected_gen` - Output pointer for the expected generation
+///
+/// # Returns
+/// 0 on success, -1 on invalid arguments.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn blood_snapshot_get_stale_entry(
+    snapshot: SnapshotHandle,
+    index: i64,
+    out_address: *mut u64,
+    out_expected_gen: *mut u32,
+) -> c_int {
+    if snapshot.is_null() || index <= 0 || out_address.is_null() || out_expected_gen.is_null() {
+        return -1;
+    }
+
+    let snap = &*(snapshot as *const GenerationSnapshot);
+    let idx = (index - 1) as usize;
+
+    if idx >= snap.entries.len() {
+        return -1;
+    }
+
+    let entry = &snap.entries[idx];
+    *out_address = entry.address;
+    *out_expected_gen = entry.generation;
+
+    0
+}
+
+// ============================================================================
+// Slot Registry FFI (for allocation tracking)
+// ============================================================================
+
+use crate::memory::{register_allocation, unregister_allocation};
+
+/// Register a new allocation in the slot registry.
+///
+/// This should be called by the runtime allocator when memory is allocated.
+/// Returns the generation assigned to this allocation.
+///
+/// # Arguments
+/// * `address` - The allocated memory address
+/// * `size` - Size of the allocation in bytes
+///
+/// # Returns
+/// The generation number assigned to this allocation.
+#[no_mangle]
+pub extern "C" fn blood_register_allocation(address: u64, size: u64) -> u32 {
+    register_allocation(address, size as usize)
+}
+
+/// Unregister an allocation from the slot registry.
+///
+/// This should be called by the runtime allocator when memory is freed.
+/// The slot is marked as deallocated but retained for stale reference detection.
+///
+/// # Arguments
+/// * `address` - The address being freed
+#[no_mangle]
+pub extern "C" fn blood_unregister_allocation(address: u64) {
+    unregister_allocation(address)
+}
+
+/// Validate a single address against an expected generation.
+///
+/// Returns 0 if valid, 1 if stale (generation mismatch).
+///
+/// # Arguments
+/// * `address` - The address to validate
+/// * `expected_generation` - The expected generation
+#[no_mangle]
+pub extern "C" fn blood_validate_generation(address: u64, expected_generation: u32) -> c_int {
+    match get_slot_generation(address) {
+        Some(actual_gen) => {
+            if actual_gen == expected_generation || expected_generation == generation::PERSISTENT {
+                0 // Valid
+            } else {
+                1 // Stale
+            }
+        }
+        None => {
+            // Not in registry - assume valid for untracked memory (stack/static)
+            if expected_generation > generation::FIRST {
+                1 // Likely was heap memory that got freed
+            } else {
+                0 // Probably stack/static memory
+            }
+        }
     }
 }
 
@@ -1370,20 +1502,124 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_validate() {
+    fn test_snapshot_validate_with_registry() {
+        // Register allocations in the global slot registry
+        let addr1 = 0xABCD_1000u64;
+        let addr2 = 0xABCD_2000u64;
+
+        let gen1 = blood_register_allocation(addr1, 64);
+        let gen2 = blood_register_allocation(addr2, 128);
+
         let snapshot = blood_snapshot_create();
         assert!(!snapshot.is_null());
 
         unsafe {
-            // Add entries
-            blood_snapshot_add_entry(snapshot, 0x1000, 1);
-            blood_snapshot_add_entry(snapshot, 0x2000, 2);
+            // Add entries with correct generations
+            blood_snapshot_add_entry(snapshot, addr1, gen1);
+            blood_snapshot_add_entry(snapshot, addr2, gen2);
 
-            // Validate (placeholder implementation returns 0 = all valid)
+            // Validation should succeed
+            let result = blood_snapshot_validate(snapshot);
+            assert_eq!(result, 0, "Snapshot with valid generations should validate");
+
+            blood_snapshot_destroy(snapshot);
+        }
+
+        // Cleanup
+        blood_unregister_allocation(addr1);
+        blood_unregister_allocation(addr2);
+    }
+
+    #[test]
+    fn test_snapshot_validate_stale() {
+        // Register and then unregister to create a stale reference scenario
+        let addr = 0xDEAD_1000u64;
+        let gen = blood_register_allocation(addr, 32);
+
+        let snapshot = blood_snapshot_create();
+        assert!(!snapshot.is_null());
+
+        unsafe {
+            // Add entry with the current generation
+            blood_snapshot_add_entry(snapshot, addr, gen);
+
+            // Unregister (free) the allocation - this increments generation
+            blood_unregister_allocation(addr);
+
+            // Validation should fail - generation mismatch
+            let result = blood_snapshot_validate(snapshot);
+            assert_eq!(result, 1, "Stale reference should be detected at index 1");
+
+            blood_snapshot_destroy(snapshot);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_validate_persistent() {
+        let snapshot = blood_snapshot_create();
+        assert!(!snapshot.is_null());
+
+        unsafe {
+            // Persistent references (gen = 0xFFFFFFFF) should be skipped during add
+            blood_snapshot_add_entry(snapshot, 0x9999_0000, generation::PERSISTENT);
+
+            // Length should be 0 since persistent entries are skipped
+            assert_eq!(blood_snapshot_len(snapshot), 0);
+
+            // Empty snapshot validates successfully
             let result = blood_snapshot_validate(snapshot);
             assert_eq!(result, 0);
 
             blood_snapshot_destroy(snapshot);
         }
+    }
+
+    #[test]
+    fn test_snapshot_get_stale_entry() {
+        let addr = 0xBEEF_2000u64;
+        let gen = blood_register_allocation(addr, 16);
+
+        let snapshot = blood_snapshot_create();
+        assert!(!snapshot.is_null());
+
+        unsafe {
+            blood_snapshot_add_entry(snapshot, addr, gen);
+            blood_unregister_allocation(addr);
+
+            let result = blood_snapshot_validate(snapshot);
+            assert!(result > 0, "Should detect stale reference");
+
+            // Get stale entry details
+            let mut out_addr: u64 = 0;
+            let mut out_gen: u32 = 0;
+            let status = blood_snapshot_get_stale_entry(
+                snapshot,
+                result,
+                &mut out_addr,
+                &mut out_gen,
+            );
+
+            assert_eq!(status, 0, "Should successfully get stale entry");
+            assert_eq!(out_addr, addr);
+            assert_eq!(out_gen, gen);
+
+            blood_snapshot_destroy(snapshot);
+        }
+    }
+
+    #[test]
+    fn test_validate_generation_ffi() {
+        let addr = 0xCAFE_3000u64;
+        let gen = blood_register_allocation(addr, 64);
+
+        // Valid generation
+        assert_eq!(blood_validate_generation(addr, gen), 0);
+
+        // Wrong generation
+        assert_eq!(blood_validate_generation(addr, gen + 1), 1);
+
+        // After free
+        blood_unregister_allocation(addr);
+        assert_eq!(blood_validate_generation(addr, gen), 1);
     }
 }

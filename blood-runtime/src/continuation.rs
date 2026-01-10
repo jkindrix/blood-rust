@@ -205,11 +205,26 @@ pub fn has_continuation(r: ContinuationRef) -> bool {
 // Effect Continuation Context
 // ============================================================================
 
+/// Opaque handle to a generation snapshot (matches FFI type).
+pub type SnapshotHandle = *mut std::ffi::c_void;
+
 /// Context for an effect operation that may need to suspend.
 ///
 /// This is passed to handler operations and provides methods for:
 /// - Resuming immediately (tail-resumptive path)
 /// - Capturing a continuation for later resumption
+/// - Managing generation snapshots for stale reference detection
+///
+/// ## Generation Snapshots
+///
+/// When an effect operation captures a continuation, any generational references
+/// in the captured environment must be validated when the continuation resumes.
+/// The snapshot captures the expected generations at capture time, and validation
+/// on resume detects stale references (freed memory that was reallocated).
+///
+/// Based on:
+/// - [Vale's Generational References](https://verdagon.dev/blog/generational-references)
+/// - [Generational Arena Pattern](https://crates.io/crates/generational-arena)
 #[derive(Debug)]
 pub struct EffectContext {
     /// Whether we're in a tail-resumptive handler.
@@ -218,15 +233,25 @@ pub struct EffectContext {
     pub continuation: Option<ContinuationRef>,
     /// The resume value (if already provided).
     pub resume_value: Option<i64>,
+    /// Generation snapshot for validating captured references.
+    ///
+    /// This is captured when a continuation is created and validated
+    /// when the continuation is resumed. If validation fails, a
+    /// StaleReference effect is raised.
+    pub snapshot: Option<SnapshotHandle>,
 }
 
 impl EffectContext {
     /// Create a new effect context for tail-resumptive handlers.
+    ///
+    /// Tail-resumptive handlers don't need snapshots because they resume
+    /// immediately without capturing a continuation.
     pub fn tail_resumptive() -> Self {
         Self {
             is_tail_resumptive: true,
             continuation: None,
             resume_value: None,
+            snapshot: None,
         }
     }
 
@@ -236,6 +261,20 @@ impl EffectContext {
             is_tail_resumptive: false,
             continuation: Some(k),
             resume_value: None,
+            snapshot: None,
+        }
+    }
+
+    /// Create a new effect context with a continuation and snapshot.
+    ///
+    /// The snapshot contains captured generation values that will be
+    /// validated when the continuation is resumed.
+    pub fn with_continuation_and_snapshot(k: ContinuationRef, snapshot: SnapshotHandle) -> Self {
+        Self {
+            is_tail_resumptive: false,
+            continuation: Some(k),
+            resume_value: None,
+            snapshot: if snapshot.is_null() { None } else { Some(snapshot) },
         }
     }
 
@@ -243,11 +282,74 @@ impl EffectContext {
     pub fn set_resume_value(&mut self, value: i64) {
         self.resume_value = Some(value);
     }
+
+    /// Set the generation snapshot.
+    pub fn set_snapshot(&mut self, snapshot: SnapshotHandle) {
+        self.snapshot = if snapshot.is_null() { None } else { Some(snapshot) };
+    }
+
+    /// Take the snapshot, leaving None in its place.
+    ///
+    /// This transfers ownership of the snapshot to the caller.
+    pub fn take_snapshot(&mut self) -> Option<SnapshotHandle> {
+        self.snapshot.take()
+    }
+
+    /// Check if this context has a snapshot attached.
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot.is_some()
+    }
 }
 
 impl Default for EffectContext {
     fn default() -> Self {
         Self::tail_resumptive()
+    }
+}
+
+// ============================================================================
+// Continuation with Snapshot
+// ============================================================================
+
+/// A continuation bundled with its generation snapshot.
+///
+/// This type ensures that when a continuation is resumed, the snapshot
+/// is validated to detect stale references.
+pub struct ContinuationWithSnapshot {
+    /// The continuation to resume.
+    pub continuation: Continuation,
+    /// The generation snapshot captured at suspension time.
+    pub snapshot: SnapshotHandle,
+}
+
+impl ContinuationWithSnapshot {
+    /// Create a new continuation with snapshot.
+    pub fn new(continuation: Continuation, snapshot: SnapshotHandle) -> Self {
+        Self { continuation, snapshot }
+    }
+
+    /// Get the continuation ID.
+    pub fn id(&self) -> ContinuationId {
+        self.continuation.id()
+    }
+
+    /// Check if the continuation has been consumed.
+    pub fn is_consumed(&self) -> bool {
+        self.continuation.is_consumed()
+    }
+
+    /// Get the snapshot handle.
+    pub fn snapshot(&self) -> SnapshotHandle {
+        self.snapshot
+    }
+}
+
+impl std::fmt::Debug for ContinuationWithSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContinuationWithSnapshot")
+            .field("continuation", &self.continuation)
+            .field("has_snapshot", &!self.snapshot.is_null())
+            .finish()
     }
 }
 
@@ -326,6 +428,69 @@ mod tests {
         assert!(ctx.is_tail_resumptive);
         assert!(ctx.continuation.is_none());
         assert!(ctx.resume_value.is_none());
+        assert!(ctx.snapshot.is_none());
+    }
+
+    #[test]
+    fn test_effect_context_with_snapshot() {
+        let k = Continuation::new(|x: i32| x);
+        let k_ref = register_continuation(k);
+
+        // Create a fake snapshot handle (just for testing the context)
+        let fake_snapshot = 0x1234 as SnapshotHandle;
+
+        let ctx = EffectContext::with_continuation_and_snapshot(k_ref, fake_snapshot);
+        assert!(!ctx.is_tail_resumptive);
+        assert!(ctx.continuation.is_some());
+        assert!(ctx.has_snapshot());
+        assert_eq!(ctx.snapshot.unwrap(), fake_snapshot);
+
+        // Clean up
+        let _ = take_continuation(k_ref);
+    }
+
+    #[test]
+    fn test_effect_context_null_snapshot() {
+        let k = Continuation::new(|x: i32| x);
+        let k_ref = register_continuation(k);
+
+        // Null snapshot should result in None
+        let ctx = EffectContext::with_continuation_and_snapshot(k_ref, std::ptr::null_mut());
+        assert!(!ctx.has_snapshot());
+
+        // Clean up
+        let _ = take_continuation(k_ref);
+    }
+
+    #[test]
+    fn test_effect_context_take_snapshot() {
+        let k = Continuation::new(|x: i32| x);
+        let k_ref = register_continuation(k);
+
+        let fake_snapshot = 0x5678 as SnapshotHandle;
+        let mut ctx = EffectContext::with_continuation_and_snapshot(k_ref, fake_snapshot);
+
+        // Take the snapshot
+        let taken = ctx.take_snapshot();
+        assert!(taken.is_some());
+        assert_eq!(taken.unwrap(), fake_snapshot);
+
+        // Snapshot should now be None
+        assert!(!ctx.has_snapshot());
+        assert!(ctx.take_snapshot().is_none());
+
+        // Clean up
+        let _ = take_continuation(k_ref);
+    }
+
+    #[test]
+    fn test_continuation_with_snapshot_struct() {
+        let k = Continuation::new(|x: i32| x + 1);
+        let fake_snapshot = 0xABCD as SnapshotHandle;
+
+        let k_with_snap = ContinuationWithSnapshot::new(k, fake_snapshot);
+        assert!(!k_with_snap.is_consumed());
+        assert_eq!(k_with_snap.snapshot(), fake_snapshot);
     }
 
     #[test]
