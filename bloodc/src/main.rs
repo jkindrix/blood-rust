@@ -32,7 +32,8 @@ use bloodc::diagnostics::DiagnosticEmitter;
 use bloodc::{Lexer, TokenKind};
 use bloodc::codegen;
 use bloodc::mir;
-use bloodc::content::ContentHash;
+use bloodc::content::{ContentHash, BuildCache, hash_hir_item};
+use bloodc::content::hash::ContentHasher;
 
 /// The Blood Programming Language Compiler
 ///
@@ -458,23 +459,53 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Type checking passed. {} items.", hir_crate.items.len());
     }
 
-    // Compute content hashes for definitions (Phase 4 integration point)
-    // This is a simplified implementation - full canonicalization would use
-    // de Bruijn indices and proper AST normalization.
+    // Initialize build cache for incremental compilation
+    let mut build_cache = BuildCache::new();
+    if let Err(e) = build_cache.init() {
+        if verbosity > 0 {
+            eprintln!("Warning: Failed to initialize build cache: {}", e);
+        }
+    }
+
+    // Compute content hashes for all definitions
+    let mut definition_hashes: std::collections::HashMap<bloodc::hir::DefId, ContentHash> = std::collections::HashMap::new();
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+
     if verbosity > 1 {
         eprintln!("Computing content hashes...");
-        for (&def_id, item) in &hir_crate.items {
-            // For now, hash the debug representation of the item
-            // A proper implementation would use canonical AST serialization
-            let item_repr = format!("{:?}", item);
-            let hash = ContentHash::compute(item_repr.as_bytes());
-            eprintln!("  {:?}: {} ({})", def_id, hash.short_display(), item.name);
+    }
+
+    for (&def_id, item) in &hir_crate.items {
+        let hash = hash_hir_item(item, &hir_crate.bodies);
+        definition_hashes.insert(def_id, hash);
+
+        // Check if we have cached compiled code for this definition
+        let is_cached = build_cache.has_object(&hash);
+        if is_cached {
+            cache_hits += 1;
+        } else {
+            cache_misses += 1;
         }
+
+        if verbosity > 1 {
+            let cache_status = if is_cached { "[cached]" } else { "[new]" };
+            eprintln!("  {:?}: {} ({}) {}", def_id, hash.short_display(), item.name, cache_status);
+        }
+    }
+
+    if verbosity > 0 && !definition_hashes.is_empty() {
+        eprintln!(
+            "Content hashing: {} definitions ({} cached, {} to compile)",
+            definition_hashes.len(),
+            cache_hits,
+            cache_misses
+        );
     }
 
     // Lower to MIR (Phase 3 integration point)
     let mut mir_lowering = mir::MirLowering::new(&hir_crate);
-    match mir_lowering.lower_crate() {
+    let escape_analysis = match mir_lowering.lower_crate() {
         Ok(mir_bodies) => {
             if verbosity > 1 {
                 eprintln!("MIR lowering passed. {} function bodies.", mir_bodies.len());
@@ -492,10 +523,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 eprintln!("Escape analysis complete. {} functions analyzed.", escape_results.len());
             }
 
-            // Note: MIR bodies and escape_results are computed but not yet used by codegen.
-            // Codegen still operates on HIR directly.
-            // TODO: Wire MIR-based codegen in a future iteration.
-            let _ = (mir_bodies, escape_results); // Suppress unused warnings
+            // Return results for use by codegen
+            Some(escape_results)
         }
         Err(errors) => {
             // MIR lowering errors are non-fatal for now - fall back to HIR codegen
@@ -503,13 +532,20 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 for error in &errors {
                     emitter.emit(error);
                 }
-                eprintln!("Warning: MIR lowering failed, using HIR codegen.");
+                eprintln!("Warning: MIR lowering failed, using HIR codegen without escape analysis.");
             }
+            None
         }
-    }
+    };
 
-    // Generate LLVM IR
-    match codegen::compile_to_ir(&hir_crate) {
+    // Generate LLVM IR (with escape analysis if available)
+    let ir_result = if let Some(ref escape_map) = escape_analysis {
+        codegen::compile_to_ir_with_analysis(&hir_crate, escape_map)
+    } else {
+        codegen::compile_to_ir(&hir_crate)
+    };
+
+    match ir_result {
         Ok(ir) => {
             if args.debug {
                 println!("{}", ir);
@@ -519,8 +555,14 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             let output_obj = args.file.with_extension("o");
             let output_exe = args.file.with_extension("");
 
-            // Compile to object file
-            if let Err(errors) = codegen::compile_to_object(&hir_crate, &output_obj) {
+            // Compile to object file (with escape analysis if available)
+            let compile_result = if let Some(ref escape_map) = escape_analysis {
+                codegen::compile_to_object_with_analysis(&hir_crate, escape_map, &output_obj)
+            } else {
+                codegen::compile_to_object(&hir_crate, &output_obj)
+            };
+
+            if let Err(errors) = compile_result {
                 for error in &errors {
                     emitter.emit(error);
                 }
@@ -530,6 +572,35 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
             if verbosity > 0 {
                 eprintln!("Generated object file: {}", output_obj.display());
+            }
+
+            // Cache the compiled object file for incremental builds
+            if let Ok(object_data) = std::fs::read(&output_obj) {
+                // Compute a hash for the entire crate (combination of all definition hashes)
+                let mut crate_hasher = ContentHasher::new();
+                let mut sorted_hashes: Vec<_> = definition_hashes.values().collect();
+                sorted_hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                for hash in sorted_hashes {
+                    crate_hasher.update_hash(hash);
+                }
+                let crate_hash = crate_hasher.finalize();
+
+                if let Err(e) = build_cache.store_object(crate_hash, &object_data) {
+                    if verbosity > 0 {
+                        eprintln!("Warning: Failed to cache object file: {}", e);
+                    }
+                } else if verbosity > 1 {
+                    eprintln!("Cached compiled object: {}", crate_hash.short_display());
+                }
+
+                // Store LLVM IR in cache for debugging
+                if args.debug {
+                    if let Err(e) = build_cache.store_ir(&crate_hash, &ir) {
+                        if verbosity > 0 {
+                            eprintln!("Warning: Failed to cache IR: {}", e);
+                        }
+                    }
+                }
             }
 
             // Link with runtimes
