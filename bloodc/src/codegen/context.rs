@@ -17,8 +17,10 @@ use inkwell::AddressSpace;
 
 use crate::hir::{self, DefId, LocalId, Type, TypeKind, PrimitiveTy};
 use crate::hir::def::{IntTy, UintTy};
+use crate::mir::{EscapeResults, EscapeState};
 use crate::diagnostics::Diagnostic;
 use crate::span::Span;
+use crate::effects::{EffectLowering, EffectInfo, HandlerInfo};
 
 /// Loop context for break/continue support.
 #[derive(Clone)]
@@ -64,6 +66,20 @@ pub struct CodegenContext<'ctx, 'a> {
     dynamic_dispatch_methods: HashMap<DefId, u64>,
     /// Next dispatch table slot to assign.
     next_dispatch_slot: u64,
+    /// Escape analysis results for optimization.
+    /// When available, used to skip generation checks for non-escaping values.
+    escape_analysis: HashMap<DefId, EscapeResults>,
+    /// Current function's DefId for escape analysis lookup.
+    current_fn_def_id: Option<DefId>,
+    /// Effect lowering context for managing effect compilation.
+    effect_lowering: EffectLowering,
+    /// Compiled effect definitions (effect DefId -> effect metadata).
+    effect_defs: HashMap<DefId, EffectInfo>,
+    /// Compiled handler definitions (handler DefId -> handler metadata).
+    handler_defs: HashMap<DefId, HandlerInfo>,
+    /// Handler function pointers for runtime registration.
+    /// Maps (handler_id, op_index) -> LLVM function.
+    handler_ops: HashMap<(DefId, usize), FunctionValue<'ctx>>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -88,12 +104,70 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             closure_counter: 0,
             dynamic_dispatch_methods: HashMap::new(),
             next_dispatch_slot: 0,
+            escape_analysis: HashMap::new(),
+            current_fn_def_id: None,
+            effect_lowering: EffectLowering::new(),
+            effect_defs: HashMap::new(),
+            handler_defs: HashMap::new(),
+            handler_ops: HashMap::new(),
         }
+    }
+
+    /// Set escape analysis results for optimization.
+    ///
+    /// When set, the code generator can:
+    /// - Skip generation checks for values that don't escape
+    /// - Use stack allocation for non-escaping values
+    /// - Apply tier-appropriate allocation strategies
+    pub fn set_escape_analysis(&mut self, escape_analysis: HashMap<DefId, EscapeResults>) {
+        self.escape_analysis = escape_analysis;
+    }
+
+    /// Get escape state for a local variable in the current function.
+    ///
+    /// Returns NoEscape if no escape analysis is available.
+    fn get_escape_state(&self, local: LocalId) -> EscapeState {
+        if let Some(def_id) = self.current_fn_def_id {
+            if let Some(results) = self.escape_analysis.get(&def_id) {
+                return results.get(local);
+            }
+        }
+        EscapeState::NoEscape // Default - assume safe if no analysis
+    }
+
+    /// Check if a local can be stack-allocated based on escape analysis.
+    fn can_stack_allocate(&self, local: LocalId) -> bool {
+        if let Some(def_id) = self.current_fn_def_id {
+            if let Some(results) = self.escape_analysis.get(&def_id) {
+                return results.can_stack_allocate(local);
+            }
+        }
+        true // Default - assume stack is fine if no analysis
+    }
+
+    /// Check if a local is captured by an effect operation.
+    fn is_effect_captured(&self, local: LocalId) -> bool {
+        if let Some(def_id) = self.current_fn_def_id {
+            if let Some(results) = self.escape_analysis.get(&def_id) {
+                return results.is_effect_captured(local);
+            }
+        }
+        false // Default - not captured if no analysis
+    }
+
+    /// Check if generation check can be skipped for a local.
+    ///
+    /// Generation checks can be skipped if:
+    /// - The value doesn't escape (purely local)
+    /// - The value is stack-allocated
+    fn can_skip_generation_check(&self, local: LocalId) -> bool {
+        let escape_state = self.get_escape_state(local);
+        escape_state == EscapeState::NoEscape && !self.is_effect_captured(local)
     }
 
     /// Compile an entire HIR crate.
     pub fn compile_crate(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
-        // First pass: collect struct and enum definitions for type lowering
+        // First pass: collect struct, enum, effect, and handler definitions
         for (def_id, item) in &hir_crate.items {
             match &item.kind {
                 hir::ItemKind::Struct(struct_def) => {
@@ -122,6 +196,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     }).collect();
                     self.enum_defs.insert(*def_id, variants);
                 }
+                hir::ItemKind::Effect { .. } => {
+                    // Lower effect declaration to EffectInfo
+                    if let Some(effect_info) = self.effect_lowering.lower_effect_decl(item) {
+                        self.effect_defs.insert(*def_id, effect_info);
+                    }
+                }
+                hir::ItemKind::Handler { .. } => {
+                    // Lower handler declaration to HandlerInfo
+                    if let Some(handler_info) = self.effect_lowering.lower_handler_decl(item) {
+                        self.handler_defs.insert(*def_id, handler_info);
+                    }
+                }
                 _ => {}
             }
         }
@@ -131,7 +217,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             self.closure_bodies.insert(*body_id, body.clone());
         }
 
-        // Second pass: declare all functions
+        // Second pass: declare all functions (including handler operation functions)
         for (def_id, item) in &hir_crate.items {
             if let hir::ItemKind::Fn(fn_def) = &item.kind {
                 self.declare_function(*def_id, &item.name, fn_def)?;
@@ -141,7 +227,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Declare runtime functions
         self.declare_runtime_functions();
 
-        // Second pass: compile function bodies
+        // Third pass: declare handler operation functions
+        self.declare_handler_operations(hir_crate)?;
+
+        // Fourth pass: compile function bodies
         for (def_id, item) in &hir_crate.items {
             if let hir::ItemKind::Fn(fn_def) = &item.kind {
                 if let Some(body_id) = fn_def.body_id {
@@ -152,11 +241,419 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
         }
 
+        // Fifth pass: compile handler operation bodies
+        self.compile_handler_operations(hir_crate)?;
+
+        // Sixth pass: register handlers with runtime
+        self.register_handlers_with_runtime()?;
+
         if self.errors.is_empty() {
             Ok(())
         } else {
             Err(std::mem::take(&mut self.errors))
         }
+    }
+
+    /// Declare handler operation functions (Phase 2: Effect Handlers).
+    ///
+    /// Each handler operation is compiled to a function with signature:
+    /// `fn(state: *mut void, args: *const i64, arg_count: i64) -> i64`
+    fn declare_handler_operations(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+        let i64_type = self.context.i64_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+
+        // Handler operation function signature:
+        // fn(state: *mut void, args: *const i64, arg_count: i64) -> i64
+        let handler_op_type = i64_type.fn_type(
+            &[i8_ptr_type.into(), i64_ptr_type.into(), i64_type.into()],
+            false,
+        );
+
+        for (def_id, item) in &hir_crate.items {
+            if let hir::ItemKind::Handler { operations, .. } = &item.kind {
+                for (op_idx, handler_op) in operations.iter().enumerate() {
+                    let fn_name = format!("{}_{}", item.name, handler_op.name);
+                    let fn_value = self.module.add_function(&fn_name, handler_op_type, None);
+                    self.handler_ops.insert((*def_id, op_idx), fn_value);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compile handler operation bodies (Phase 2: Effect Handlers).
+    fn compile_handler_operations(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+        for (def_id, item) in &hir_crate.items {
+            if let hir::ItemKind::Handler { operations, return_clause, .. } = &item.kind {
+                // Compile each operation
+                for (op_idx, handler_op) in operations.iter().enumerate() {
+                    if let Some(&fn_value) = self.handler_ops.get(&(*def_id, op_idx)) {
+                        if let Some(body) = hir_crate.bodies.get(&handler_op.body_id) {
+                            self.compile_handler_op_body(fn_value, body, handler_op)?;
+                        }
+                    }
+                }
+
+                // Compile return clause if present
+                if let Some(ret_clause) = return_clause {
+                    if let Some(body) = hir_crate.bodies.get(&ret_clause.body_id) {
+                        self.compile_return_clause(*def_id, &item.name, body, ret_clause)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile a handler's return clause.
+    ///
+    /// The return clause transforms the final result of the handled computation.
+    /// Signature: fn(result: i64) -> i64
+    fn compile_return_clause(
+        &mut self,
+        _handler_id: DefId,
+        handler_name: &str,
+        body: &hir::Body,
+        _return_clause: &hir::ReturnClause,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let span = body.span;
+        let i64_type = self.context.i64_type();
+
+        // Return clause function signature: fn(result: i64) -> i64
+        let ret_clause_type = i64_type.fn_type(&[i64_type.into()], false);
+        let fn_name = format!("{}_return", handler_name);
+        let fn_value = self.module.add_function(&fn_name, ret_clause_type, None);
+
+        // Create entry block
+        let entry_block = self.context.append_basic_block(fn_value, "entry");
+        self.builder.position_at_end(entry_block);
+
+        // Save and set context
+        let saved_fn = self.current_fn;
+        let saved_locals = std::mem::take(&mut self.locals);
+        self.current_fn = Some(fn_value);
+
+        // Get the result parameter and bind to the param local
+        let result_param = fn_value.get_nth_param(0)
+            .ok_or_else(|| vec![Diagnostic::error("Missing result parameter".to_string(), span)])?;
+
+        // Bind the result parameter to the first parameter local
+        let param_locals: Vec<_> = body.params().collect();
+        if let Some(param_local) = param_locals.first() {
+            let local_type = self.lower_type(&param_local.ty);
+            let alloca = self.builder
+                .build_alloca(local_type, "ret_param")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            // Convert from i64 if needed
+            let converted_val = if local_type.is_int_type() {
+                let int_type = local_type.into_int_type();
+                if int_type.get_bit_width() == 64 {
+                    result_param
+                } else {
+                    self.builder
+                        .build_int_truncate(result_param.into_int_value(), int_type, "ret_trunc")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                        .into()
+                }
+            } else {
+                result_param
+            };
+
+            self.builder.build_store(alloca, converted_val)
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+            self.locals.insert(param_local.id, alloca);
+        }
+
+        // Compile the return clause body
+        let result = self.compile_expr(&body.expr)?;
+
+        // Return the transformed result as i64
+        if let Some(ret_val) = result {
+            let ret_i64 = match ret_val {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() == 64 {
+                        iv
+                    } else {
+                        self.builder
+                            .build_int_s_extend(iv, i64_type, "ret_ext")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    self.builder
+                        .build_ptr_to_int(pv, i64_type, "ret_ptr_int")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                }
+                _ => i64_type.const_zero(),
+            };
+            self.builder.build_return(Some(&ret_i64))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        } else {
+            // Return the input unchanged for unit type
+            self.builder.build_return(Some(&result_param.into_int_value()))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        }
+
+        // Restore context
+        self.current_fn = saved_fn;
+        self.locals = saved_locals;
+
+        Ok(())
+    }
+
+    /// Compile a single handler operation body.
+    fn compile_handler_op_body(
+        &mut self,
+        fn_value: FunctionValue<'ctx>,
+        body: &hir::Body,
+        _handler_op: &hir::HandlerOp,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let span = body.span;
+
+        // Create entry block
+        let entry_block = self.context.append_basic_block(fn_value, "entry");
+        self.builder.position_at_end(entry_block);
+
+        // Save and set context
+        let saved_fn = self.current_fn;
+        let saved_locals = std::mem::take(&mut self.locals);
+        self.current_fn = Some(fn_value);
+
+        // Get parameters: (state: *mut void, args: *const i64, arg_count: i64)
+        let _state_ptr = fn_value.get_nth_param(0)
+            .ok_or_else(|| vec![Diagnostic::error("Missing state parameter".to_string(), span)])?;
+        let args_ptr = fn_value.get_nth_param(1)
+            .ok_or_else(|| vec![Diagnostic::error("Missing args parameter".to_string(), span)])?;
+        let _arg_count = fn_value.get_nth_param(2)
+            .ok_or_else(|| vec![Diagnostic::error("Missing arg_count parameter".to_string(), span)])?;
+
+        // Extract arguments from args array and bind to locals
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+        let zero = i32_type.const_zero();
+
+        // Skip first local (return place) and bind parameters
+        let param_locals: Vec<_> = body.params().collect();
+        for (i, local) in param_locals.iter().enumerate() {
+            let idx = i32_type.const_int(i as u64, false);
+            let arg_ptr = unsafe {
+                self.builder.build_gep(
+                    args_ptr.into_pointer_value(),
+                    &[zero, idx],
+                    &format!("arg_ptr_{}", i),
+                )
+            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            let arg_val = self.builder
+                .build_load(arg_ptr, &format!("arg_{}", i))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            // Store in local
+            let local_type = self.lower_type(&local.ty);
+            let alloca = self.builder
+                .build_alloca(local_type, &format!("param.{}", i))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            // Convert from i64 to the local's type
+            let converted_val = if local_type.is_int_type() {
+                let int_type = local_type.into_int_type();
+                if int_type.get_bit_width() == 64 {
+                    arg_val
+                } else {
+                    self.builder
+                        .build_int_truncate(arg_val.into_int_value(), int_type, "arg_trunc")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                        .into()
+                }
+            } else if local_type.is_pointer_type() {
+                self.builder
+                    .build_int_to_ptr(arg_val.into_int_value(), local_type.into_pointer_type(), "arg_ptr")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                    .into()
+            } else {
+                arg_val
+            };
+
+            self.builder.build_store(alloca, converted_val)
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+            self.locals.insert(local.id, alloca);
+        }
+
+        // Compile the body expression
+        let result = self.compile_expr(&body.expr)?;
+
+        // Return result as i64
+        if let Some(ret_val) = result {
+            let ret_i64 = match ret_val {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() == 64 {
+                        iv
+                    } else {
+                        self.builder
+                            .build_int_s_extend(iv, i64_type, "ret_ext")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                    }
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    self.builder
+                        .build_ptr_to_int(pv, i64_type, "ret_ptr_int")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                }
+                _ => i64_type.const_zero(),
+            };
+            self.builder.build_return(Some(&ret_i64))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        } else {
+            // Return 0 for unit type
+            self.builder.build_return(Some(&i64_type.const_zero()))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        }
+
+        // Restore context
+        self.current_fn = saved_fn;
+        self.locals = saved_locals;
+
+        Ok(())
+    }
+
+    /// Register handlers with the runtime's effect registry.
+    ///
+    /// Generates code to call blood_evidence_register for each handler during
+    /// module initialization.
+    fn register_handlers_with_runtime(&mut self) -> Result<(), Vec<Diagnostic>> {
+        // Skip if no handlers to register
+        if self.handler_defs.is_empty() {
+            return Ok(());
+        }
+
+        let i64_type = self.context.i64_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let void_type = self.context.void_type();
+
+        // Get or declare the registration function
+        let register_fn = self.module.get_function("blood_evidence_register")
+            .unwrap_or_else(|| {
+                let fn_type = void_type.fn_type(
+                    &[
+                        i8_ptr_type.into(), // evidence handle
+                        i64_type.into(),    // effect_id
+                        i8_ptr_type.ptr_type(AddressSpace::default()).into(), // ops array
+                        i64_type.into(),    // op_count
+                    ],
+                    false,
+                );
+                self.module.add_function("blood_evidence_register", fn_type, None)
+            });
+
+        // Create a global constructor function to register handlers at startup
+        let init_fn_type = void_type.fn_type(&[], false);
+        let init_fn = self.module.add_function("__blood_register_handlers", init_fn_type, None);
+
+        let entry = self.context.append_basic_block(init_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        // For each handler, build an operations array and register it
+        for (handler_id, handler_info) in &self.handler_defs.clone() {
+            let op_count = handler_info.op_impls.len();
+            if op_count == 0 {
+                continue;
+            }
+
+            // Create array of function pointers
+            let array_type = i8_ptr_type.array_type(op_count as u32);
+            let ops_alloca = self.builder
+                .build_alloca(array_type, "handler_ops")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+            let i32_type = self.context.i32_type();
+            let zero = i32_type.const_zero();
+
+            for op_idx in 0..op_count {
+                if let Some(&fn_value) = self.handler_ops.get(&(*handler_id, op_idx)) {
+                    let idx = i32_type.const_int(op_idx as u64, false);
+                    let gep = unsafe {
+                        self.builder.build_gep(ops_alloca, &[zero, idx], "op_ptr")
+                    }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    let fn_ptr = self.builder
+                        .build_pointer_cast(
+                            fn_value.as_global_value().as_pointer_value(),
+                            i8_ptr_type,
+                            "fn_ptr",
+                        )
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    self.builder.build_store(gep, fn_ptr)
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                }
+            }
+
+            // Get pointer to first element
+            let ops_ptr = unsafe {
+                self.builder.build_gep(ops_alloca, &[zero, zero], "ops_ptr")
+            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+            // Call blood_evidence_register(null, effect_id, ops, op_count)
+            // Note: We pass null for evidence handle - registration is global
+            let effect_id_val = i64_type.const_int(handler_info.effect_id.index as u64, false);
+            let op_count_val = i64_type.const_int(op_count as u64, false);
+            let null_ev = i8_ptr_type.const_null();
+
+            self.builder.build_call(
+                register_fn,
+                &[null_ev.into(), effect_id_val.into(), ops_ptr.into(), op_count_val.into()],
+                "",
+            ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+        }
+
+        self.builder.build_return(None)
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+        // Add to llvm.global_ctors so it runs at program startup
+        self.add_global_constructor(init_fn)?;
+
+        Ok(())
+    }
+
+    /// Add a function to llvm.global_ctors for automatic execution at startup.
+    fn add_global_constructor(&mut self, init_fn: FunctionValue<'ctx>) -> Result<(), Vec<Diagnostic>> {
+        let i32_type = self.context.i32_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+
+        // Constructor entry: { i32 priority, void ()* fn, i8* data }
+        let ctor_struct_type = self.context.struct_type(
+            &[
+                i32_type.into(),
+                init_fn.get_type().ptr_type(AddressSpace::default()).into(),
+                i8_ptr_type.into(),
+            ],
+            false,
+        );
+
+        // Create the constructor entry
+        let priority = i32_type.const_int(65535, false); // Low priority (runs early)
+        let fn_ptr = init_fn.as_global_value().as_pointer_value();
+        let null_data = i8_ptr_type.const_null();
+
+        let ctor_entry = ctor_struct_type.const_named_struct(&[
+            priority.into(),
+            fn_ptr.into(),
+            null_data.into(),
+        ]);
+
+        // Create the array type and value using struct type's const_array method
+        let ctor_array_type = ctor_struct_type.array_type(1);
+        let ctor_array = ctor_struct_type.const_array(&[ctor_entry]);
+
+        // Add as global variable with initializer
+        let global = self.module.add_global(ctor_array_type, None, "llvm.global_ctors");
+        global.set_initializer(&ctor_array);
+        global.set_linkage(inkwell::module::Linkage::Appending);
+
+        Ok(())
     }
 
     /// Declare a function (without body).
