@@ -21,6 +21,7 @@ use crate::mir::{EscapeResults, EscapeState, MirBody};
 use crate::diagnostics::Diagnostic;
 use crate::span::Span;
 use crate::effects::{EffectLowering, EffectInfo, HandlerInfo};
+use crate::ice_err;
 
 /// Loop context for break/continue support.
 #[derive(Clone)]
@@ -514,13 +515,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .into_int_value()
                 }
                 other => {
-                    return Err(vec![Diagnostic::error(
-                        format!(
-                            "ICE: Unsupported return type in handler state body: {:?}. \
-                             Expected IntValue, PointerValue, or FloatValue.",
-                            other.get_type()
-                        ),
+                    return Err(vec![ice_err!(
                         span,
+                        "unsupported return type in handler state body";
+                        "type" => other.get_type(),
+                        "expected" => "IntValue, PointerValue, or FloatValue"
                     )]);
                 }
             };
@@ -645,13 +644,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .into_int_value()
                 }
                 other => {
-                    return Err(vec![Diagnostic::error(
-                        format!(
-                            "ICE: Unsupported return type in handler op body: {:?}. \
-                             Expected IntValue, PointerValue, or FloatValue.",
-                            other.get_type()
-                        ),
+                    return Err(vec![ice_err!(
                         span,
+                        "unsupported return type in handler op body";
+                        "type" => other.get_type(),
+                        "expected" => "IntValue, PointerValue, or FloatValue"
                     )]);
                 }
             };
@@ -1590,8 +1587,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
                 // Pipe is handled specially at the start of compile_binary
                 Pipe => unreachable!("Pipe operator handled before operand compilation"),
-                // Arithmetic ops already handled above
-                Add | Sub | Mul | Div | Rem => unreachable!(),
+                // Arithmetic ops already handled above in the float branch
+                Add | Sub | Mul | Div | Rem => unreachable!("arithmetic ops should be handled in float branch above"),
             };
 
             result
@@ -2763,14 +2760,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             (a_val, b_val) => {
                 // In a properly type-checked program, we should never compare incompatible types.
                 // If we reach here, it's an internal compiler error.
-                Err(vec![Diagnostic::error(
-                    format!(
-                        "ICE: Cannot compare values of incompatible types in pattern match: {:?} vs {:?}. \
-                         This indicates a type checking bug.",
-                        a_val.get_type(),
-                        b_val.get_type()
-                    ),
+                Err(vec![ice_err!(
                     Span::dummy(),
+                    "cannot compare values of incompatible types in pattern match";
+                    "lhs_type" => a_val.get_type(),
+                    "rhs_type" => b_val.get_type()
                 )])
             }
         }
@@ -3491,13 +3485,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // If the captured variable has a non-basic type (function, void),
                         // this is an internal compiler error - closures should only capture
                         // values with basic types.
-                        return Err(vec![Diagnostic::error(
-                            format!(
-                                "ICE: Closure capture has non-basic type: {:?}. \
-                                 Closures can only capture values with basic types.",
-                                elem_type
-                            ),
+                        return Err(vec![ice_err!(
                             span,
+                            "closure capture has non-basic type";
+                            "type" => elem_type
                         )]);
                     }
                 }
@@ -3561,13 +3552,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     Err(_) => {
                         // Captured variable has a non-basic type (function, void, etc.)
                         // This is an ICE - closures should only capture basic types
-                        return Err(vec![Diagnostic::error(
-                            format!(
-                                "ICE: Captured variable {:?} has non-basic LLVM type. \
-                                 Closures should only capture basic types.",
-                                cap.local_id
-                            ),
+                        return Err(vec![ice_err!(
                             span,
+                            "captured variable has non-basic LLVM type";
+                            "local_id" => cap.local_id
                         )]);
                     }
                 };
@@ -3727,13 +3715,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                     }
                     other => {
-                        return Err(vec![Diagnostic::error(
-                            format!(
-                                "ICE: Unsupported argument type in perform expression: {:?}. \
-                                 Expected IntValue, FloatValue, or PointerValue.",
-                                other.get_type()
-                            ),
+                        return Err(vec![ice_err!(
                             arg.span,
+                            "unsupported argument type in perform expression";
+                            "type" => other.get_type(),
+                            "expected" => "IntValue, FloatValue, or PointerValue"
                         )]);
                     }
                 };

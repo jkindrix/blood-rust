@@ -12,6 +12,7 @@ use crate::hir::{self, DefId, LocalId, Type, TypeKind, PrimitiveTy, TyVarId};
 use crate::hir::def::{IntTy, UintTy};
 use crate::span::Span;
 use crate::diagnostics::Diagnostic;
+use crate::ice;
 
 use super::error::{TypeError, TypeErrorKind};
 use super::resolve::{Resolver, ScopeKind, Binding};
@@ -484,7 +485,7 @@ impl<'a> TypeContext<'a> {
                         // For parenthesized types, recurse
                         return self.resolve_effect_type(inner);
                     }
-                    ast::TypeKind::Path(_) => unreachable!(), // handled above
+                    ast::TypeKind::Path(_) => unreachable!("Path type should be handled by the match above")
                 };
                 Err(TypeError::new(
                     TypeErrorKind::InvalidEffectType { found: found.to_string() },
@@ -512,10 +513,8 @@ impl<'a> TypeContext<'a> {
                 None => {
                     // This indicates an internal compiler error - the effect was registered
                     // in fn_effects but not found in effect_defs
-                    eprintln!(
-                        "ICE: Effect {:?} registered in fn_effects but not found in effect_defs",
-                        effect_ref.def_id
-                    );
+                    ice!("effect registered in fn_effects but not found in effect_defs";
+                         "effect_def_id" => effect_ref.def_id);
                     continue;
                 }
             };

@@ -62,6 +62,7 @@ use super::evidence::EvidenceVector;
 use super::handler::HandlerKind;
 use super::row::EffectRow;
 use crate::hir::{DefId, Expr, ExprKind, Item, ItemKind, Type, Generics, EffectOp, HandlerOp};
+use crate::ice;
 use std::collections::HashMap;
 
 /// Effect lowering context.
@@ -662,13 +663,13 @@ impl EffectLowering {
             None => {
                 // Effect not registered - this is an ICE because type checking
                 // should have validated that the effect exists
+                ice!("effect not found during lowering";
+                     "effect_id" => effect_id,
+                     "note" => "type checking should have validated the effect exists");
                 let error = LoweringError::ice(format!(
-                    "Effect {:?} not found during lowering. \
-                     This is an internal compiler error - type checking should have \
-                     validated the effect exists.",
+                    "Effect {:?} not found during lowering",
                     effect_id
                 ));
-                eprintln!("ICE: {}", error.message);
                 return LoweringResult {
                     expr: Expr {
                         kind: ExprKind::Error,
@@ -687,13 +688,14 @@ impl EffectLowering {
             None => {
                 // Operation not found in effect - this is an ICE because type checking
                 // should have validated that the operation exists
+                ice!("operation not found in effect";
+                     "operation" => operation,
+                     "effect_id" => effect_id,
+                     "note" => "type checking should have validated the operation exists");
                 let error = LoweringError::ice(format!(
-                    "Operation '{}' not found in effect {:?}. \
-                     This is an internal compiler error - type checking should have \
-                     validated the operation exists.",
+                    "Operation '{}' not found in effect {:?}",
                     operation, effect_id
                 ));
-                eprintln!("ICE: {}", error.message);
                 return LoweringResult {
                     expr: Expr {
                         kind: ExprKind::Error,

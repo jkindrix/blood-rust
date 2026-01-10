@@ -12,6 +12,13 @@
 //! - **E0200-E0299**: Name resolution errors (future)
 //! - **E0300-E0399**: Type errors (future)
 //! - **E0400-E0499**: Effect/handler errors (future)
+//! - **E9000-E9999**: Internal compiler errors (ICE)
+//!
+//! # Internal Compiler Errors (ICE)
+//!
+//! ICEs indicate bugs in the compiler itself, not user code errors. Use the
+//! [`ice!`] macro to report these with consistent formatting and helpful
+//! debugging information.
 
 use crate::span::Span;
 use ariadne::{Color, Label, Report, ReportKind, Source};
@@ -431,4 +438,166 @@ impl From<ParseError> for Diagnostic {
 
         diagnostic
     }
+}
+
+// ============================================================================
+// Internal Compiler Error (ICE) Infrastructure
+// ============================================================================
+
+/// Internal Compiler Error (ICE) - indicates a bug in the compiler.
+///
+/// ICEs should never be triggered by user code. If one occurs, it means
+/// there's a bug in the compiler that needs to be fixed.
+#[derive(Debug, Clone)]
+pub struct Ice {
+    /// A message describing what went wrong.
+    pub message: String,
+    /// The file where the ICE occurred (compiler source file).
+    pub file: &'static str,
+    /// The line number where the ICE occurred.
+    pub line: u32,
+    /// Optional additional context about the error.
+    pub context: Vec<String>,
+}
+
+impl Ice {
+    /// Create a new ICE with file and line information.
+    pub fn new(message: impl Into<String>, file: &'static str, line: u32) -> Self {
+        Self {
+            message: message.into(),
+            file,
+            line,
+            context: Vec::new(),
+        }
+    }
+
+    /// Add context information to the ICE.
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.context.push(context.into());
+        self
+    }
+
+    /// Format the ICE as an error message for display.
+    pub fn format(&self) -> String {
+        let mut msg = format!(
+            "internal compiler error: {}\n\
+             --> {}:{}\n\
+             \n\
+             This is a bug in the Blood compiler. Please report it at:\n\
+             https://github.com/blood-lang/blood/issues\n",
+            self.message, self.file, self.line
+        );
+
+        if !self.context.is_empty() {
+            msg.push_str("\nContext:\n");
+            for ctx in &self.context {
+                msg.push_str(&format!("  - {}\n", ctx));
+            }
+        }
+
+        msg
+    }
+
+    /// Print the ICE to stderr.
+    pub fn emit(&self) {
+        eprintln!("\n{}", self.format());
+    }
+
+    /// Convert to a Diagnostic for integration with the diagnostic system.
+    pub fn to_diagnostic(&self, span: Span) -> Diagnostic {
+        let mut diag = Diagnostic::error(format!("internal compiler error: {}", self.message), span)
+            .with_code("E9000");
+
+        diag = diag.with_suggestion(format!(
+            "This is a bug in the Blood compiler ({}:{}). Please report it.",
+            self.file, self.line
+        ));
+
+        for ctx in &self.context {
+            diag = diag.with_suggestion(format!("Context: {}", ctx));
+        }
+
+        diag
+    }
+}
+
+impl std::fmt::Display for Ice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.format())
+    }
+}
+
+impl std::error::Error for Ice {}
+
+/// Report an Internal Compiler Error (ICE) with file and line information.
+///
+/// This macro should be used when the compiler encounters an internal
+/// inconsistency that should never happen with valid code. ICEs indicate
+/// bugs in the compiler itself.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Simple ICE
+/// ice!("type variable should have been resolved before codegen");
+///
+/// // ICE with context
+/// ice!("unexpected type kind"; "type" => format!("{:?}", ty));
+///
+/// // ICE with multiple context items
+/// ice!("mismatched field count";
+///      "expected" => expected_count,
+///      "found" => found_count);
+/// ```
+#[macro_export]
+macro_rules! ice {
+    ($msg:expr) => {{
+        let ice = $crate::diagnostics::Ice::new($msg, file!(), line!());
+        ice.emit();
+        ice
+    }};
+    ($msg:expr; $($key:expr => $value:expr),+ $(,)?) => {{
+        let mut ice = $crate::diagnostics::Ice::new($msg, file!(), line!());
+        $(
+            ice = ice.with_context(format!("{}: {:?}", $key, $value));
+        )+
+        ice.emit();
+        ice
+    }};
+}
+
+/// Report an ICE and panic.
+///
+/// Use this when the ICE is unrecoverable and the compiler cannot continue.
+#[macro_export]
+macro_rules! ice_panic {
+    ($msg:expr) => {{
+        let ice = $crate::ice!($msg);
+        panic!("{}", ice.message);
+    }};
+    ($msg:expr; $($key:expr => $value:expr),+ $(,)?) => {{
+        let ice = $crate::ice!($msg; $($key => $value),+);
+        panic!("{}", ice.message);
+    }};
+}
+
+/// Report an ICE and return an error.
+///
+/// Use this when the ICE should be converted to a Diagnostic error for
+/// integration with the error reporting system.
+#[macro_export]
+macro_rules! ice_err {
+    ($span:expr, $msg:expr) => {{
+        let ice = $crate::diagnostics::Ice::new($msg, file!(), line!());
+        ice.emit();
+        ice.to_diagnostic($span)
+    }};
+    ($span:expr, $msg:expr; $($key:expr => $value:expr),+ $(,)?) => {{
+        let mut ice = $crate::diagnostics::Ice::new($msg, file!(), line!());
+        $(
+            ice = ice.with_context(format!("{}: {:?}", $key, $value));
+        )+
+        ice.emit();
+        ice.to_diagnostic($span)
+    }};
 }

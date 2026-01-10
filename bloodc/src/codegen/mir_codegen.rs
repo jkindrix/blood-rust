@@ -41,6 +41,7 @@ use crate::mir::types::{
 };
 use crate::mir::{EscapeResults, EscapeState, MemoryTier};
 use crate::span::Span;
+use crate::{ice, ice_err};
 
 use super::CodegenContext;
 
@@ -762,10 +763,10 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 let dest_ptr = self.compile_mir_place(destination, body)?;
                 let result_val = result.try_as_basic_value()
                     .left()
-                    .ok_or_else(|| vec![Diagnostic::error(
-                        "ICE: blood_perform returned void unexpectedly. \
-                         The runtime function should return i64.",
-                        term.span
+                    .ok_or_else(|| vec![ice_err!(
+                        term.span,
+                        "blood_perform returned void unexpectedly";
+                        "expected" => "i64 return value from runtime function"
                     )])?;
 
                 // blood_perform returns i64, but destination may be a different type.
@@ -1483,12 +1484,10 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 Some(val) => val.into_int_value(),
                 None => {
                     // blood_get_generation returned void unexpectedly - this is an ICE
-                    // but we're already in a panic path, so log and continue
-                    eprintln!(
-                        "ICE: blood_get_generation returned void unexpectedly at {:?}. \
-                         Using 0 as fallback for panic message.",
-                        span
-                    );
+                    // but we're already in a panic path, so log and continue with fallback
+                    ice!("blood_get_generation returned void unexpectedly";
+                         "span" => span,
+                         "fallback" => "using 0 for panic message");
                     i32_ty.const_int(0, false)
                 }
             };
@@ -1562,13 +1561,10 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         // Future fix: Either restructure local allocation to happen within MIR blocks,
         // or add a runtime helper that aborts on allocation failure without needing
         // LLVM conditional branches.
-        eprintln!(
-            "ICE: Region/Persistent tier for local _{} requires blood_alloc with \
-             conditional error handling. MIR codegen currently cannot create basic \
-             blocks during local allocation. Using stack fallback - generation \
-             tracking will not work for this local.",
-            local_id.index
-        );
+        ice!("region/persistent tier allocation requires blood_alloc with conditional error handling";
+             "local" => format!("_{}", local_id.index),
+             "limitation" => "MIR codegen cannot create basic blocks during local allocation",
+             "fallback" => "using stack allocation - generation tracking will not work");
 
         // Fall back to stack allocation (explicit, documented fallback)
         let alloca = self.builder.build_alloca(
@@ -1828,9 +1824,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     Ok(agg.into())
                 } else if let Some(_variants) = self.enum_defs.get(def_id) {
                     // Enum variant - first field is tag
-                    let variant_index = variant_idx.ok_or_else(|| vec![Diagnostic::error(
-                        format!("ICE: Enum construction without variant index for {:?}", def_id),
+                    let variant_index = variant_idx.ok_or_else(|| vec![ice_err!(
                         Span::dummy(),
+                        "enum construction without variant index";
+                        "def_id" => def_id
                     )])?;
                     let tag = self.context.i32_type().const_int(variant_index as u64, false);
                     let mut all_vals = vec![tag.into()];

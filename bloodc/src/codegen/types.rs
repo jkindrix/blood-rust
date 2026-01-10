@@ -5,6 +5,7 @@
 //! type utilities and helpers.
 
 use crate::hir::{Type, TypeKind, PrimitiveTy};
+use crate::ice;
 
 /// Calculate the size of a type in bytes (for layout purposes).
 ///
@@ -22,14 +23,14 @@ pub fn type_size(ty: &Type) -> usize {
         TypeKind::Adt { .. } => 8, // Placeholder - ADT sizes should be computed from field layout
         TypeKind::Never => 0, // uninhabited type, zero-sized
         TypeKind::Error => 0, // error recovery, treated as zero-sized
-        TypeKind::Infer(_) => {
+        TypeKind::Infer(var_id) => {
             // Type variable should be resolved before codegen
-            eprintln!("ICE: type_size called on unresolved type variable");
+            ice!("type_size called on unresolved type variable"; "var_id" => var_id);
             0
         }
-        TypeKind::Param(_) => {
+        TypeKind::Param(param) => {
             // Type parameter should be monomorphized before codegen
-            eprintln!("ICE: type_size called on unmonomorphized type parameter");
+            ice!("type_size called on unmonomorphized type parameter"; "param" => param);
             8 // assume pointer-sized for safety
         }
     }
@@ -69,7 +70,7 @@ fn primitive_size(prim: &PrimitiveTy) -> usize {
 /// Calculate alignment requirements for a type.
 ///
 /// Returns 1 for zero-sized types and error types.
-/// Logs ICE for type variables that should have been resolved before codegen.
+/// Reports ICE for type variables that should have been resolved before codegen.
 pub fn type_alignment(ty: &Type) -> usize {
     match ty.kind() {
         TypeKind::Primitive(prim) => primitive_size(prim).max(1),
@@ -85,12 +86,12 @@ pub fn type_alignment(ty: &Type) -> usize {
         TypeKind::Adt { .. } => 8, // conservative default - should compute from fields
         TypeKind::Never => 1, // zero-sized, minimal alignment
         TypeKind::Error => 1, // error recovery
-        TypeKind::Infer(_) => {
-            eprintln!("ICE: type_alignment called on unresolved type variable");
+        TypeKind::Infer(var_id) => {
+            ice!("type_alignment called on unresolved type variable"; "var_id" => var_id);
             8 // conservative default
         }
-        TypeKind::Param(_) => {
-            eprintln!("ICE: type_alignment called on unmonomorphized type parameter");
+        TypeKind::Param(param) => {
+            ice!("type_alignment called on unmonomorphized type parameter"; "param" => param);
             8 // conservative default
         }
     }
