@@ -331,6 +331,11 @@ impl<'hir> FunctionLowering<'hir> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
+        // Special handling for pipe operator: `a |> f` becomes `f(a)`
+        if matches!(op, BinOp::Pipe) {
+            return self.lower_pipe(left, right, ty, span);
+        }
+
         let left_op = self.lower_expr(left)?;
         let right_op = self.lower_expr(right)?;
 
@@ -343,6 +348,46 @@ impl<'hir> FunctionLowering<'hir> {
         };
         self.push_assign(Place::local(temp), rvalue);
         Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a pipe expression: `a |> f` becomes `f(a)`.
+    ///
+    /// The pipe operator passes the left operand as the first argument
+    /// to the function on the right-hand side.
+    fn lower_pipe(
+        &mut self,
+        arg: &Expr,
+        func: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Lower the argument (left side of |>)
+        let arg_op = self.lower_expr(arg)?;
+
+        // Lower the function (right side of |>)
+        let func_op = self.lower_expr(func)?;
+
+        // Create destination for call result
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        // Create continuation block
+        let next_block = self.builder.new_block();
+
+        // Generate call: f(a)
+        self.terminate(TerminatorKind::Call {
+            func: func_op,
+            args: vec![arg_op],
+            destination: dest_place.clone(),
+            target: Some(next_block),
+            unwind: None,
+        });
+
+        // Continue in the new block
+        self.builder.switch_to(next_block);
+        self.current_block = next_block;
+
+        Ok(Operand::Copy(dest_place))
     }
 
     /// Lower a unary operation.
@@ -566,8 +611,33 @@ impl<'hir> FunctionLowering<'hir> {
             }
 
             // Check guard if present
-            if arm.guard.is_some() {
-                // TODO: handle guards
+            if let Some(guard) = &arm.guard {
+                // Create blocks for guard success/failure
+                let guard_pass = self.builder.new_block();
+                let guard_fail = if i + 1 < arm_blocks.len() {
+                    // Fall through to next arm if guard fails
+                    arm_blocks[i + 1]
+                } else {
+                    // Last arm - guard failure is unreachable (pattern should be exhaustive)
+                    // In a real implementation, this would be a panic/unreachable block
+                    join_block
+                };
+
+                // Lower the guard expression
+                let guard_result = self.lower_expr(guard)?;
+
+                // Branch based on guard result
+                self.terminate(TerminatorKind::SwitchInt {
+                    discr: guard_result,
+                    targets: SwitchTargets::new(
+                        vec![(1, guard_pass)], // true (1) -> guard_pass
+                        guard_fail,             // false (0) -> guard_fail
+                    ),
+                });
+
+                // Continue in guard_pass block for the arm body
+                self.builder.switch_to(guard_pass);
+                self.current_block = guard_pass;
             }
 
             let arm_val = self.lower_expr(&arm.body)?;

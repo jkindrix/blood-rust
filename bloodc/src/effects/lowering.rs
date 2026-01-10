@@ -301,7 +301,10 @@ impl EffectLowering {
     /// Analyze a function's effect requirements.
     pub fn analyze_function(&mut self, def_id: DefId, body: &Expr) -> EvidenceRequirement {
         let effects = self.collect_effects(body);
-        let polymorphic = false; // TODO: Detect row polymorphism
+        // Detect row polymorphism: if the function calls parameters that might be closures,
+        // it could be propagating their effects. This is a heuristic - full detection
+        // would require tracking effect variables during type checking.
+        let polymorphic = self.detect_row_polymorphism(body);
         let req = EvidenceRequirement {
             effects,
             polymorphic,
@@ -309,6 +312,74 @@ impl EffectLowering {
         };
         self.evidence_reqs.insert(def_id, req.clone());
         req
+    }
+
+    /// Detect if a function body might be row-polymorphic.
+    ///
+    /// A function is considered potentially row-polymorphic if it:
+    /// 1. Calls a local variable (which might be a closure parameter)
+    /// 2. Uses handle expressions (which capture and transform effects)
+    ///
+    /// This is a conservative heuristic - it may over-approximate polymorphism
+    /// but won't miss actual polymorphic functions.
+    fn detect_row_polymorphism(&self, expr: &Expr) -> bool {
+        self.detect_row_poly_recursive(expr)
+    }
+
+    fn detect_row_poly_recursive(&self, expr: &Expr) -> bool {
+        use crate::hir::Stmt;
+
+        match &expr.kind {
+            // Handle expressions are inherently effect-polymorphic
+            ExprKind::Handle { .. } => true,
+
+            // Check if callee is a local variable (could be a closure parameter)
+            ExprKind::Call { callee, args } => {
+                // If calling a local variable, it might be a closure with effects
+                let callee_is_local = matches!(&callee.kind, ExprKind::Local(_));
+                if callee_is_local {
+                    return true;
+                }
+                // Otherwise, recurse into subexpressions
+                self.detect_row_poly_recursive(callee)
+                    || args.iter().any(|a| self.detect_row_poly_recursive(a))
+            }
+
+            // Recurse into compound expressions
+            ExprKind::Block { stmts, expr: tail } => {
+                stmts.iter().any(|stmt| match stmt {
+                    Stmt::Expr(e) => self.detect_row_poly_recursive(e),
+                    Stmt::Let { init: Some(e), .. } => self.detect_row_poly_recursive(e),
+                    _ => false,
+                }) || tail.as_ref().map_or(false, |e| self.detect_row_poly_recursive(e))
+            }
+            ExprKind::If { condition, then_branch, else_branch } => {
+                self.detect_row_poly_recursive(condition)
+                    || self.detect_row_poly_recursive(then_branch)
+                    || else_branch.as_ref().map_or(false, |e| self.detect_row_poly_recursive(e))
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.detect_row_poly_recursive(scrutinee)
+                    || arms.iter().any(|a| self.detect_row_poly_recursive(&a.body))
+            }
+            ExprKind::Loop { body, .. } | ExprKind::While { body, .. } => {
+                self.detect_row_poly_recursive(body)
+            }
+            ExprKind::Binary { left, right, .. } => {
+                self.detect_row_poly_recursive(left) || self.detect_row_poly_recursive(right)
+            }
+            ExprKind::Unary { operand, .. } => self.detect_row_poly_recursive(operand),
+            ExprKind::Tuple(exprs) => exprs.iter().any(|e| self.detect_row_poly_recursive(e)),
+            ExprKind::Return(Some(e)) | ExprKind::Assign { value: e, .. } => {
+                self.detect_row_poly_recursive(e)
+            }
+            ExprKind::Perform { args, .. } => {
+                args.iter().any(|a| self.detect_row_poly_recursive(a))
+            }
+            ExprKind::Resume { value: Some(e) } => self.detect_row_poly_recursive(e),
+            // Leaf expressions are not polymorphic
+            _ => false,
+        }
     }
 
     /// Analyze a function with its declared effect row.
