@@ -1519,34 +1519,16 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         let ptr = self.compile_mir_place(place, body)?;
 
-        // Generation checks are needed for region-tier allocations to detect
-        // stale references (use-after-free). Based on escape analysis:
+        // Generation checks for region-tier allocations are implemented in
+        // compile_mir_place() for PlaceElem::Deref. When dereferencing a pointer
+        // that was allocated via blood_alloc_or_abort (Region/Persistent tier),
+        // the local_generations map contains the generation storage location.
+        // The Deref handler validates via blood_validate_generation and panics
+        // on stale reference detection.
         //
-        // - Stack tier: No generation check needed (value doesn't escape)
-        // - Region/Persistent tier: Must validate generation before dereference
-        //
-        // The check is skipped if escape analysis indicates the value is purely
-        // local (NoEscape) and not captured by any effect operation.
-        let tier = self.get_local_tier(place.local, escape_results);
-
-        // Generation validation is temporarily disabled until full 128-bit BloodPtr support.
-        //
-        // The issue: We use stack allocation for all tiers (for simplicity), but stack
-        // addresses are reused across function calls. This causes generation mismatches
-        // because:
-        // 1. Function A allocates local at address X, registers -> generation 1
-        // 2. Function A returns, stack unwound
-        // 3. Function B called, allocates local at SAME address X, registers -> generation 2
-        // 4. Any validation expecting generation 1 now fails
-        //
-        // TODO: When we have full 128-bit BloodPtr support:
-        // - Use blood_alloc for Region tier (actual heap allocation)
-        // - Store generation in the pointer itself
-        // - Extract and validate on dereference
-        //
-        // For now, we rely on Rust-style compile-time ownership analysis (escape analysis)
-        // rather than runtime generation checks.
-        let _ = (tier, escape_results); // Suppress unused warnings
+        // Stack tier (NoEscape) values skip generation checks entirely as they
+        // are guaranteed safe by lexical scoping.
+        let _ = (escape_results,); // Escape results used in compile_mir_place
 
         // Load value from pointer
         let loaded = self.builder.build_load(ptr, "load")

@@ -48,6 +48,7 @@ use crate::hir::{
 use crate::ast::{BinOp, UnaryOp};
 use crate::span::Span;
 use crate::diagnostics::Diagnostic;
+use crate::ice_err;
 
 use super::body::{MirBody, MirBodyBuilder};
 use super::types::{
@@ -900,13 +901,14 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         match stmt {
             Stmt::Let { local_id, init } => {
                 // Get or create the MIR local
-                let mir_local = if let Some(hir_local) = self.body.get_local(*local_id) {
-                    let mir_id = self.builder.new_temp(hir_local.ty.clone(), hir_local.span);
-                    self.local_map.insert(*local_id, mir_id);
-                    mir_id
-                } else {
-                    self.new_temp(Type::error(), Span::dummy())
-                };
+                let hir_local = self.body.get_local(*local_id)
+                    .ok_or_else(|| vec![ice_err!(
+                        Span::dummy(),
+                        "local not found in HIR body during MIR lowering";
+                        "local_id" => local_id
+                    )])?;
+                let mir_local = self.builder.new_temp(hir_local.ty.clone(), hir_local.span);
+                self.local_map.insert(*local_id, mir_local);
 
                 // Storage live
                 self.push_stmt(StatementKind::StorageLive(mir_local));
@@ -1295,10 +1297,15 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        let elem_ty = if let TypeKind::Array { ref element, .. } = *ty.kind {
-            element.clone()
-        } else {
-            Type::error()
+        let elem_ty = match ty.kind() {
+            TypeKind::Array { element, .. } => element.clone(),
+            other => {
+                return Err(vec![ice_err!(
+                    span,
+                    "lower_array called with non-array type";
+                    "type_kind" => other
+                )]);
+            }
         };
 
         let mut operands = Vec::with_capacity(elems.len());
@@ -2419,13 +2426,14 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
     fn lower_stmt(&mut self, stmt: &hir::Stmt) -> Result<(), Vec<Diagnostic>> {
         match stmt {
             hir::Stmt::Let { local_id, init } => {
-                let mir_local = if let Some(hir_local) = self.body.get_local(*local_id) {
-                    let mir_id = self.builder.new_temp(hir_local.ty.clone(), hir_local.span);
-                    self.local_map.insert(*local_id, mir_id);
-                    mir_id
-                } else {
-                    self.new_temp(Type::error(), Span::dummy())
-                };
+                let hir_local = self.body.get_local(*local_id)
+                    .ok_or_else(|| vec![ice_err!(
+                        Span::dummy(),
+                        "local not found in closure body during MIR lowering";
+                        "local_id" => local_id
+                    )])?;
+                let mir_local = self.builder.new_temp(hir_local.ty.clone(), hir_local.span);
+                self.local_map.insert(*local_id, mir_local);
 
                 self.push_stmt(StatementKind::StorageLive(mir_local));
 
@@ -2552,10 +2560,15 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        let elem_ty = if let TypeKind::Array { ref element, .. } = *ty.kind {
-            element.clone()
-        } else {
-            Type::error()
+        let elem_ty = match ty.kind() {
+            TypeKind::Array { element, .. } => element.clone(),
+            other => {
+                return Err(vec![ice_err!(
+                    span,
+                    "lower_array called with non-array type";
+                    "type_kind" => other
+                )]);
+            }
         };
 
         let mut operands = Vec::with_capacity(elems.len());
@@ -2711,7 +2724,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         let mut captures_with_types = Vec::with_capacity(captures.len());
 
         for capture in captures {
-            // Get the type for this capture
+            // Get the type for this capture - must be in outer captures or body scope
             let capture_ty = if let Some(ty) = self.capture_types.get(&capture.local_id) {
                 // From outer closure's captures
                 ty.clone()
@@ -2719,7 +2732,11 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 // From closure body scope
                 local.ty.clone()
             } else {
-                Type::error()
+                return Err(vec![ice_err!(
+                    span,
+                    "capture type not found in closure lowering";
+                    "local_id" => capture.local_id
+                )]);
             };
 
             captures_with_types.push((capture.clone(), capture_ty));
