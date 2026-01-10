@@ -254,7 +254,14 @@ impl EffectLowering {
     ///
     /// Returns an error if the handler references an unresolved effect type
     /// or if any operation cannot be resolved.
-    pub fn lower_handler_decl(&mut self, item: &Item) -> Result<HandlerInfo, LoweringError> {
+    ///
+    /// The `bodies` parameter is used for tail-resumptive analysis. If None,
+    /// all operations are conservatively assumed to be non-tail-resumptive.
+    pub fn lower_handler_decl(
+        &mut self,
+        item: &Item,
+        bodies: Option<&std::collections::HashMap<crate::hir::BodyId, crate::hir::Body>>,
+    ) -> Result<HandlerInfo, LoweringError> {
         match &item.kind {
             ItemKind::Handler { kind, effect, operations, return_clause, .. } => {
                 let effect_id = match self.resolve_effect_type(effect) {
@@ -273,7 +280,7 @@ impl EffectLowering {
                 // Collect operation implementations, propagating any errors
                 let mut op_impls = Vec::with_capacity(operations.len());
                 for op in operations {
-                    op_impls.push(self.lower_handler_op(op, effect_id)?);
+                    op_impls.push(self.lower_handler_op(op, effect_id, bodies)?);
                 }
 
                 // Tail-resumptive analysis: check if all ops are tail-resumptive
@@ -307,7 +314,14 @@ impl EffectLowering {
     /// Lower a handler operation to OpImplInfo.
     ///
     /// Returns an error if the operation cannot be found in the effect definition.
-    fn lower_handler_op(&self, op: &HandlerOp, effect_id: DefId) -> Result<OpImplInfo, LoweringError> {
+    ///
+    /// If `bodies` is provided, performs tail-resumptive analysis on the operation body.
+    fn lower_handler_op(
+        &self,
+        op: &HandlerOp,
+        effect_id: DefId,
+        bodies: Option<&std::collections::HashMap<crate::hir::BodyId, crate::hir::Body>>,
+    ) -> Result<OpImplInfo, LoweringError> {
         // Look up the effect info
         let effect_info = match self.effects.get(&effect_id) {
             Some(info) => info,
@@ -335,9 +349,15 @@ impl EffectLowering {
             }
         };
 
+        // Analyze if this operation is tail-resumptive
+        let is_tail_resumptive = bodies
+            .and_then(|b| b.get(&op.body_id))
+            .map(|body| super::handler::analyze_tail_resumptive(&body.expr))
+            .unwrap_or(false);
+
         Ok(OpImplInfo {
             operation_id,
-            is_tail_resumptive: false, // TODO: Analyze resume positions in body
+            is_tail_resumptive,
             body_id: Some(op.body_id),
         })
     }

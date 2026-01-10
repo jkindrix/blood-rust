@@ -221,7 +221,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     }
                 }
                 hir::ItemKind::Handler { .. } => {
-                    match self.effect_lowering.lower_handler_decl(item) {
+                    match self.effect_lowering.lower_handler_decl(item, Some(&hir_crate.bodies)) {
                         Ok(handler_info) => {
                             self.handler_defs.insert(*def_id, handler_info);
                         }
@@ -311,7 +311,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
                 hir::ItemKind::Handler { .. } => {
                     // Lower handler declaration to HandlerInfo
-                    match self.effect_lowering.lower_handler_decl(item) {
+                    match self.effect_lowering.lower_handler_decl(item, Some(&hir_crate.bodies)) {
                         Ok(handler_info) => {
                             self.handler_defs.insert(*def_id, handler_info);
                         }
