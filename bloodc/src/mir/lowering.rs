@@ -1541,31 +1541,54 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 }
             }
             PatternKind::Slice { prefix, slice, suffix } => {
-                // Bind prefix patterns
+                // Calculate minimum length required for this pattern
+                let min_length = (prefix.len() + suffix.len()) as u64;
+
+                // Bind prefix patterns using ConstantIndex from start
                 for (i, pat) in prefix.iter().enumerate() {
-                    let idx_place = place.project(PlaceElem::Index(LocalId::new(i as u32)));
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: i as u64,
+                        min_length,
+                        from_end: false,
+                    });
                     self.bind_pattern(pat, &idx_place)?;
                 }
-                // Slice binding not fully supported yet
-                if slice.is_some() {
-                    return Err(vec![Diagnostic::error(
-                        "MIR lowering for slice patterns with rest (..) not yet implemented".to_string(),
-                        pattern.span,
-                    )]);
+
+                // Bind suffix patterns using ConstantIndex from end
+                // Suffix is reversed: last element in suffix is at offset 0 from end
+                for (i, pat) in suffix.iter().enumerate() {
+                    let offset_from_end = (suffix.len() - 1 - i) as u64;
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: offset_from_end,
+                        min_length,
+                        from_end: true,
+                    });
+                    self.bind_pattern(pat, &idx_place)?;
                 }
-                // Suffix patterns would need length computation
-                if !suffix.is_empty() {
-                    return Err(vec![Diagnostic::error(
-                        "MIR lowering for slice suffix patterns not yet implemented".to_string(),
-                        pattern.span,
-                    )]);
+
+                // Bind the rest pattern (..) if present
+                if let Some(rest_pat) = slice {
+                    // The rest covers elements from prefix.len() to (len - suffix.len())
+                    // Use Subslice projection
+                    let subslice_place = place.project(PlaceElem::Subslice {
+                        from: prefix.len() as u64,
+                        to: suffix.len() as u64,
+                        from_end: true,
+                    });
+                    self.bind_pattern(rest_pat, &subslice_place)?;
                 }
             }
-            PatternKind::Or(_) => {
-                return Err(vec![Diagnostic::error(
-                    "MIR lowering for or-patterns not yet implemented".to_string(),
-                    pattern.span,
-                )]);
+            PatternKind::Or(alternatives) => {
+                // Or-patterns in binding context: all alternatives must bind the same variables
+                // with the same types. We bind using the first alternative since they're all
+                // equivalent for binding purposes.
+                //
+                // Note: This assumes type checking has verified all alternatives bind the same
+                // variables. For refutable or-patterns, match compilation should handle
+                // determining which alternative actually matched.
+                if let Some(first_alt) = alternatives.first() {
+                    self.bind_pattern(first_alt, place)?;
+                }
             }
             PatternKind::Ref { inner, .. } => {
                 // For reference patterns, bind the inner pattern to a dereferenced place
@@ -2270,28 +2293,41 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 }
             }
             PatternKind::Slice { prefix, slice, suffix } => {
+                let min_length = (prefix.len() + suffix.len()) as u64;
+
                 for (i, pat) in prefix.iter().enumerate() {
-                    let idx_place = place.project(PlaceElem::Index(LocalId::new(i as u32)));
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: i as u64,
+                        min_length,
+                        from_end: false,
+                    });
                     self.bind_pattern(pat, &idx_place)?;
                 }
-                if slice.is_some() {
-                    return Err(vec![Diagnostic::error(
-                        "MIR lowering for slice patterns with rest (..) not yet implemented".to_string(),
-                        pattern.span,
-                    )]);
+
+                for (i, pat) in suffix.iter().enumerate() {
+                    let offset_from_end = (suffix.len() - 1 - i) as u64;
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: offset_from_end,
+                        min_length,
+                        from_end: true,
+                    });
+                    self.bind_pattern(pat, &idx_place)?;
                 }
-                if !suffix.is_empty() {
-                    return Err(vec![Diagnostic::error(
-                        "MIR lowering for slice suffix patterns not yet implemented".to_string(),
-                        pattern.span,
-                    )]);
+
+                if let Some(rest_pat) = slice {
+                    let subslice_place = place.project(PlaceElem::Subslice {
+                        from: prefix.len() as u64,
+                        to: suffix.len() as u64,
+                        from_end: true,
+                    });
+                    self.bind_pattern(rest_pat, &subslice_place)?;
                 }
             }
-            PatternKind::Or(_) => {
-                return Err(vec![Diagnostic::error(
-                    "MIR lowering for or-patterns not yet implemented".to_string(),
-                    pattern.span,
-                )]);
+            PatternKind::Or(alternatives) => {
+                // Or-patterns in binding: bind using first alternative (all must bind same vars)
+                if let Some(first_alt) = alternatives.first() {
+                    self.bind_pattern(first_alt, place)?;
+                }
             }
             PatternKind::Ref { inner, .. } => {
                 let deref_place = place.project(PlaceElem::Deref);
