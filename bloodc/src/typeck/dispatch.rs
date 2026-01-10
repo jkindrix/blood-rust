@@ -173,15 +173,17 @@ impl<'a> DispatchResolver<'a> {
 
     /// Check if type a is a subtype of type b.
     ///
-    /// For now, this is a structural check. Full subtyping with variance
-    /// will be added when traits are implemented.
+    /// Implements structural subtyping with variance:
+    /// - Covariant positions: &T, [T], arrays - T can be a subtype
+    /// - Invariant positions: &mut T - T must be exactly equal
+    /// - Contravariant positions: function parameters - reversed subtyping
     fn is_subtype(&self, a: &Type, b: &Type) -> bool {
         // Any type is a subtype of itself
         if self.types_equal(a, b) {
             return true;
         }
 
-        // Never is a subtype of everything
+        // Never is a subtype of everything (bottom type)
         if matches!(b.kind.as_ref(), TypeKind::Never) {
             return false; // Nothing is subtype of never except never itself
         }
@@ -204,8 +206,98 @@ impl<'a> DispatchResolver<'a> {
             return true;
         }
 
-        // TODO: Add variance for generic types (Vec<Cat> <: Vec<Animal>)
-        // TODO: Add trait-based subtyping
+        // Variance rules for compound types
+        match (a.kind.as_ref(), b.kind.as_ref()) {
+            // Immutable references are covariant: &Cat <: &Animal if Cat <: Animal
+            (
+                TypeKind::Ref { inner: a_inner, mutable: false },
+                TypeKind::Ref { inner: b_inner, mutable: false },
+            ) => {
+                return self.is_subtype(a_inner, b_inner);
+            }
+
+            // Mutable references are invariant: &mut T requires exact match
+            (
+                TypeKind::Ref { inner: a_inner, mutable: true },
+                TypeKind::Ref { inner: b_inner, mutable: true },
+            ) => {
+                return self.types_equal(a_inner, b_inner);
+            }
+
+            // Immutable ref is not subtype of mutable ref
+            (
+                TypeKind::Ref { mutable: false, .. },
+                TypeKind::Ref { mutable: true, .. },
+            ) => {
+                return false;
+            }
+
+            // Mutable ref can be used where immutable ref is expected
+            (
+                TypeKind::Ref { inner: a_inner, mutable: true },
+                TypeKind::Ref { inner: b_inner, mutable: false },
+            ) => {
+                return self.is_subtype(a_inner, b_inner);
+            }
+
+            // Slices are covariant
+            (
+                TypeKind::Slice { element: a_elem },
+                TypeKind::Slice { element: b_elem },
+            ) => {
+                return self.is_subtype(a_elem, b_elem);
+            }
+
+            // Arrays are covariant in element type (same size required)
+            (
+                TypeKind::Array { element: a_elem, size: a_size },
+                TypeKind::Array { element: b_elem, size: b_size },
+            ) => {
+                return a_size == b_size && self.is_subtype(a_elem, b_elem);
+            }
+
+            // Tuples are covariant in each position
+            (TypeKind::Tuple(a_elems), TypeKind::Tuple(b_elems)) => {
+                return a_elems.len() == b_elems.len()
+                    && a_elems.iter().zip(b_elems.iter())
+                        .all(|(a, b)| self.is_subtype(a, b));
+            }
+
+            // Function types: contravariant in params, covariant in return
+            (
+                TypeKind::Fn { params: a_params, ret: a_ret },
+                TypeKind::Fn { params: b_params, ret: b_ret },
+            ) => {
+                // Same arity required
+                if a_params.len() != b_params.len() {
+                    return false;
+                }
+                // Contravariant in parameters: b_param <: a_param
+                let params_ok = a_params.iter().zip(b_params.iter())
+                    .all(|(a, b)| self.is_subtype(b, a));
+                // Covariant in return type: a_ret <: b_ret
+                let ret_ok = self.is_subtype(a_ret, b_ret);
+                return params_ok && ret_ok;
+            }
+
+            // Pointers follow same variance as references
+            (
+                TypeKind::Ptr { inner: a_inner, mutable: false },
+                TypeKind::Ptr { inner: b_inner, mutable: false },
+            ) => {
+                return self.is_subtype(a_inner, b_inner);
+            }
+            (
+                TypeKind::Ptr { inner: a_inner, mutable: true },
+                TypeKind::Ptr { inner: b_inner, mutable: true },
+            ) => {
+                return self.types_equal(a_inner, b_inner);
+            }
+
+            _ => {}
+        }
+
+        // TODO: Add trait-based subtyping when trait system is complete
 
         false
     }
@@ -630,5 +722,104 @@ mod tests {
             }
             other => panic!("Expected NoMatch, got {:?}", other),
         }
+    }
+
+    // === Variance Tests ===
+
+    #[test]
+    fn test_immutable_ref_covariance() {
+        let unifier = Unifier::new();
+        let resolver = DispatchResolver::new(&unifier);
+
+        // Immutable references are covariant
+        let ref_i32 = Type::reference(Type::i32(), false);
+        let ref_i32_2 = Type::reference(Type::i32(), false);
+
+        // Same type
+        assert!(resolver.is_subtype(&ref_i32, &ref_i32_2));
+    }
+
+    #[test]
+    fn test_mutable_ref_invariance() {
+        let unifier = Unifier::new();
+        let resolver = DispatchResolver::new(&unifier);
+
+        // Mutable references are invariant
+        let mut_ref_i32 = Type::reference(Type::i32(), true);
+        let mut_ref_i32_2 = Type::reference(Type::i32(), true);
+
+        // Same type
+        assert!(resolver.is_subtype(&mut_ref_i32, &mut_ref_i32_2));
+
+        // Different inner type
+        let mut_ref_i64 = Type::reference(Type::i64(), true);
+        assert!(!resolver.is_subtype(&mut_ref_i32, &mut_ref_i64));
+    }
+
+    #[test]
+    fn test_mutable_to_immutable_ref() {
+        let unifier = Unifier::new();
+        let resolver = DispatchResolver::new(&unifier);
+
+        // Mutable ref can be used where immutable ref is expected
+        let mut_ref_i32 = Type::reference(Type::i32(), true);
+        let ref_i32 = Type::reference(Type::i32(), false);
+
+        assert!(resolver.is_subtype(&mut_ref_i32, &ref_i32));
+
+        // But not the other way around
+        assert!(!resolver.is_subtype(&ref_i32, &mut_ref_i32));
+    }
+
+    #[test]
+    fn test_tuple_covariance() {
+        let unifier = Unifier::new();
+        let resolver = DispatchResolver::new(&unifier);
+
+        // Tuples are covariant in each position
+        let t1 = Type::tuple(vec![Type::i32(), Type::bool()]);
+        let t2 = Type::tuple(vec![Type::i32(), Type::bool()]);
+
+        assert!(resolver.is_subtype(&t1, &t2));
+
+        // Different element types
+        let t3 = Type::tuple(vec![Type::i64(), Type::bool()]);
+        assert!(!resolver.is_subtype(&t1, &t3));
+
+        // Different lengths
+        let t4 = Type::tuple(vec![Type::i32()]);
+        assert!(!resolver.is_subtype(&t1, &t4));
+    }
+
+    #[test]
+    fn test_never_is_subtype_of_all() {
+        let unifier = Unifier::new();
+        let resolver = DispatchResolver::new(&unifier);
+
+        // Never (bottom type) is a subtype of everything
+        let never = Type::never();
+
+        assert!(resolver.is_subtype(&never, &Type::i32()));
+        assert!(resolver.is_subtype(&never, &Type::bool()));
+        assert!(resolver.is_subtype(&never, &Type::str()));
+        assert!(resolver.is_subtype(&never, &Type::unit()));
+
+        // But nothing is a subtype of never (except never itself)
+        assert!(!resolver.is_subtype(&Type::i32(), &never));
+        assert!(resolver.is_subtype(&never, &never)); // never <: never
+    }
+
+    #[test]
+    fn test_array_covariance() {
+        let unifier = Unifier::new();
+        let resolver = DispatchResolver::new(&unifier);
+
+        // Arrays are covariant but size must match
+        let arr1 = Type::array(Type::i32(), 5);
+        let arr2 = Type::array(Type::i32(), 5);
+        let arr3 = Type::array(Type::i32(), 10);
+
+        assert!(resolver.is_subtype(&arr1, &arr2));
+        assert!(!resolver.is_subtype(&arr1, &arr3)); // Different size
     }
 }
