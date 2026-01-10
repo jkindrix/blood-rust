@@ -12,9 +12,18 @@ Blood synthesizes five cutting-edge programming language innovations:
 
 ## Status
 
-**Pre-implementation design phase.** We are specifying the language formally before writing the first line of compiler code.
+**Early implementation phase.** Core compiler functionality is working (lexer, parser, type checker, LLVM codegen). Simple programs like FizzBuzz compile and run.
 
-See [SPECIFICATION.md](./SPECIFICATION.md) for the complete technical specification.
+| Component | Status |
+|-----------|--------|
+| Lexer & Parser | Complete |
+| Type Checker | Complete (bidirectional + unification) |
+| Code Generation | Complete (LLVM backend) |
+| Effects System | Scaffolded (evidence passing) |
+| Memory Model | Scaffolded (generational pointers) |
+| Runtime | Scaffolded (fibers, channels) |
+
+**[Getting Started](GETTING_STARTED.md)** | [Specification](SPECIFICATION.md) | [Implementation Status](IMPLEMENTATION_STATUS.md)
 
 ## The Name
 
@@ -54,6 +63,18 @@ fn main() / {IO, Error<AppError>} {
 }
 ```
 
+## Quick Start
+
+```bash
+# Build the compiler
+cargo build --release
+
+# Compile and run a program
+cargo run -- run examples/fizzbuzz.blood
+```
+
+See **[GETTING_STARTED.md](GETTING_STARTED.md)** for the full tutorial.
+
 ## Documentation
 
 ### Core Specifications
@@ -77,17 +98,23 @@ fn main() / {IO, Error<AppError>} {
 | [DIAGNOSTICS.md](./DIAGNOSTICS.md) | Error messages and diagnostics |
 | [UCM.md](./UCM.md) | Codebase Manager (tooling) |
 
-### Planning
+### Planning & Status
 
 | Document | Description |
 |----------|-------------|
+| [GETTING_STARTED.md](./GETTING_STARTED.md) | Tutorial and quick start guide |
 | [ROADMAP.md](./ROADMAP.md) | Implementation plan and milestones |
 | [DECISIONS.md](./DECISIONS.md) | Architecture decision records |
+| [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) | Detailed implementation audit |
 
 ## License
 
-To be determined.
+MIT License
 
 ## Contributing
 
-Blood is in early design. We welcome feedback on the specification via issues and discussions.
+We welcome contributions! See the [implementation status](IMPLEMENTATION_STATUS.md) for areas that need work.
+
+- **Bug reports**: Open an issue with reproduction steps
+- **Feature requests**: Open a discussion first
+- **Code contributions**: Fork, branch, and submit a PR
