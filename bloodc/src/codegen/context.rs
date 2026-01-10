@@ -55,6 +55,15 @@ pub struct CodegenContext<'ctx, 'a> {
     pub enum_defs: HashMap<DefId, Vec<Vec<Type>>>,
     /// Stack of loop contexts for break/continue.
     loop_stack: Vec<LoopContext<'ctx>>,
+    /// Closure bodies for compilation (copied from HIR crate during compile_crate).
+    closure_bodies: HashMap<hir::BodyId, hir::Body>,
+    /// Counter for generating unique closure function names.
+    closure_counter: u32,
+    /// Methods requiring dynamic dispatch (polymorphic methods).
+    /// Maps method DefId to the dispatch table slot.
+    dynamic_dispatch_methods: HashMap<DefId, u64>,
+    /// Next dispatch table slot to assign.
+    next_dispatch_slot: u64,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -75,6 +84,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             loop_stack: Vec::new(),
+            closure_bodies: HashMap::new(),
+            closure_counter: 0,
+            dynamic_dispatch_methods: HashMap::new(),
+            next_dispatch_slot: 0,
         }
     }
 
@@ -111,6 +124,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
                 _ => {}
             }
+        }
+
+        // Copy closure bodies for later compilation
+        for (body_id, body) in &hir_crate.bodies {
+            self.closure_bodies.insert(*body_id, body.clone());
         }
 
         // Second pass: declare all functions
@@ -158,22 +176,216 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
     /// Declare runtime support functions.
     fn declare_runtime_functions(&mut self) {
-        // print_int(i32) -> void
+        let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
+        let i64_type = self.context.i64_type();
         let void_type = self.context.void_type();
+        let i8_ptr_type = i8_type.ptr_type(AddressSpace::default());
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+
+        // === I/O Functions ===
+
+        // print_int(i32) -> void
         let print_int_type = void_type.fn_type(&[i32_type.into()], false);
         self.module.add_function("print_int", print_int_type, None);
-
-        // print_str(*i8) -> void
-        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
-        let print_str_type = void_type.fn_type(&[i8_ptr_type.into()], false);
-        self.module.add_function("print_str", print_str_type, None);
 
         // println_int(i32) -> void
         self.module.add_function("println_int", print_int_type, None);
 
+        // print_i64(i64) -> void
+        let print_i64_type = void_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("print_i64", print_i64_type, None);
+
+        // println_i64(i64) -> void
+        self.module.add_function("println_i64", print_i64_type, None);
+
+        // print_str(*i8) -> void
+        let print_str_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("print_str", print_str_type, None);
+
         // println_str(*i8) -> void
         self.module.add_function("println_str", print_str_type, None);
+
+        // print_char(i32) -> void
+        self.module.add_function("print_char", print_int_type, None);
+
+        // println() -> void
+        let println_type = void_type.fn_type(&[], false);
+        self.module.add_function("println", println_type, None);
+
+        // === Memory Management (Generational References) ===
+
+        // blood_alloc(size: i64, out_addr: *i64, out_gen_meta: *i64) -> i32
+        let size_type = i64_type; // size_t
+        let alloc_type = i32_type.fn_type(&[
+            size_type.into(),
+            i64_ptr_type.into(),
+            i64_ptr_type.into(),
+        ], false);
+        self.module.add_function("blood_alloc", alloc_type, None);
+
+        // blood_free(addr: i64, size: i64) -> void
+        let free_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_free", free_type, None);
+
+        // blood_check_generation(expected: i32, actual: i32) -> i32
+        let check_gen_type = i32_type.fn_type(&[i32_type.into(), i32_type.into()], false);
+        self.module.add_function("blood_check_generation", check_gen_type, None);
+
+        // blood_stale_reference_panic(expected: i32, actual: i32) -> void (noreturn)
+        let panic_type = void_type.fn_type(&[i32_type.into(), i32_type.into()], false);
+        self.module.add_function("blood_stale_reference_panic", panic_type, None);
+
+        // blood_panic(msg: *i8) -> void (noreturn)
+        let panic_msg_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("blood_panic", panic_msg_type, None);
+
+        // === Effect Runtime ===
+
+        // blood_evidence_create() -> *void (EvidenceHandle)
+        let void_ptr_type = i8_ptr_type; // Use i8* as void*
+        let ev_create_type = void_ptr_type.fn_type(&[], false);
+        self.module.add_function("blood_evidence_create", ev_create_type, None);
+
+        // blood_evidence_destroy(ev: *void) -> void
+        let ev_destroy_type = void_type.fn_type(&[void_ptr_type.into()], false);
+        self.module.add_function("blood_evidence_destroy", ev_destroy_type, None);
+
+        // blood_evidence_push(ev: *void, handler: i64) -> void
+        let ev_push_type = void_type.fn_type(&[void_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_evidence_push", ev_push_type, None);
+
+        // blood_evidence_pop(ev: *void) -> i64
+        let ev_pop_type = i64_type.fn_type(&[void_ptr_type.into()], false);
+        self.module.add_function("blood_evidence_pop", ev_pop_type, None);
+
+        // blood_evidence_get(ev: *void, index: i64) -> i64
+        let ev_get_type = i64_type.fn_type(&[void_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_evidence_get", ev_get_type, None);
+
+        // blood_evidence_register(ev: *void, effect_id: i64, ops: **void, op_count: i64) -> void
+        let ev_register_type = void_type.fn_type(&[
+            void_ptr_type.into(),
+            i64_type.into(),
+            void_ptr_type.into(),
+            i64_type.into(),
+        ], false);
+        self.module.add_function("blood_evidence_register", ev_register_type, None);
+
+        // blood_evidence_set_state(ev: *void, state: *void) -> void
+        let ev_set_state_type = void_type.fn_type(&[void_ptr_type.into(), void_ptr_type.into()], false);
+        self.module.add_function("blood_evidence_set_state", ev_set_state_type, None);
+
+        // blood_evidence_get_state(ev: *void, index: i64) -> *void
+        let ev_get_state_type = void_ptr_type.fn_type(&[void_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_evidence_get_state", ev_get_state_type, None);
+
+        // blood_evidence_current() -> *void
+        let ev_current_type = void_ptr_type.fn_type(&[], false);
+        self.module.add_function("blood_evidence_current", ev_current_type, None);
+
+        // blood_perform(effect_id: i64, op_index: i32, args: *i64, arg_count: i64) -> i64
+        let perform_type = i64_type.fn_type(&[
+            i64_type.into(),
+            i32_type.into(),
+            i64_ptr_type.into(),
+            i64_type.into(),
+        ], false);
+        self.module.add_function("blood_perform", perform_type, None);
+
+        // blood_handler_depth(effect_id: i64) -> i64
+        let handler_depth_type = i64_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_handler_depth", handler_depth_type, None);
+
+        // === Fiber/Continuation Support ===
+
+        // blood_fiber_create() -> i64
+        let fiber_create_type = i64_type.fn_type(&[], false);
+        self.module.add_function("blood_fiber_create", fiber_create_type, None);
+
+        // blood_fiber_suspend() -> i64
+        let fiber_suspend_type = i64_type.fn_type(&[], false);
+        self.module.add_function("blood_fiber_suspend", fiber_suspend_type, None);
+
+        // blood_fiber_resume(fiber: i64, value: i64) -> void
+        let fiber_resume_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_fiber_resume", fiber_resume_type, None);
+
+        // === Multiple Dispatch Runtime ===
+
+        // blood_dispatch_lookup(method_slot: i64, type_tag: i64) -> *void (function pointer)
+        // Looks up the implementation for a method given the receiver's runtime type.
+        let dispatch_lookup_type = void_ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_dispatch_lookup", dispatch_lookup_type, None);
+
+        // blood_get_type_tag(obj: *void) -> i64
+        // Gets the runtime type tag from an object's header.
+        let get_type_tag_type = i64_type.fn_type(&[void_ptr_type.into()], false);
+        self.module.add_function("blood_get_type_tag", get_type_tag_type, None);
+
+        // blood_dispatch_register(method_slot: i64, type_tag: i64, impl_ptr: *void) -> void
+        // Registers an implementation for a method/type combination in the dispatch table.
+        let dispatch_register_type = void_type.fn_type(&[
+            i64_type.into(),
+            i64_type.into(),
+            void_ptr_type.into(),
+        ], false);
+        self.module.add_function("blood_dispatch_register", dispatch_register_type, None);
+
+        // === Work-Stealing Scheduler ===
+
+        // blood_scheduler_init(num_workers: i64) -> i32
+        let scheduler_init_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_scheduler_init", scheduler_init_type, None);
+
+        // blood_scheduler_spawn(task_fn: *void, arg: *void) -> i64
+        let scheduler_spawn_type = i64_type.fn_type(&[void_ptr_type.into(), void_ptr_type.into()], false);
+        self.module.add_function("blood_scheduler_spawn", scheduler_spawn_type, None);
+
+        // blood_scheduler_spawn_simple(task_fn: *void) -> i64
+        let scheduler_spawn_simple_type = i64_type.fn_type(&[void_ptr_type.into()], false);
+        self.module.add_function("blood_scheduler_spawn_simple", scheduler_spawn_simple_type, None);
+
+        // blood_scheduler_yield() -> void
+        let scheduler_yield_type = void_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_yield", scheduler_yield_type, None);
+
+        // blood_scheduler_run() -> void
+        let scheduler_run_type = void_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_run", scheduler_run_type, None);
+
+        // blood_scheduler_run_background() -> i32
+        let scheduler_run_bg_type = i32_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_run_background", scheduler_run_bg_type, None);
+
+        // blood_scheduler_shutdown() -> void
+        let scheduler_shutdown_type = void_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_shutdown", scheduler_shutdown_type, None);
+
+        // blood_scheduler_wait() -> void
+        let scheduler_wait_type = void_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_wait", scheduler_wait_type, None);
+
+        // blood_scheduler_active_fibers() -> i64
+        let scheduler_active_type = i64_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_active_fibers", scheduler_active_type, None);
+
+        // blood_scheduler_runnable_fibers() -> i64
+        self.module.add_function("blood_scheduler_runnable_fibers", scheduler_active_type, None);
+
+        // blood_scheduler_is_running() -> i32
+        let scheduler_is_running_type = i32_type.fn_type(&[], false);
+        self.module.add_function("blood_scheduler_is_running", scheduler_is_running_type, None);
+
+        // === Runtime Lifecycle ===
+
+        // blood_runtime_init() -> i32
+        let init_type = i32_type.fn_type(&[], false);
+        self.module.add_function("blood_runtime_init", init_type, None);
+
+        // blood_runtime_shutdown() -> void
+        let shutdown_type = void_type.fn_type(&[], false);
+        self.module.add_function("blood_runtime_shutdown", shutdown_type, None);
     }
 
     /// Compile a function body.
@@ -304,8 +516,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Should not reach codegen with these
                 self.context.i32_type().into()
             }
-            TypeKind::Fn { .. } | TypeKind::Slice { .. } => {
-                // Function and slice types - use pointer
+            TypeKind::Fn { .. } => {
+                // Function/closure type - fat pointer struct { fn_ptr: i8*, env_ptr: i8* }
+                let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::default());
+                self.context.struct_type(&[i8_ptr.into(), i8_ptr.into()], false).into()
+            }
+            TypeKind::Slice { .. } => {
+                // Slice type - use pointer
                 self.context.i8_type().ptr_type(AddressSpace::default()).into()
             }
         }
@@ -367,6 +584,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             Binary { op, left, right } => self.compile_binary(op, left, right).map(Some),
             Unary { op, operand } => self.compile_unary(op, operand).map(Some),
             Call { callee, args } => self.compile_call(callee, args),
+            MethodCall { receiver, method, args } => {
+                // Method call: receiver.method(args)
+                // Compiled as method(receiver, args) with potential dynamic dispatch
+                self.compile_method_call(receiver, *method, args, &expr.ty)
+            }
             Block { stmts, expr: tail_expr } => self.compile_block(stmts, tail_expr.as_deref()),
             If { condition, then_branch, else_branch } => {
                 self.compile_if(condition, then_branch, else_branch.as_deref(), &expr.ty)
@@ -481,6 +703,28 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Handle expression: runs body with handler installed.
                 // This sets up the evidence vector and runs the body.
                 self.compile_handle(body, *handler_id, &expr.ty)
+            }
+            Deref(inner) => {
+                // Dereference: *x
+                // For generational references, this should check the generation
+                // before accessing the pointed-to value.
+                self.compile_deref(inner, expr.span)
+            }
+            Borrow { expr: inner, mutable: _ } => {
+                // Borrow: &x or &mut x
+                // Creates a reference to the given expression.
+                // For generational references, this captures the current generation.
+                self.compile_borrow(inner)
+            }
+            AddrOf { expr: inner, mutable: _ } => {
+                // Address-of: raw pointer creation
+                // Creates a raw pointer without generation tracking.
+                self.compile_addr_of(inner)
+            }
+            Closure { body_id, captures } => {
+                // Closure: |x| x + 1
+                // Creates a function for the body and a struct for captures.
+                self.compile_closure(*body_id, captures, &expr.ty, expr.span)
             }
             _ => {
                 self.errors.push(Diagnostic::error(
@@ -742,31 +986,368 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         callee: &hir::Expr,
         args: &[hir::Expr],
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
-        // Get function to call
-        let fn_value = match &callee.kind {
-            hir::ExprKind::Def(def_id) => self.functions.get(def_id).copied(),
-            _ => None,
-        };
+        // First, try to get a direct function reference
+        if let hir::ExprKind::Def(def_id) = &callee.kind {
+            if let Some(&fn_value) = self.functions.get(def_id) {
+                // Direct function call
+                let mut compiled_args = Vec::new();
+                for arg in args {
+                    if let Some(val) = self.compile_expr(arg)? {
+                        compiled_args.push(val.into());
+                    }
+                }
 
-        let fn_value = fn_value.ok_or_else(|| vec![Diagnostic::error(
+                let call = self.builder
+                    .build_call(fn_value, &compiled_args, "call")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                return Ok(call.try_as_basic_value().left());
+            }
+        }
+
+        // Check if this is a closure call (callee is a function type stored in a variable)
+        if matches!(callee.ty.kind(), TypeKind::Fn { .. }) {
+            return self.compile_closure_call(callee, args);
+        }
+
+        Err(vec![Diagnostic::error(
             "Cannot determine function to call",
             callee.span,
-        )])?;
+        )])
+    }
+
+    /// Compile a closure call: calling a closure value stored in a variable.
+    ///
+    /// Closure values are fat pointers: { fn_ptr: *i8, env_ptr: *i8 }
+    /// We extract the function pointer, cast it to the appropriate type,
+    /// and call with (env_ptr, args...).
+    fn compile_closure_call(
+        &mut self,
+        callee: &hir::Expr,
+        args: &[hir::Expr],
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+
+        // Compile the closure expression to get the closure struct
+        let closure_val = self.compile_expr(callee)?
+            .ok_or_else(|| vec![Diagnostic::error("Expected closure value", callee.span)])?;
+
+        // Extract function pointer and environment pointer from the closure struct
+        let (fn_ptr, env_ptr) = match closure_val {
+            BasicValueEnum::StructValue(sv) => {
+                let fn_ptr = self.builder
+                    .build_extract_value(sv, 0, "closure.fn")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?
+                    .into_pointer_value();
+                let env_ptr = self.builder
+                    .build_extract_value(sv, 1, "closure.env")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?
+                    .into_pointer_value();
+                (fn_ptr, env_ptr)
+            }
+            BasicValueEnum::PointerValue(ptr) => {
+                // If it's a pointer to a closure struct, load it first
+                let loaded = self.builder.build_load(ptr, "closure.load")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?;
+                let sv = loaded.into_struct_value();
+                let fn_ptr = self.builder
+                    .build_extract_value(sv, 0, "closure.fn")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?
+                    .into_pointer_value();
+                let env_ptr = self.builder
+                    .build_extract_value(sv, 1, "closure.env")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?
+                    .into_pointer_value();
+                (fn_ptr, env_ptr)
+            }
+            _ => {
+                return Err(vec![Diagnostic::error(
+                    format!("Expected closure struct, got {:?}", closure_val.get_type()),
+                    callee.span,
+                )]);
+            }
+        };
 
         // Compile arguments
-        let mut compiled_args = Vec::new();
+        let mut compiled_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![env_ptr.into()];
         for arg in args {
             if let Some(val) = self.compile_expr(arg)? {
                 compiled_args.push(val.into());
             }
         }
 
-        // Build call
-        let call = self.builder
-            .build_call(fn_value, &compiled_args, "call")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+        // Build function type for the closure
+        let (param_types, return_ty) = match callee.ty.kind() {
+            TypeKind::Fn { params, ret } => (params.clone(), (*ret).clone()),
+            _ => {
+                return Err(vec![Diagnostic::error(
+                    "Expected function type for closure call",
+                    callee.span,
+                )]);
+            }
+        };
 
-        Ok(call.try_as_basic_value().left())
+        // Build LLVM function type: (env_ptr, params...) -> ret
+        let mut fn_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![i8_ptr_type.into()];
+        for param_ty in &param_types {
+            fn_param_types.push(self.lower_type(param_ty).into());
+        }
+
+        let fn_type = if return_ty.is_unit() {
+            self.context.void_type().fn_type(&fn_param_types, false)
+        } else {
+            let ret_llvm = self.lower_type(&return_ty);
+            ret_llvm.fn_type(&fn_param_types, false)
+        };
+
+        // Cast function pointer to the correct type
+        let fn_ptr_type = fn_type.ptr_type(AddressSpace::default());
+        let typed_fn_ptr = self.builder
+            .build_pointer_cast(fn_ptr, fn_ptr_type, "closure.fn.typed")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?;
+
+        // Build the indirect call
+        let call_site = self.builder
+            .build_call(
+                inkwell::values::CallableValue::try_from(typed_fn_ptr)
+                    .map_err(|_| vec![Diagnostic::error("Invalid function pointer for closure call", callee.span)])?,
+                &compiled_args,
+                "closure_call",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?;
+
+        Ok(call_site.try_as_basic_value().left())
+    }
+
+    /// Compile a method call: `receiver.method(args)`
+    ///
+    /// This compiles to `method(receiver, args...)`. For dynamic dispatch
+    /// based on the receiver's type, the dispatch table would be consulted.
+    fn compile_method_call(
+        &mut self,
+        receiver: &hir::Expr,
+        method_id: DefId,
+        args: &[hir::Expr],
+        result_ty: &Type,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        // Compile the receiver (becomes first argument)
+        let receiver_val = self.compile_expr(receiver)?
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Expected value for method receiver",
+                receiver.span,
+            )])?;
+
+        // Compile remaining arguments
+        let mut compiled_args: Vec<inkwell::values::BasicMetadataValueEnum> = vec![receiver_val.into()];
+        for arg in args {
+            if let Some(val) = self.compile_expr(arg)? {
+                compiled_args.push(val.into());
+            }
+        }
+
+        // Check if this method requires dynamic dispatch
+        if let Some(&method_slot) = self.dynamic_dispatch_methods.get(&method_id) {
+            // Dynamic dispatch path: lookup implementation at runtime
+            self.compile_dynamic_dispatch(
+                receiver,
+                &receiver_val,
+                method_slot,
+                &compiled_args,
+                result_ty,
+            )
+        } else {
+            // Static dispatch: call the statically resolved method directly
+            let fn_value = self.functions.get(&method_id).copied()
+                .ok_or_else(|| vec![Diagnostic::error(
+                    format!("Method not found: {:?}", method_id),
+                    receiver.span,
+                )])?;
+
+            let call = self.builder
+                .build_call(fn_value, &compiled_args, "method_call")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?;
+
+            Ok(call.try_as_basic_value().left())
+        }
+    }
+
+    /// Compile a dynamic dispatch call using runtime type lookup.
+    ///
+    /// This implements multiple dispatch by:
+    /// 1. Getting the receiver's runtime type tag
+    /// 2. Looking up the implementation in the dispatch table
+    /// 3. Performing an indirect call through the function pointer
+    fn compile_dynamic_dispatch(
+        &mut self,
+        receiver: &hir::Expr,
+        receiver_val: &BasicValueEnum<'ctx>,
+        method_slot: u64,
+        compiled_args: &[inkwell::values::BasicMetadataValueEnum<'ctx>],
+        result_ty: &Type,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        let i64_type = self.context.i64_type();
+        let i8_type = self.context.i8_type();
+        let i8_ptr_type = i8_type.ptr_type(AddressSpace::default());
+
+        // Get the blood_get_type_tag runtime function
+        let get_type_tag_fn = self.module.get_function("blood_get_type_tag")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_get_type_tag not found",
+                receiver.span,
+            )])?;
+
+        // Get the blood_dispatch_lookup runtime function
+        let dispatch_lookup_fn = self.module.get_function("blood_dispatch_lookup")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_dispatch_lookup not found",
+                receiver.span,
+            )])?;
+
+        // Cast receiver to void* for the type tag lookup
+        let receiver_ptr = match receiver_val {
+            BasicValueEnum::PointerValue(p) => *p,
+            _ => {
+                // For non-pointer types, we need to allocate and store
+                // This shouldn't normally happen for method receivers
+                let alloca = self.builder
+                    .build_alloca(receiver_val.get_type(), "receiver_tmp")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?;
+                self.builder
+                    .build_store(alloca, *receiver_val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?;
+                alloca
+            }
+        };
+
+        let receiver_void_ptr = self.builder
+            .build_pointer_cast(receiver_ptr, i8_ptr_type, "receiver_void")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?;
+
+        // Get the type tag: blood_get_type_tag(receiver)
+        let type_tag = self.builder
+            .build_call(get_type_tag_fn, &[receiver_void_ptr.into()], "type_tag")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| vec![Diagnostic::error("Expected type tag result", receiver.span)])?;
+
+        // Look up the implementation: blood_dispatch_lookup(method_slot, type_tag)
+        let method_slot_val = i64_type.const_int(method_slot, false);
+        let impl_ptr = self.builder
+            .build_call(
+                dispatch_lookup_fn,
+                &[method_slot_val.into(), type_tag.into()],
+                "impl_ptr",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| vec![Diagnostic::error("Expected implementation pointer", receiver.span)])?;
+
+        // Build the function type for the indirect call
+        // Extract parameter types from the BasicMetadataValueEnum values
+        let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = compiled_args
+            .iter()
+            .filter_map(|arg| {
+                // Convert BasicMetadataValueEnum to its type
+                match arg {
+                    inkwell::values::BasicMetadataValueEnum::ArrayValue(v) => Some(v.get_type().into()),
+                    inkwell::values::BasicMetadataValueEnum::IntValue(v) => Some(v.get_type().into()),
+                    inkwell::values::BasicMetadataValueEnum::FloatValue(v) => Some(v.get_type().into()),
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(v) => Some(v.get_type().into()),
+                    inkwell::values::BasicMetadataValueEnum::StructValue(v) => Some(v.get_type().into()),
+                    inkwell::values::BasicMetadataValueEnum::VectorValue(v) => Some(v.get_type().into()),
+                    inkwell::values::BasicMetadataValueEnum::MetadataValue(_) => None,
+                }
+            })
+            .collect();
+
+        // Check if return type is unit (empty tuple)
+        let fn_type = if matches!(result_ty.kind(), TypeKind::Tuple(types) if types.is_empty()) {
+            // Unit return type -> void function
+            self.context.void_type().fn_type(&param_types, false)
+        } else {
+            // Non-unit return type -> use the lowered type
+            let ret_ty = self.lower_type(result_ty);
+            ret_ty.fn_type(&param_types, false)
+        };
+
+        // Cast impl_ptr to the correct function pointer type
+        let fn_ptr_type = fn_type.ptr_type(AddressSpace::default());
+        let impl_ptr_val = impl_ptr.into_pointer_value();
+        let fn_ptr = self.builder
+            .build_pointer_cast(impl_ptr_val, fn_ptr_type, "fn_ptr")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?;
+
+        // Build the call through the function pointer
+        // inkwell's build_call accepts CallableValue which includes function pointers
+        let call_site = self.builder
+            .build_call(
+                inkwell::values::CallableValue::try_from(fn_ptr)
+                    .map_err(|_| vec![Diagnostic::error("Invalid function pointer for dispatch", receiver.span)])?,
+                compiled_args,
+                "dispatch_call",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), receiver.span)])?;
+
+        Ok(call_site.try_as_basic_value().left())
+    }
+
+    /// Mark a method as requiring dynamic dispatch.
+    ///
+    /// Returns the dispatch slot assigned to this method.
+    pub fn mark_dynamic_dispatch(&mut self, method_id: DefId) -> u64 {
+        if let Some(&slot) = self.dynamic_dispatch_methods.get(&method_id) {
+            slot
+        } else {
+            let slot = self.next_dispatch_slot;
+            self.next_dispatch_slot += 1;
+            self.dynamic_dispatch_methods.insert(method_id, slot);
+            slot
+        }
+    }
+
+    /// Register an implementation for a polymorphic method.
+    ///
+    /// This emits code to call blood_dispatch_register at runtime initialization.
+    pub fn emit_dispatch_registration(
+        &mut self,
+        method_slot: u64,
+        type_tag: u64,
+        impl_fn: FunctionValue<'ctx>,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let i64_type = self.context.i64_type();
+        let i8_type = self.context.i8_type();
+        let i8_ptr_type = i8_type.ptr_type(AddressSpace::default());
+
+        let dispatch_register_fn = self.module.get_function("blood_dispatch_register")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_dispatch_register not found",
+                span,
+            )])?;
+
+        let method_slot_val = i64_type.const_int(method_slot, false);
+        let type_tag_val = i64_type.const_int(type_tag, false);
+
+        // Cast function to void*
+        let impl_ptr = self.builder
+            .build_pointer_cast(
+                impl_fn.as_global_value().as_pointer_value(),
+                i8_ptr_type,
+                "impl_void_ptr",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        self.builder
+            .build_call(
+                dispatch_register_fn,
+                &[method_slot_val.into(), type_tag_val.into(), impl_ptr.into()],
+                "",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        Ok(())
     }
 
     /// Compile a pipe expression: `a |> f` becomes `f(a)`
@@ -1830,16 +2411,478 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     // ========================================================================
+    // Generational Pointer Support (Phase 2)
+    // ========================================================================
+
+    /// Emit a generation check for a pointer access.
+    ///
+    /// This validates that a pointer's expected generation matches the actual
+    /// generation at the memory location, detecting use-after-free errors.
+    ///
+    /// Returns true (1) if valid, false (0) if stale.
+    #[allow(dead_code)]
+    fn emit_generation_check(
+        &mut self,
+        expected_gen: IntValue<'ctx>,
+        actual_gen: IntValue<'ctx>,
+        span: Span,
+    ) -> Result<IntValue<'ctx>, Vec<Diagnostic>> {
+        let check_fn = self.module.get_function("blood_check_generation")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_check_generation not found".to_string(),
+                span,
+            )])?;
+
+        let result = self.builder
+            .build_call(check_fn, &[expected_gen.into(), actual_gen.into()], "gen_check")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| vec![Diagnostic::error(
+                "blood_check_generation returned void".to_string(),
+                span,
+            )])?;
+
+        Ok(result.into_int_value())
+    }
+
+    /// Emit a generation check that panics on stale reference.
+    ///
+    /// This is the standard check used for pointer dereferences. If the
+    /// generation doesn't match, it calls blood_stale_reference_panic which
+    /// aborts the program with an error message.
+    #[allow(dead_code)]
+    fn emit_generation_check_or_panic(
+        &mut self,
+        expected_gen: IntValue<'ctx>,
+        actual_gen: IntValue<'ctx>,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let check_result = self.emit_generation_check(expected_gen, actual_gen, span)?;
+
+        // Create basic blocks for the check
+        let current_fn = self.current_fn.ok_or_else(|| {
+            vec![Diagnostic::error("No current function".to_string(), span)]
+        })?;
+
+        let valid_block = self.context.append_basic_block(current_fn, "gen.valid");
+        let panic_block = self.context.append_basic_block(current_fn, "gen.panic");
+
+        // Branch based on check result (0 = invalid, non-zero = valid)
+        let zero = self.context.i32_type().const_int(0, false);
+        let is_valid = self.builder
+            .build_int_compare(IntPredicate::NE, check_result, zero, "is_gen_valid")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        self.builder.build_conditional_branch(is_valid, valid_block, panic_block)
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        // Panic block: call blood_stale_reference_panic
+        self.builder.position_at_end(panic_block);
+        let panic_fn = self.module.get_function("blood_stale_reference_panic")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_stale_reference_panic not found".to_string(),
+                span,
+            )])?;
+
+        self.builder
+            .build_call(panic_fn, &[expected_gen.into(), actual_gen.into()], "")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        self.builder.build_unreachable()
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        // Continue in valid block
+        self.builder.position_at_end(valid_block);
+
+        Ok(())
+    }
+
+    /// Compile a dereference expression: `*x`
+    ///
+    /// For generational references, this validates the generation before
+    /// accessing the pointed-to value. Currently implements basic pointer
+    /// load without generation checking (scaffolded for future integration).
+    fn compile_deref(
+        &mut self,
+        inner: &hir::Expr,
+        span: Span,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        let ptr_val = self.compile_expr(inner)?
+            .ok_or_else(|| vec![Diagnostic::error("Expected pointer value for dereference", span)])?;
+
+        match ptr_val {
+            BasicValueEnum::PointerValue(ptr) => {
+                // TODO: For full generational pointer support, we would:
+                // 1. Extract expected generation from the BloodPtr struct
+                // 2. Call blood_get_generation on the address
+                // 3. Call emit_generation_check_or_panic
+                //
+                // For now, just load through the pointer directly.
+                // Generation checking is scaffolded in emit_generation_check_or_panic.
+
+                let loaded = self.builder.build_load(ptr, "deref")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                Ok(Some(loaded))
+            }
+            _ => {
+                Err(vec![Diagnostic::error(
+                    format!("Cannot dereference non-pointer type: {:?}", ptr_val.get_type()),
+                    span,
+                )])
+            }
+        }
+    }
+
+    /// Compile a borrow expression: `&x` or `&mut x`
+    ///
+    /// Creates a reference to the given expression. For generational references,
+    /// this would capture the current generation of the allocation.
+    fn compile_borrow(
+        &mut self,
+        inner: &hir::Expr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        // For local variables, we get the address of their stack allocation.
+        // For other expressions, we need to evaluate and store them first.
+        match &inner.kind {
+            hir::ExprKind::Local(local_id) => {
+                // Get the stack slot for this local
+                if let Some(&ptr) = self.locals.get(local_id) {
+                    // TODO: For full generational pointer support, we would:
+                    // 1. Create a BloodPtr struct
+                    // 2. Store address, generation (1 for stack), and metadata
+                    //
+                    // For now, just return the raw pointer.
+                    Ok(Some(ptr.into()))
+                } else {
+                    Err(vec![Diagnostic::error(
+                        "Local variable not found for borrow",
+                        inner.span,
+                    )])
+                }
+            }
+            hir::ExprKind::Field { base, field_idx } => {
+                // Borrow of a field - compute address of the field
+                let base_val = self.compile_expr(base)?
+                    .ok_or_else(|| vec![Diagnostic::error("Expected struct value", base.span)])?;
+
+                match base_val {
+                    BasicValueEnum::PointerValue(ptr) => {
+                        // GEP to get field address
+                        let zero = self.context.i32_type().const_int(0, false);
+                        let field_index = self.context.i32_type().const_int(*field_idx as u64, false);
+                        let field_ptr = unsafe {
+                            self.builder.build_gep(ptr, &[zero, field_index], "field.ptr")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?
+                        };
+                        Ok(Some(field_ptr.into()))
+                    }
+                    BasicValueEnum::StructValue(struct_val) => {
+                        // Need to store struct first to get address
+                        let alloca = self.builder
+                            .build_alloca(struct_val.get_type(), "struct.tmp")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?;
+                        self.builder.build_store(alloca, struct_val)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?;
+
+                        let zero = self.context.i32_type().const_int(0, false);
+                        let field_index = self.context.i32_type().const_int(*field_idx as u64, false);
+                        let field_ptr = unsafe {
+                            self.builder.build_gep(alloca, &[zero, field_index], "field.ptr")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?
+                        };
+                        Ok(Some(field_ptr.into()))
+                    }
+                    _ => {
+                        Err(vec![Diagnostic::error(
+                            "Cannot borrow field of non-struct type",
+                            inner.span,
+                        )])
+                    }
+                }
+            }
+            hir::ExprKind::Index { base, index } => {
+                // Borrow of an array element - compute element address
+                let base_val = self.compile_expr(base)?
+                    .ok_or_else(|| vec![Diagnostic::error("Expected array value", base.span)])?;
+                let index_val = self.compile_expr(index)?
+                    .ok_or_else(|| vec![Diagnostic::error("Expected index value", index.span)])?;
+
+                let idx = index_val.into_int_value();
+
+                match base_val {
+                    BasicValueEnum::PointerValue(ptr) => {
+                        let elem_ptr = unsafe {
+                            self.builder.build_gep(ptr, &[idx], "elem.ptr")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?
+                        };
+                        Ok(Some(elem_ptr.into()))
+                    }
+                    BasicValueEnum::ArrayValue(arr) => {
+                        // Store array first to get address
+                        let alloca = self.builder
+                            .build_alloca(arr.get_type(), "arr.tmp")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?;
+                        self.builder.build_store(alloca, arr)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?;
+
+                        let zero = self.context.i32_type().const_int(0, false);
+                        let elem_ptr = unsafe {
+                            self.builder.build_gep(alloca, &[zero, idx], "elem.ptr")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?
+                        };
+                        Ok(Some(elem_ptr.into()))
+                    }
+                    _ => {
+                        Err(vec![Diagnostic::error(
+                            "Cannot borrow index of non-array type",
+                            inner.span,
+                        )])
+                    }
+                }
+            }
+            _ => {
+                // For other expressions, evaluate and store in a temporary
+                let val = self.compile_expr(inner)?
+                    .ok_or_else(|| vec![Diagnostic::error("Cannot borrow void expression", inner.span)])?;
+
+                let ty = val.get_type();
+                let alloca = self.builder
+                    .build_alloca(ty, "borrow.tmp")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?;
+                self.builder.build_store(alloca, val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), inner.span)])?;
+
+                Ok(Some(alloca.into()))
+            }
+        }
+    }
+
+    /// Compile an address-of expression for raw pointers.
+    ///
+    /// Creates a raw pointer without generation tracking.
+    fn compile_addr_of(
+        &mut self,
+        inner: &hir::Expr,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        // For addr_of, we use the same logic as borrow but without
+        // any generation tracking (raw pointers don't have generations).
+        self.compile_borrow(inner)
+    }
+
+    /// Compile a closure expression: `|x| x + 1`
+    ///
+    /// Closures are compiled as:
+    /// 1. An environment struct containing captured variables
+    /// 2. A function that takes the environment as its first parameter
+    /// 3. A fat pointer struct containing (fn_ptr, env_ptr)
+    fn compile_closure(
+        &mut self,
+        body_id: hir::BodyId,
+        captures: &[hir::Capture],
+        closure_ty: &Type,
+        span: Span,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        // Get the closure body
+        let body = self.closure_bodies.get(&body_id).cloned()
+            .ok_or_else(|| vec![Diagnostic::error(
+                format!("Closure body not found: {:?}", body_id),
+                span,
+            )])?;
+
+        // Generate a unique name for this closure
+        let closure_name = format!("__closure_{}", self.closure_counter);
+        self.closure_counter += 1;
+
+        // Get closure parameter and return types from the closure type
+        let (param_types, return_ty): (Vec<Type>, Type) = match closure_ty.kind() {
+            TypeKind::Fn { params, ret } => {
+                (params.clone(), (*ret).clone())
+            }
+            _ => {
+                // Infer from body if type isn't Fn
+                let params: Vec<Type> = body.params()
+                    .map(|l| l.ty.clone())
+                    .collect();
+                let return_ty = body.expr.ty.clone();
+                (params, return_ty)
+            }
+        };
+
+        // Create environment struct type from captures using actual types
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let env_types: Vec<BasicTypeEnum<'ctx>> = captures.iter()
+            .filter_map(|cap| {
+                // Get the type from the outer function's local alloca
+                self.locals.get(&cap.local_id).map(|alloca| {
+                    alloca.get_type().get_element_type().try_into().unwrap_or(self.context.i64_type().into())
+                })
+            })
+            .collect();
+
+        let env_struct_type = if env_types.is_empty() {
+            self.context.struct_type(&[], false)
+        } else {
+            self.context.struct_type(&env_types, false)
+        };
+
+        // Create function type: (env_ptr, params...) -> return_type
+        let mut fn_param_types: Vec<BasicTypeEnum<'ctx>> = vec![i8_ptr_type.into()];
+        for param_ty in &param_types {
+            fn_param_types.push(self.lower_type(param_ty));
+        }
+
+        let fn_type = if return_ty.is_unit() {
+            self.context.void_type().fn_type(
+                &fn_param_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(),
+                false
+            )
+        } else {
+            let ret_llvm = self.lower_type(&return_ty);
+            ret_llvm.fn_type(
+                &fn_param_types.iter().map(|t| (*t).into()).collect::<Vec<_>>(),
+                false
+            )
+        };
+
+        // Create the closure function
+        let fn_value = self.module.add_function(&closure_name, fn_type, None);
+
+        // Save current function context
+        let saved_fn = self.current_fn;
+        let saved_locals = std::mem::take(&mut self.locals);
+
+        // Compile the closure body
+        self.current_fn = Some(fn_value);
+        let entry = self.context.append_basic_block(fn_value, "entry");
+        self.builder.position_at_end(entry);
+
+        // Set up environment access - first parameter is the environment pointer
+        let env_ptr = fn_value.get_first_param()
+            .ok_or_else(|| vec![Diagnostic::error("Closure missing env parameter", span)])?
+            .into_pointer_value();
+        let typed_env_ptr = self.builder
+            .build_pointer_cast(env_ptr, env_struct_type.ptr_type(AddressSpace::default()), "env")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        // Map captured variables from environment struct
+        for (i, cap) in captures.iter().enumerate() {
+            if let Some(&outer_alloca) = saved_locals.get(&cap.local_id) {
+                // Get the type of the captured variable from the outer local
+                let cap_type = outer_alloca.get_type().get_element_type();
+                let cap_basic_type: BasicTypeEnum<'ctx> = cap_type.try_into()
+                    .unwrap_or(self.context.i64_type().into());
+
+                let zero = self.context.i32_type().const_int(0, false);
+                let idx = self.context.i32_type().const_int(i as u64, false);
+                let cap_ptr = unsafe {
+                    self.builder.build_gep(typed_env_ptr, &[zero, idx], "cap.ptr")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                };
+                let local_alloca = self.builder
+                    .build_alloca(cap_basic_type, "cap.local")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                let cap_val = self.builder.build_load(cap_ptr, "cap.val")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.builder.build_store(local_alloca, cap_val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.locals.insert(cap.local_id, local_alloca);
+            }
+        }
+
+        // Set up parameters (skip first env param)
+        let param_locals: Vec<_> = body.params().collect();
+        for (i, local) in param_locals.iter().enumerate() {
+            let param_idx = (i + 1) as u32;
+            if let Some(param_val) = fn_value.get_nth_param(param_idx) {
+                let alloca = self.builder
+                    .build_alloca(param_val.get_type(), &format!("param.{}", i))
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.builder.build_store(alloca, param_val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.locals.insert(local.id, alloca);
+            }
+        }
+
+        // Compile the body expression
+        let result = self.compile_expr(&body.expr)?;
+
+        // Return the result
+        if return_ty.is_unit() || result.is_none() {
+            self.builder.build_return(None)
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        } else if let Some(ret_val) = result {
+            self.builder.build_return(Some(&ret_val))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        }
+
+        // Restore context
+        self.current_fn = saved_fn;
+        self.locals = saved_locals;
+
+        // Position builder back at saved location
+        if let Some(fn_val) = saved_fn {
+            if let Some(last_block) = fn_val.get_last_basic_block() {
+                self.builder.position_at_end(last_block);
+            }
+        }
+
+        // Create environment and populate with captured values
+        let env_alloca = self.builder
+            .build_alloca(env_struct_type, "closure.env")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        for (i, cap) in captures.iter().enumerate() {
+            if let Some(&cap_ptr) = self.locals.get(&cap.local_id) {
+                let zero = self.context.i32_type().const_int(0, false);
+                let idx = self.context.i32_type().const_int(i as u64, false);
+                let field_ptr = unsafe {
+                    self.builder.build_gep(env_alloca, &[zero, idx], "env.field")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                };
+                // Load the captured value and store directly with its actual type
+                let val = self.builder.build_load(cap_ptr, "cap.val")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.builder.build_store(field_ptr, val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+            }
+        }
+
+        // Create closure struct: { fn_ptr, env_ptr }
+        let fn_ptr = fn_value.as_global_value().as_pointer_value();
+        let fn_ptr_as_i8 = self.builder
+            .build_pointer_cast(fn_ptr, i8_ptr_type, "fn.ptr")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        let env_ptr_as_i8 = self.builder
+            .build_pointer_cast(env_alloca, i8_ptr_type, "env.ptr")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+        let closure_struct_type = self.context.struct_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+        let mut closure_val = closure_struct_type.get_undef();
+        closure_val = self.builder
+            .build_insert_value(closure_val, fn_ptr_as_i8, 0, "closure.fn")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+            .into_struct_value();
+        closure_val = self.builder
+            .build_insert_value(closure_val, env_ptr_as_i8, 1, "closure.env")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+            .into_struct_value();
+
+        Ok(Some(closure_val.into()))
+    }
+
+    // ========================================================================
     // Effects System Codegen (Phase 2)
     // ========================================================================
 
     /// Compile a perform expression: `perform Effect.op(args)`
     ///
     /// In the evidence passing model (ICFP'21), this becomes a call through
-    /// the evidence vector: `ev[idx].op(args)`.
+    /// the evidence vector via `blood_perform` runtime function.
     ///
-    /// For Phase 2.1, we implement direct function calls. Full evidence
-    /// passing with runtime vectors comes in Phase 2.4.
+    /// Implementation follows:
+    /// - [Generalized Evidence Passing for Effect Handlers](https://dl.acm.org/doi/10.1145/3473576) (ICFP'21)
+    /// - [Zero-Overhead Lexical Effect Handlers](https://doi.org/10.1145/3763177) (OOPSLA'25)
     fn compile_perform(
         &mut self,
         effect_id: DefId,
@@ -1847,50 +2890,141 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         args: &[hir::Expr],
         result_ty: &Type,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
-        // Phase 2.1: Basic evidence passing
-        //
-        // For now, we look up the handler function and call it directly.
-        // The full evidence vector approach will be added in Phase 2.4.
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
 
-        // Compile arguments
+        // Get blood_perform runtime function
+        let perform_fn = self.module.get_function("blood_perform")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_perform not found".to_string(),
+                Span::dummy(),
+            )])?;
+
+        // Compile arguments and pack into an i64 array
         let mut compiled_args = Vec::with_capacity(args.len());
         for arg in args {
             if let Some(val) = self.compile_expr(arg)? {
-                compiled_args.push(val.into());
+                // Convert to i64 for uniform argument passing
+                let i64_val = match val {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 64 {
+                            iv
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, i64_type, "arg_ext")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        }
+                    }
+                    BasicValueEnum::FloatValue(fv) => {
+                        // Bitcast float to i64 for passing through uniform interface
+                        self.builder
+                            .build_bit_cast(fv, i64_type, "float_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .into_int_value()
+                    }
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.builder
+                            .build_ptr_to_int(pv, i64_type, "ptr_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    }
+                    _ => i64_type.const_zero(), // Unsupported type
+                };
+                compiled_args.push(i64_val);
             }
         }
 
-        // Look up the handler function by effect and operation
-        // For now, we generate a synthetic function name
-        let handler_fn_name = format!("__effect_{}_op_{}", effect_id.index, op_index);
-
-        if let Some(handler_fn) = self.module.get_function(&handler_fn_name) {
-            // Call the handler function
-            let call_result = self.builder
-                .build_call(handler_fn, &compiled_args, "perform_result")
+        // Allocate stack space for arguments array
+        let arg_count = compiled_args.len();
+        let args_array = if arg_count > 0 {
+            let array_type = i64_type.array_type(arg_count as u32);
+            let args_alloca = self.builder
+                .build_alloca(array_type, "perform_args")
                 .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
-            // Get the result value if not void
-            if result_ty.is_unit() {
-                Ok(None)
-            } else {
-                Ok(call_result.try_as_basic_value().left())
-            }
-        } else {
-            // Handler not found - this would be caught earlier by type checking
-            // For now, return a default value or error
-            self.errors.push(Diagnostic::error(
-                format!("Effect handler not found: effect={:?}, op={}", effect_id, op_index),
-                Span::dummy(),
-            ));
+            // Store each argument in the array
+            let zero = i32_type.const_zero();
+            for (i, arg_val) in compiled_args.iter().enumerate() {
+                let idx = i32_type.const_int(i as u64, false);
+                let gep = unsafe {
+                    self.builder.build_gep(
+                        args_alloca,
+                        &[zero, idx],
+                        &format!("arg_ptr_{}", i),
+                    )
+                }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
-            // Return a default value based on result type
-            if result_ty.is_unit() {
-                Ok(None)
-            } else {
-                // Return undefined value (will be caught by tests)
-                Ok(Some(self.context.i32_type().const_int(0, false).into()))
+                self.builder
+                    .build_store(gep, *arg_val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
             }
+
+            // Get pointer to first element
+            unsafe {
+                self.builder.build_gep(
+                    args_alloca,
+                    &[zero, zero],
+                    "args_ptr",
+                )
+            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+        } else {
+            // No arguments - pass null pointer
+            i64_type.ptr_type(inkwell::AddressSpace::default()).const_null()
+        };
+
+        // Call blood_perform(effect_id, op_index, args, arg_count)
+        let effect_id_val = i64_type.const_int(effect_id.index as u64, false);
+        let op_index_val = i32_type.const_int(op_index as u64, false);
+        let arg_count_val = i64_type.const_int(arg_count as u64, false);
+
+        let call_result = self.builder
+            .build_call(
+                perform_fn,
+                &[
+                    effect_id_val.into(),
+                    op_index_val.into(),
+                    args_array.into(),
+                    arg_count_val.into(),
+                ],
+                "perform_result",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+        // Get the result value and convert to appropriate type
+        if result_ty.is_unit() {
+            Ok(None)
+        } else {
+            let result_i64 = call_result.try_as_basic_value().left()
+                .ok_or_else(|| vec![Diagnostic::error(
+                    "blood_perform returned void unexpectedly".to_string(),
+                    Span::dummy(),
+                )])?;
+
+            // Convert result from i64 to expected type
+            let result_llvm_type = self.lower_type(result_ty);
+            let converted_result = if result_llvm_type.is_int_type() {
+                let result_int_type = result_llvm_type.into_int_type();
+                if result_int_type.get_bit_width() == 64 {
+                    result_i64
+                } else {
+                    self.builder
+                        .build_int_truncate(result_i64.into_int_value(), result_int_type, "result_trunc")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .into()
+                }
+            } else if result_llvm_type.is_float_type() {
+                self.builder
+                    .build_bit_cast(result_i64, result_llvm_type, "result_float")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+            } else if result_llvm_type.is_pointer_type() {
+                self.builder
+                    .build_int_to_ptr(result_i64.into_int_value(), result_llvm_type.into_pointer_type(), "result_ptr")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .into()
+            } else {
+                result_i64
+            };
+
+            Ok(Some(converted_result))
         }
     }
 
@@ -1933,23 +3067,64 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     fn compile_handle(
         &mut self,
         body: &hir::Expr,
-        _handler_id: DefId,
+        handler_id: DefId,
         result_ty: &Type,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
-        // Phase 2.1: Basic handler installation
+        // Phase 2.4: Evidence vector setup
         //
-        // For now, we simply compile the body. The evidence vector setup
-        // will be added in Phase 2.4.
+        // 1. Create evidence vector (or get existing one)
+        // 2. Push handler onto evidence vector
+        // 3. Compile body
+        // 4. Pop handler from evidence vector
+        // 5. Return result
 
-        // TODO(Phase 2.4): Set up evidence vector with handler
-        // let evidence = self.create_evidence_vector(handler_id);
-        // self.push_evidence(evidence);
+        // Get runtime functions
+        let ev_create = self.module.get_function("blood_evidence_create")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_evidence_create not found".to_string(),
+                Span::dummy(),
+            )])?;
+        let ev_push = self.module.get_function("blood_evidence_push")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_evidence_push not found".to_string(),
+                Span::dummy(),
+            )])?;
+        let ev_pop = self.module.get_function("blood_evidence_pop")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_evidence_pop not found".to_string(),
+                Span::dummy(),
+            )])?;
+        let ev_destroy = self.module.get_function("blood_evidence_destroy")
+            .ok_or_else(|| vec![Diagnostic::error(
+                "Runtime function blood_evidence_destroy not found".to_string(),
+                Span::dummy(),
+            )])?;
+
+        // Create evidence vector
+        let ev = self.builder.build_call(ev_create, &[], "evidence")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| vec![Diagnostic::error(
+                "blood_evidence_create returned void".to_string(),
+                Span::dummy(),
+            )])?;
+
+        // Push handler ID onto evidence vector as i64
+        let handler_ptr = self.context.i64_type().const_int(handler_id.index as u64, false);
+        self.builder.build_call(ev_push, &[ev.into(), handler_ptr.into()], "")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
         // Compile the body
         let result = self.compile_expr(body)?;
 
-        // TODO(Phase 2.4): Pop evidence vector
-        // self.pop_evidence();
+        // Pop handler from evidence vector
+        self.builder.build_call(ev_pop, &[ev.into()], "")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+        // Destroy evidence vector
+        self.builder.build_call(ev_destroy, &[ev.into()], "")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
         // Return result with proper type
         if result_ty.is_unit() {
@@ -2711,7 +3886,11 @@ mod tests {
     // Effects System Codegen Tests (Phase 2)
     // ========================================================================
 
-    /// Test perform expression creates placeholder for effect operation
+    /// Test perform expression generates blood_perform runtime call
+    ///
+    /// With the evidence passing model (ICFP'21), handler lookup is deferred to runtime.
+    /// Compilation succeeds and emits a call to blood_perform, which will dispatch
+    /// to the appropriate handler at runtime.
     #[test]
     fn test_codegen_perform_basic() {
         let effect_id = DefId::new(100);
@@ -2733,14 +3912,15 @@ mod tests {
         let mut codegen = CodegenContext::new(&context, &module, &builder);
         let result = codegen.compile_crate(&hir_crate);
 
-        // With no handler registered, codegen returns error about missing handler
-        // The key test is that it doesn't panic and produces the expected error
-        assert!(result.is_err(), "Perform should error when handler not found");
-        let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| e.message.contains("Effect handler not found")));
+        // With runtime dispatch, compilation succeeds - handler lookup happens at runtime
+        assert!(result.is_ok(), "Perform codegen should succeed: {:?}", result.err());
+
+        // Verify blood_perform function is declared
+        assert!(module.get_function("blood_perform").is_some(),
+            "blood_perform should be declared");
     }
 
-    /// Test perform with no arguments
+    /// Test perform with no arguments generates correct runtime call
     #[test]
     fn test_codegen_perform_no_args() {
         let effect_id = DefId::new(101);
@@ -2762,9 +3942,8 @@ mod tests {
         let mut codegen = CodegenContext::new(&context, &module, &builder);
         let result = codegen.compile_crate(&hir_crate);
 
-        assert!(result.is_err(), "Perform should error when handler not found");
-        let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| e.message.contains("Effect handler not found")));
+        // With runtime dispatch, compilation succeeds even without handlers
+        assert!(result.is_ok(), "Perform codegen should succeed: {:?}", result.err());
     }
 
     /// Test resume expression (tail-resumptive)
