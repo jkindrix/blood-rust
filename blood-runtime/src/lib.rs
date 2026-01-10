@@ -45,6 +45,7 @@
 #![warn(rust_2018_idioms)]
 
 pub mod channel;
+pub mod continuation;
 pub mod fiber;
 pub mod ffi;
 pub mod ffi_exports;
