@@ -25,17 +25,23 @@
 //! - Match arms (from scrutinee type)
 //! - Generic instantiation
 
+pub mod ambiguity;
 pub mod context;
+pub mod dispatch;
 pub mod effect;
 pub mod error;
 pub mod infer;
+pub mod methods;
 pub mod resolve;
 pub mod unify;
 
+pub use ambiguity::{Ambiguity, AmbiguityChecker, AmbiguityCheckResult};
 pub use context::TypeContext;
+pub use dispatch::{DispatchResolver, DispatchResult, MethodCandidate};
 pub use effect::EffectUnifier;
 pub use error::{TypeError, TypeErrorKind};
 pub use infer::TypeInference;
+pub use methods::{MethodFamily, MethodRegistry};
 pub use resolve::{Resolver, Scope, ScopeKind};
 pub use unify::Unifier;
 
