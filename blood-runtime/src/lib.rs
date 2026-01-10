@@ -47,6 +47,7 @@
 pub mod channel;
 pub mod fiber;
 pub mod ffi;
+pub mod ffi_exports;
 pub mod io;
 pub mod memory;
 pub mod scheduler;

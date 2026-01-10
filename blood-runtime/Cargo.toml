@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Runtime library for the Blood programming language"
 
+[lib]
+# Build as both Rust library and C-compatible static/dynamic library
+crate-type = ["rlib", "staticlib", "cdylib"]
+
 [dependencies]
 # Concurrency primitives
 crossbeam-deque = "0.8"
