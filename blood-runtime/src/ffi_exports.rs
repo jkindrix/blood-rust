@@ -101,22 +101,20 @@ pub unsafe extern "C" fn blood_alloc(
         Err(_) => return -2,
     };
 
-    unsafe {
-        let ptr = std::alloc::alloc(layout);
-        if ptr.is_null() {
-            return -3;
-        }
-
-        // Create a BloodPtr with initial generation (region allocation)
-        let blood_ptr = BloodPtr::new(
-            ptr as usize,
-            generation::FIRST,
-            PointerMetadata::REGION,
-        );
-
-        *out_addr = blood_ptr.address() as u64;
-        *out_gen_meta = ((blood_ptr.generation() as u64) << 32) | (blood_ptr.metadata().bits() as u64);
+    let ptr = std::alloc::alloc(layout);
+    if ptr.is_null() {
+        return -3;
     }
+
+    // Create a BloodPtr with initial generation (region allocation)
+    let blood_ptr = BloodPtr::new(
+        ptr as usize,
+        generation::FIRST,
+        PointerMetadata::REGION,
+    );
+
+    *out_addr = blood_ptr.address() as u64;
+    *out_gen_meta = ((blood_ptr.generation() as u64) << 32) | (blood_ptr.metadata().bits() as u64);
 
     0
 }
