@@ -30,12 +30,14 @@
 //! - [`namespace`]: Name-to-hash mappings
 //! - [`vft`]: Virtual Function Table for runtime dispatch
 
+pub mod build_cache;
 pub mod canonical;
 pub mod hash;
 pub mod namespace;
 pub mod storage;
 pub mod vft;
 
+pub use build_cache::{BuildCache, CacheStats, CacheError, hash_hir_item};
 pub use canonical::{CanonicalAST, Canonicalizer, DeBruijnIndex};
 pub use hash::{ContentHash, HashDisplay, FORMAT_VERSION};
 pub use namespace::{Namespace, NameBinding};
