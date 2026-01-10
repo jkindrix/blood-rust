@@ -538,10 +538,8 @@ impl LivenessAnalysis {
                     Self::collect_operand_uses(arg, uses);
                 }
             }
-            TerminatorKind::Resume { value } => {
-                if let Some(op) = value {
-                    Self::collect_operand_uses(op, uses);
-                }
+            TerminatorKind::Resume { value: Some(op) } => {
+                Self::collect_operand_uses(op, uses);
             }
             TerminatorKind::StaleReference { ptr, .. } => {
                 uses.insert(ptr.local);

@@ -544,10 +544,8 @@ impl<'hir> FunctionLowering<'hir> {
         let mut branches = Vec::new();
 
         for (i, arm) in arms.iter().enumerate() {
-            if let PatternKind::Literal(lit) = &arm.pattern.kind {
-                if let LiteralValue::Int(v) = lit {
-                    branches.push((*v as u128, arm_blocks[i]));
-                }
+            if let PatternKind::Literal(LiteralValue::Int(v)) = &arm.pattern.kind {
+                branches.push((*v as u128, arm_blocks[i]));
             }
         }
 

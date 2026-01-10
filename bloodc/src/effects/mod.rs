@@ -7,6 +7,25 @@
 //! Blood's effect system is based on research from:
 //! - [Type Directed Compilation of Row-Typed Algebraic Effects](https://dl.acm.org/doi/10.1145/3093333.3009872) (POPL'17)
 //! - [Generalized Evidence Passing for Effect Handlers](https://dl.acm.org/doi/10.1145/3473576) (ICFP'21)
+//! - [Lexical Effect Handlers, Directly](https://dl.acm.org/doi/10.1145/3689770) (OOPSLA'24)
+//! - [Zero-Overhead Lexical Effect Handlers](https://doi.org/10.1145/3763177) (OOPSLA'25)
+//! - [Parallel Algebraic Effect Handlers](https://icfp24.sigplan.org/details/icfp-2024-papers/27/Parallel-Algebraic-Effect-Handlers) (ICFP'24)
+//! - [Optimize Effect Handling for Tail-resumption with Stack Unwinding](https://dl.acm.org/doi/10.1145/3732771.3742721) (SLE'25)
+//!
+//! ## Key Optimizations
+//!
+//! ### Tail-Resumptive Handlers
+//!
+//! Most handlers in practice are "tail-resumptive" (resume exactly once in tail position).
+//! These are optimized to avoid continuation capture, achieving up to 150M ops/sec
+//! (per SLE'25 research). Common examples: State, Reader, Writer effects.
+//!
+//! ### Lexical Scoping
+//!
+//! Blood uses lexically scoped handlers (per OOPSLA'24/25) which enable:
+//! - Local reasoning about handler behavior
+//! - Zero-overhead implementation when no effects raised
+//! - Type-directed stack walking for handler lookup
 //!
 //! ## Implementation Strategy
 //!
@@ -32,8 +51,9 @@
 //! - [`evidence`] - Evidence vectors and evidence passing
 //! - [`handler`] - Handler compilation and continuation capture
 //! - [`lowering`] - HIR to effect-free translation
+//! - [`std_effects`] - Standard effects (State, Error, IO)
 //!
-//! ## Phase 2 Implementation Plan
+//! ## Implementation Status
 //!
 //! | Phase | Description | Status |
 //! |-------|-------------|--------|
@@ -41,6 +61,8 @@
 //! | 2.2 | Tail-resumptive optimization | Complete |
 //! | 2.3 | Segmented stack continuations | Pending |
 //! | 2.4 | Evidence fusion optimization | Pending |
+//! | 2.5 | Zero-overhead lexical handlers | Future |
+//! | 2.6 | Parallel effect handlers | Future |
 
 pub mod evidence;
 pub mod handler;

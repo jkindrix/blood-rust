@@ -129,7 +129,7 @@ impl fmt::Display for HashDisplay {
 
             // Extract 5-bit groups
             let bits = chunk.len() * 8;
-            let chars = (bits + 4) / 5;
+            let chars = bits.div_ceil(5);
             for i in 0..chars {
                 let idx = ((acc >> (35 - i * 5)) & 0x1f) as usize;
                 output.push(BASE32[idx] as char);

@@ -48,9 +48,10 @@ pub fn next_fiber_id() -> FiberId {
 }
 
 /// Fiber execution state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FiberState {
     /// Ready to run.
+    #[default]
     Runnable,
     /// Currently executing on a worker thread.
     Running,
@@ -66,29 +67,18 @@ pub enum FiberState {
     Cancelled,
 }
 
-impl Default for FiberState {
-    fn default() -> Self {
-        Self::Runnable
-    }
-}
-
 /// Priority level for fibers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Priority {
     /// Low priority (background tasks).
     Low = 0,
     /// Normal priority (default).
+    #[default]
     Normal = 1,
     /// High priority (latency-sensitive).
     High = 2,
     /// Critical priority (system tasks).
     Critical = 3,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Configuration for fiber creation.
@@ -271,6 +261,8 @@ pub struct Fiber {
     /// The fiber's task (boxed closure).
     task: Option<Box<dyn FnOnce() + Send>>,
     /// Result value (if completed).
+    /// Reserved for future use when fiber join returns results.
+    #[allow(dead_code)]
     result: Option<Box<dyn std::any::Any + Send>>,
 }
 

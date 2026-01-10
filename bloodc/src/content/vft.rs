@@ -20,9 +20,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::hash::ContentHash;
 
 /// Calling convention for VFT entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CallingConvention {
     /// Standard Blood calling convention.
+    #[default]
     Blood,
     /// Tail-call optimized.
     Tail,
@@ -30,12 +31,6 @@ pub enum CallingConvention {
     Effect,
     /// FFI callback.
     Foreign,
-}
-
-impl Default for CallingConvention {
-    fn default() -> Self {
-        Self::Blood
-    }
 }
 
 /// Bit flags for effect categories.

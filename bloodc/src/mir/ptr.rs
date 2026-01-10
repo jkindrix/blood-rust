@@ -224,12 +224,13 @@ pub const FREED_GENERATION: u32 = 0;
 /// | 0 | Stack | Lexical scope | Compile-time proof |
 /// | 1 | Region | Explicit scope | Generational check |
 /// | 2 | Persistent | Reference-counted | Deferred RC |
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum MemoryTier {
     /// Stack allocation (thin pointers, no runtime check).
     Stack = 0,
     /// Region allocation (generational check).
+    #[default]
     Region = 1,
     /// Persistent allocation (reference counted).
     Persistent = 2,
@@ -264,11 +265,6 @@ impl MemoryTier {
     }
 }
 
-impl Default for MemoryTier {
-    fn default() -> Self {
-        MemoryTier::Region
-    }
-}
 
 // ============================================================================
 // Pointer Flags

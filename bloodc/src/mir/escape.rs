@@ -48,10 +48,11 @@ use super::types::{
 /// The escape state of a value.
 ///
 /// Forms a lattice: NoEscape < ArgEscape < GlobalEscape
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum EscapeState {
     /// Value does not escape its defining function.
     /// Can be stack-allocated (Tier 0).
+    #[default]
     NoEscape,
 
     /// Value escapes via function argument but not globally.
@@ -84,11 +85,6 @@ impl EscapeState {
     }
 }
 
-impl Default for EscapeState {
-    fn default() -> Self {
-        EscapeState::NoEscape
-    }
-}
 
 // ============================================================================
 // Escape Results
