@@ -73,6 +73,8 @@ pub enum ScopeKind {
     Module,
     /// A function scope.
     Function,
+    /// A closure scope.
+    Closure,
     /// A block scope.
     Block,
     /// A loop scope.
