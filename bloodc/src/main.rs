@@ -505,7 +505,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Lower to MIR (Phase 3 integration point)
     let mut mir_lowering = mir::MirLowering::new(&hir_crate);
-    let escape_analysis = match mir_lowering.lower_crate() {
+    let mir_result = match mir_lowering.lower_crate() {
         Ok(mir_bodies) => {
             if verbosity > 1 {
                 eprintln!("MIR lowering passed. {} function bodies.", mir_bodies.len());
@@ -521,10 +521,19 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
             if verbosity > 1 {
                 eprintln!("Escape analysis complete. {} functions analyzed.", escape_results.len());
+                // Report tier recommendations
+                for (&def_id, results) in &escape_results {
+                    let stack_count = results.stack_promotable.len();
+                    let effect_captured = results.effect_captured.len();
+                    if verbosity > 2 {
+                        eprintln!("  {:?}: {} stack-promotable, {} effect-captured",
+                            def_id, stack_count, effect_captured);
+                    }
+                }
             }
 
-            // Return results for use by codegen
-            Some(escape_results)
+            // Return MIR bodies and escape analysis for MIR-based codegen
+            Some((mir_bodies, escape_results))
         }
         Err(errors) => {
             // MIR lowering errors are non-fatal for now - fall back to HIR codegen
@@ -538,115 +547,158 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
     };
 
-    // Generate LLVM IR (with escape analysis if available)
-    let ir_result = if let Some(ref escape_map) = escape_analysis {
-        codegen::compile_to_ir_with_analysis(&hir_crate, escape_map)
-    } else {
-        codegen::compile_to_ir(&hir_crate)
+    // Compute crate hash for incremental compilation cache lookup
+    let crate_hash = {
+        let mut crate_hasher = ContentHasher::new();
+        let mut sorted_hashes: Vec<_> = definition_hashes.values().collect();
+        sorted_hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for hash in sorted_hashes {
+            crate_hasher.update_hash(hash);
+        }
+        crate_hasher.finalize()
     };
 
-    match ir_result {
-        Ok(ir) => {
-            if args.debug {
-                println!("{}", ir);
+    // Determine output paths
+    let output_obj = args.file.with_extension("o");
+    let output_exe = args.file.with_extension("");
+
+    // Check cache for pre-compiled object
+    let cache_hit = build_cache.has_object(&crate_hash);
+    let mut used_cache = false;
+
+    if cache_hit && !args.debug {
+        // Try to use cached object
+        match build_cache.get_object(&crate_hash) {
+            Ok(Some(cached_data)) => {
+                // Write cached object to output
+                if let Err(e) = std::fs::write(&output_obj, &cached_data) {
+                    if verbosity > 0 {
+                        eprintln!("Warning: Failed to write cached object: {}", e);
+                    }
+                } else {
+                    if verbosity > 0 {
+                        eprintln!("Using cached object file ({})", crate_hash.short_display());
+                    }
+                    used_cache = true;
+                }
             }
+            Ok(None) => {
+                if verbosity > 1 {
+                    eprintln!("Cache miss: object not found for {}", crate_hash.short_display());
+                }
+            }
+            Err(e) => {
+                if verbosity > 0 {
+                    eprintln!("Warning: Cache read error: {}", e);
+                }
+            }
+        }
+    }
 
-            // Determine output path
-            let output_obj = args.file.with_extension("o");
-            let output_exe = args.file.with_extension("");
+    // Generate LLVM IR and compile if not using cached object
+    if !used_cache {
+        // Generate LLVM IR
+        // Use MIR codegen path when MIR lowering succeeds, HIR path as fallback
+        let ir_result = if let Some((ref mir_bodies, ref escape_map)) = mir_result {
+            if verbosity > 0 {
+                eprintln!("Using MIR-based code generation (escape analysis enabled)");
+            }
+            codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map)
+        } else {
+            codegen::compile_to_ir(&hir_crate)
+        };
 
-            // Compile to object file (with escape analysis if available)
-            let compile_result = if let Some(ref escape_map) = escape_analysis {
-                codegen::compile_to_object_with_analysis(&hir_crate, escape_map, &output_obj)
-            } else {
-                codegen::compile_to_object(&hir_crate, &output_obj)
-            };
+        match ir_result {
+            Ok(ir) => {
+                if args.debug {
+                    println!("{}", ir);
+                }
 
-            if let Err(errors) = compile_result {
+                // Compile to object file
+                // Use MIR codegen path when MIR lowering succeeds, HIR path as fallback
+                let compile_result = if let Some((ref mir_bodies, ref escape_map)) = mir_result {
+                    codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, &output_obj)
+                } else {
+                    codegen::compile_to_object(&hir_crate, &output_obj)
+                };
+
+                if let Err(errors) = compile_result {
+                    for error in &errors {
+                        emitter.emit(error);
+                    }
+                    eprintln!("Build failed: codegen errors.");
+                    return ExitCode::from(1);
+                }
+
+                if verbosity > 0 {
+                    eprintln!("Generated object file: {}", output_obj.display());
+                }
+
+                // Cache the compiled object file for incremental builds
+                if let Ok(object_data) = std::fs::read(&output_obj) {
+                    if let Err(e) = build_cache.store_object(crate_hash, &object_data) {
+                        if verbosity > 0 {
+                            eprintln!("Warning: Failed to cache object file: {}", e);
+                        }
+                    } else if verbosity > 1 {
+                        eprintln!("Cached compiled object: {}", crate_hash.short_display());
+                    }
+
+                    // Store LLVM IR in cache for debugging
+                    if args.debug {
+                        if let Err(e) = build_cache.store_ir(&crate_hash, &ir) {
+                            if verbosity > 0 {
+                                eprintln!("Warning: Failed to cache IR: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(errors) => {
                 for error in &errors {
                     emitter.emit(error);
                 }
                 eprintln!("Build failed: codegen errors.");
                 return ExitCode::from(1);
             }
-
-            if verbosity > 0 {
-                eprintln!("Generated object file: {}", output_obj.display());
-            }
-
-            // Cache the compiled object file for incremental builds
-            if let Ok(object_data) = std::fs::read(&output_obj) {
-                // Compute a hash for the entire crate (combination of all definition hashes)
-                let mut crate_hasher = ContentHasher::new();
-                let mut sorted_hashes: Vec<_> = definition_hashes.values().collect();
-                sorted_hashes.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-                for hash in sorted_hashes {
-                    crate_hasher.update_hash(hash);
-                }
-                let crate_hash = crate_hasher.finalize();
-
-                if let Err(e) = build_cache.store_object(crate_hash, &object_data) {
-                    if verbosity > 0 {
-                        eprintln!("Warning: Failed to cache object file: {}", e);
-                    }
-                } else if verbosity > 1 {
-                    eprintln!("Cached compiled object: {}", crate_hash.short_display());
-                }
-
-                // Store LLVM IR in cache for debugging
-                if args.debug {
-                    if let Err(e) = build_cache.store_ir(&crate_hash, &ir) {
-                        if verbosity > 0 {
-                            eprintln!("Warning: Failed to cache IR: {}", e);
-                        }
-                    }
-                }
-            }
-
-            // Link with runtimes
-            // C runtime is required (provides main entry point)
-            // Rust runtime is optional (provides advanced features like fibers, channels)
-            let (c_runtime, rust_runtime) = find_runtime_paths();
-
-            let mut link_cmd = std::process::Command::new("cc");
-            link_cmd.arg(&output_obj);
-            link_cmd.arg(&c_runtime);
-
-            // Add Rust runtime if available
-            if let Some(rust_rt) = &rust_runtime {
-                link_cmd.arg(rust_rt);
-                if verbosity > 0 {
-                    eprintln!("Linking with Rust runtime: {}", rust_rt.display());
-                }
-            }
-
-            link_cmd.arg("-o").arg(&output_exe);
-
-            let status = link_cmd.status();
-
-            match status {
-                Ok(s) if s.success() => {
-                    if verbosity > 0 {
-                        eprintln!("Linked executable: {}", output_exe.display());
-                    }
-                    println!("Build successful: {}", output_exe.display());
-                    ExitCode::SUCCESS
-                }
-                Ok(_) => {
-                    eprintln!("Linking failed.");
-                    ExitCode::from(1)
-                }
-                Err(e) => {
-                    eprintln!("Failed to run linker: {}", e);
-                    ExitCode::from(1)
-                }
-            }
         }
-        Err(errors) => {
-            for error in &errors {
-                emitter.emit(error);
+    }
+
+    // Link with runtimes (for both cached and freshly compiled objects)
+    // C runtime is required (provides main entry point)
+    // Rust runtime is optional (provides advanced features like fibers, channels)
+    let (c_runtime, rust_runtime) = find_runtime_paths();
+
+    let mut link_cmd = std::process::Command::new("cc");
+    link_cmd.arg(&output_obj);
+    link_cmd.arg(&c_runtime);
+
+    // Add Rust runtime if available
+    if let Some(rust_rt) = &rust_runtime {
+        link_cmd.arg(rust_rt);
+        if verbosity > 0 {
+            eprintln!("Linking with Rust runtime: {}", rust_rt.display());
+        }
+    }
+
+    link_cmd.arg("-o").arg(&output_exe);
+
+    let status = link_cmd.status();
+
+    match status {
+        Ok(s) if s.success() => {
+            if verbosity > 0 {
+                eprintln!("Linked executable: {}", output_exe.display());
             }
-            eprintln!("Build failed: codegen errors.");
+            println!("Build successful: {}", output_exe.display());
+            ExitCode::SUCCESS
+        }
+        Ok(_) => {
+            eprintln!("Linking failed.");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("Failed to run linker: {}", e);
             ExitCode::from(1)
         }
     }
