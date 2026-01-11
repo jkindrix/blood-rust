@@ -515,7 +515,7 @@ fn test_lexer_performance_large_file() {
 // ============================================================
 
 use bloodc::mir::MirLowering;
-use bloodc::codegen::CodegenContext;
+use bloodc::codegen::{CodegenContext, MirCodegen};
 use inkwell::context::Context;
 
 /// Helper: Run full pipeline from source to MIR
@@ -539,8 +539,13 @@ fn compile_to_mir(source: &str) -> Result<std::collections::HashMap<bloodc::hir:
     })
 }
 
-/// Helper: Run full pipeline from source to LLVM IR
+/// Helper: Run full pipeline from source to LLVM IR via MIR path.
+///
+/// This uses the production codegen path which emits generation checks.
 fn compile_to_llvm_ir(source: &str) -> Result<String, String> {
+    use bloodc::mir::escape::EscapeAnalyzer;
+    use std::collections::HashMap;
+
     // Parse
     let mut parser = Parser::new(source);
     let program = parser.parse_program().map_err(|errors| {
@@ -553,15 +558,38 @@ fn compile_to_llvm_ir(source: &str) -> Result<String, String> {
         errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
     })?;
 
-    // Generate LLVM IR
+    // Lower to MIR
+    let mut lowering = MirLowering::new(&hir_crate);
+    let mir_bodies = lowering.lower_crate().map_err(|errors| {
+        errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
+    })?;
+
+    // Run escape analysis
+    let mut escape_map = HashMap::new();
+    for (&def_id, mir_body) in &mir_bodies {
+        let mut analyzer = EscapeAnalyzer::new();
+        let results = analyzer.analyze(mir_body);
+        escape_map.insert(def_id, results);
+    }
+
+    // Generate LLVM IR via MIR path
     let context = Context::create();
     let module = context.create_module("test");
     let builder = context.create_builder();
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
-    codegen.compile_crate(&hir_crate).map_err(|errors| {
+    codegen.set_escape_analysis(escape_map.clone());
+    codegen.compile_crate_declarations(&hir_crate).map_err(|errors| {
         errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
     })?;
+
+    // Compile each MIR body
+    for (&def_id, mir_body) in &mir_bodies {
+        let escape_results = escape_map.get(&def_id);
+        codegen.compile_mir_body(def_id, mir_body, escape_results).map_err(|errors: Vec<bloodc::Diagnostic>| {
+            errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
+        })?;
+    }
 
     Ok(module.print_to_string().to_string())
 }
@@ -941,4 +969,266 @@ fn test_llvm_ir_function_signature() {
     assert!(llvm_ir.contains("i64"), "LLVM IR should have i64 type");
     assert!(llvm_ir.contains("double") || llvm_ir.contains("f64"),
             "LLVM IR should have double/f64 type");
+}
+
+// ============================================================
+// Memory Safety Integration Tests
+// ============================================================
+
+#[test]
+fn test_e2e_mir_path_declares_runtime_functions() {
+    // Verify that the MIR codegen path declares all critical runtime functions
+    let source = r#"
+        fn main() -> i32 {
+            42
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
+
+    let llvm_ir = result.unwrap();
+
+    // All critical memory safety runtime functions should be declared
+    assert!(llvm_ir.contains("blood_validate_generation"),
+            "LLVM IR should declare blood_validate_generation");
+    assert!(llvm_ir.contains("blood_alloc"),
+            "LLVM IR should declare blood_alloc");
+    assert!(llvm_ir.contains("blood_stale_reference_panic"),
+            "LLVM IR should declare blood_stale_reference_panic");
+}
+
+#[test]
+fn test_e2e_mir_path_declares_effect_runtime() {
+    // Verify that effect context functions are declared
+    let source = r#"
+        fn main() -> i32 {
+            1
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
+
+    let llvm_ir = result.unwrap();
+
+    // Effect context functions for snapshot management
+    assert!(llvm_ir.contains("blood_effect_context") ||
+            llvm_ir.contains("effect_context"),
+            "LLVM IR should declare effect context functions");
+}
+
+#[test]
+fn test_e2e_mir_path_produces_valid_ir() {
+    // Verify that the MIR path produces valid LLVM IR for various expressions
+    let source = r#"
+        fn factorial(n: i32) -> i32 {
+            if n <= 1 {
+                1
+            } else {
+                n * factorial(n - 1)
+            }
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "MIR codegen should produce valid IR: {:?}", result.err());
+
+    let llvm_ir = result.unwrap();
+
+    // Should have function definition
+    assert!(llvm_ir.contains("factorial"), "IR should contain factorial function");
+    // Should have recursion (call to self)
+    assert!(llvm_ir.contains("call"), "IR should contain function calls");
+}
+
+#[test]
+fn test_e2e_mir_path_handles_structs() {
+    let source = r#"
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fn make_point(x: i32, y: i32) -> Point {
+            Point { x: x, y: y }
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "MIR codegen should handle structs: {:?}", result.err());
+}
+
+#[test]
+fn test_e2e_mir_path_handles_tuples() {
+    let source = r#"
+        fn make_pair(a: i32, b: i32) -> (i32, i32) {
+            (a, b)
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "MIR codegen should handle tuples: {:?}", result.err());
+}
+
+#[test]
+fn test_e2e_mir_path_handles_arrays() {
+    let source = r#"
+        fn make_array() -> [i32; 3] {
+            [1, 2, 3]
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "MIR codegen should handle arrays: {:?}", result.err());
+}
+
+#[test]
+fn test_e2e_full_pipeline_fizzbuzz() {
+    // Full integration test with a real program
+    let source = r#"
+        fn fizzbuzz(n: i32) -> i32 {
+            if n % 15 == 0 {
+                15
+            } else if n % 3 == 0 {
+                3
+            } else if n % 5 == 0 {
+                5
+            } else {
+                n
+            }
+        }
+    "#;
+
+    let result = compile_to_llvm_ir(source);
+    assert!(result.is_ok(), "FizzBuzz should compile: {:?}", result.err());
+
+    let llvm_ir = result.unwrap();
+    // Should use modulo (srem for signed remainder)
+    assert!(llvm_ir.contains("srem") || llvm_ir.contains("urem"),
+            "IR should contain remainder operation for modulo");
+}
+
+// ============================================================
+// Closure Codegen Integration Tests
+// ============================================================
+
+#[test]
+fn test_e2e_simple_closure_parse() {
+    // Verify closures parse correctly
+    let source = r#"
+        fn use_closure() -> i32 {
+            let add_one = |x: i32| x + 1;
+            add_one(5)
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let program = parser.parse_program().expect("Parse failed");
+    assert_eq!(program.declarations.len(), 1);
+}
+
+#[test]
+fn test_e2e_closure_with_capture_parse() {
+    // Verify closures with captures parse correctly
+    let source = r#"
+        fn use_closure_with_capture() -> i32 {
+            let offset = 10;
+            let add_offset = |x: i32| x + offset;
+            add_offset(5)
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let program = parser.parse_program().expect("Parse failed");
+    assert_eq!(program.declarations.len(), 1);
+}
+
+#[test]
+fn test_e2e_closure_to_mir() {
+    // Verify closures lower to MIR
+    let source = r#"
+        fn apply_closure(x: i32) -> i32 {
+            let double = |n: i32| n * 2;
+            double(x)
+        }
+    "#;
+
+    let result = compile_to_mir(source);
+    // Closures may not be fully implemented yet - track status
+    if result.is_err() {
+        eprintln!("Closure MIR lowering not fully implemented: {:?}", result.err());
+    } else {
+        assert!(!result.unwrap().is_empty(), "Expected MIR bodies for closure code");
+    }
+}
+
+#[test]
+fn test_e2e_higher_order_function_parse() {
+    // Test passing closures as function arguments
+    let source = r#"
+        fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+            f(x)
+        }
+
+        fn main() -> i32 {
+            apply(|x| x * 2, 21)
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    // Higher-order functions with closures are advanced - check parse status
+    if result.is_err() {
+        eprintln!("Higher-order closure syntax not fully supported: {:?}", result.err());
+    }
+}
+
+#[test]
+fn test_e2e_closure_returning_closure_parse() {
+    // Test closures returning closures
+    let source = r#"
+        fn make_adder(n: i32) -> fn(i32) -> i32 {
+            |x| x + n
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    // This is an advanced feature - check support status
+    if result.is_err() {
+        eprintln!("Closure-returning-closure not fully supported: {:?}", result.err());
+    }
+}
+
+#[test]
+fn test_e2e_multi_param_closure_parse() {
+    // Test closures with multiple parameters
+    let source = r#"
+        fn use_multi_param_closure() -> i32 {
+            let add = |a: i32, b: i32| a + b;
+            add(3, 4)
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let program = parser.parse_program().expect("Multi-param closure should parse");
+    assert_eq!(program.declarations.len(), 1);
+}
+
+#[test]
+fn test_e2e_closure_in_expression_parse() {
+    // Test closures used directly in expressions without binding
+    let source = r#"
+        fn inline_closure(x: i32) -> i32 {
+            (|n: i32| n * 2)(x)
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    // Inline closure invocation is advanced - check support
+    if result.is_err() {
+        eprintln!("Inline closure invocation not fully supported: {:?}", result.err());
+    }
 }

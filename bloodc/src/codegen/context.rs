@@ -293,6 +293,20 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     /// Compile an entire HIR crate.
+    ///
+    /// # Deprecation Warning
+    ///
+    /// This function uses the HIR codegen path which does NOT emit generation checks.
+    /// For memory safety, use the MIR codegen path via `compile_mir_body()` instead.
+    ///
+    /// The MIR path provides:
+    /// - Escape analysis integration
+    /// - Generation validation on dereference
+    /// - Proper tier-based allocation
+    ///
+    /// This function is retained only for legacy tests. Production code uses
+    /// `compile_definition_to_object()` which calls `compile_mir_body()`.
+    #[deprecated(since = "0.3.0", note = "Use compile_mir_body() for generation check emission")]
     pub fn compile_crate(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
         // Copy builtin function mappings for resolving runtime calls
         self.builtin_fns = hir_crate.builtin_fns.clone();
@@ -4565,7 +4579,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // These tests use compile_crate (HIR path) for backwards compatibility
 mod tests {
+    //! Legacy HIR codegen tests.
+    //!
+    //! WARNING: These tests use the deprecated `compile_crate()` HIR path which does
+    //! NOT emit generation checks. For tests that verify memory safety features,
+    //! see `mir_codegen::tests` which uses the MIR path.
+    //!
+    //! Production code uses `compile_definition_to_object()` → `compile_mir_body()`
+    //! which properly emits generation checks.
+
     use super::*;
     use crate::hir::{self, Crate, Item, ItemKind, Body, BodyId, Type, Expr, ExprKind, LiteralValue, Local, LocalId, DefId};
     use crate::span::Span;
