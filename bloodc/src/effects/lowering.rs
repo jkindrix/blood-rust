@@ -68,7 +68,7 @@ use std::collections::HashMap;
 /// Effect lowering context.
 ///
 /// Manages the translation of effectful HIR to effect-free code.
-/// This is the main coordinator for Phase 2's effect compilation.
+/// This is the main coordinator for effect compilation.
 pub struct EffectLowering {
     /// Registered effect definitions.
     effects: HashMap<DefId, EffectInfo>,
@@ -78,7 +78,7 @@ pub struct EffectLowering {
     evidence_reqs: HashMap<DefId, EvidenceRequirement>,
     /// Mapping from handler DefId to its compiled form.
     handlers: HashMap<DefId, HandlerInfo>,
-    /// Counter for generating fresh variable names (used in Phase 2.4).
+    /// Counter for generating fresh variable names.
     #[allow(dead_code)]
     fresh_counter: u64,
 }
@@ -618,11 +618,11 @@ impl EffectLowering {
 
     /// Transform an effectful function by adding evidence parameter.
     ///
-    /// Phase 2.1: Runtime evidence passing.
+    /// Current: Runtime evidence passing (implicit).
     /// The evidence parameter is implicit - the runtime manages the evidence
     /// vector as thread-local state. Functions don't need modification.
     ///
-    /// Phase 2.2+: Compile-time evidence passing.
+    /// Future: Compile-time evidence passing (optimization).
     /// For optimization, we could add an explicit evidence parameter:
     /// ```text
     /// fn foo() / {State<i32>} -> i32
@@ -630,10 +630,10 @@ impl EffectLowering {
     /// fn foo(ev: *Evidence) -> i32
     /// ```
     fn transform_effectful_function(&mut self, item: &Item, req: &EvidenceRequirement) -> Item {
-        // Phase 2.1: Runtime evidence passing - no function signature changes needed.
+        // Current: Runtime evidence passing - no function signature changes needed.
         // The runtime's blood_evidence_current() provides the evidence vector.
         //
-        // Future optimization (Phase 2.2+): Add explicit evidence parameter for
+        // Future optimization: Add explicit evidence parameter for
         // zero-overhead effect handling when the handler is known at compile time.
 
         // Store the requirement for later use in codegen

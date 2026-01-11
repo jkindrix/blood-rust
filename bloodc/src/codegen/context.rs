@@ -3633,7 +3633,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     // ========================================================================
-    // Generational Pointer Support (Phase 2)
+    // Generational Pointer Support
     // ========================================================================
     //
     // NOTE: The emit_generation_check and emit_generation_check_or_panic functions
@@ -4054,7 +4054,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     // ========================================================================
-    // Effects System Codegen (Phase 2)
+    // Effects System Codegen
     // ========================================================================
 
     /// Compile a perform expression: `perform Effect.op(args)`
@@ -5314,7 +5314,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Effects System Codegen Tests (Phase 2)
+    // Effects System Codegen Tests
     // ========================================================================
 
     /// Test perform expression generates blood_perform runtime call
