@@ -402,10 +402,61 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             StatementKind::Drop(place) => {
-                // Drop value - run destructor if applicable
-                // For now, just load the value to ensure it's "used"
-                let _value = self.compile_mir_place_load(place, body, escape_results)?;
-                // In the future: emit destructor call based on type
+                // Drop value - free memory if heap allocated
+                // Get the address of the place
+                let ptr = self.compile_mir_place(place, body)?;
+
+                // Get the type to determine size
+                let place_ty = &body.locals[place.local.index as usize].ty;
+                let llvm_ty = self.lower_type(place_ty);
+                let size = llvm_ty.size_of()
+                    .map(|s| s.const_cast(self.context.i64_type(), false))
+                    .unwrap_or_else(|| self.context.i64_type().const_int(0, false));
+
+                // For reference types, call blood_free to deallocate
+                if place_ty.is_ref() {
+                    if let Some(free_fn) = self.module.get_function("blood_free") {
+                        // Load the pointer value
+                        let ptr_val = self.builder.build_load(ptr, "drop_val")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM load error: {}", e), stmt.span)])?;
+
+                        // Convert to i64 address
+                        let address = if ptr_val.is_pointer_value() {
+                            self.builder.build_ptr_to_int(
+                                ptr_val.into_pointer_value(),
+                                self.context.i64_type(),
+                                "drop_addr"
+                            ).map_err(|e| vec![Diagnostic::error(format!("LLVM ptr_to_int error: {}", e), stmt.span)])?
+                        } else if ptr_val.is_int_value() {
+                            let int_val = ptr_val.into_int_value();
+                            let bit_width = int_val.get_type().get_bit_width();
+                            if bit_width == 128 {
+                                // Extract address from high 64 bits of BloodPtr
+                                let shifted = self.builder.build_right_shift(
+                                    int_val,
+                                    int_val.get_type().const_int(64, false),
+                                    false,
+                                    "addr_extract"
+                                ).map_err(|e| vec![Diagnostic::error(format!("LLVM shift error: {}", e), stmt.span)])?;
+                                self.builder.build_int_truncate(shifted, self.context.i64_type(), "addr")
+                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM truncate error: {}", e), stmt.span)])?
+                            } else if bit_width < 64 {
+                                self.builder.build_int_z_extend(int_val, self.context.i64_type(), "addr")
+                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM zext error: {}", e), stmt.span)])?
+                            } else {
+                                int_val
+                            }
+                        } else {
+                            // Not a freeable type, use zero address (blood_free ignores null)
+                            self.context.i64_type().const_int(0, false)
+                        };
+
+                        // Call blood_free(address, size)
+                        self.builder.build_call(free_fn, &[address.into(), size.into()], "")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), stmt.span)])?;
+                    }
+                }
+                // For non-reference types, no deallocation needed
             }
 
             StatementKind::IncrementGeneration(place) => {

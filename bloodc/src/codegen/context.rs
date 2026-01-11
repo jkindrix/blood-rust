@@ -3000,6 +3000,41 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                 Ok(result)
             }
+            hir::PatternKind::Range { start, end, inclusive } => {
+                // Range pattern: check if value is within range
+                // Generate: start <= value && value < end (or value <= end if inclusive)
+                let mut result = self.context.bool_type().const_int(1, false);
+                let scrutinee_int = scrutinee.into_int_value();
+
+                // Check lower bound: value >= start
+                if let Some(start_pat) = start {
+                    if let hir::PatternKind::Literal(lit) = &start_pat.kind {
+                        let start_val = self.compile_literal(lit)?.into_int_value();
+                        let ge_check = self.builder
+                            .build_int_compare(IntPredicate::SGE, scrutinee_int, start_val, "range.ge")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        result = self.builder
+                            .build_and(result, ge_check, "and")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    }
+                }
+
+                // Check upper bound: value < end (or value <= end if inclusive)
+                if let Some(end_pat) = end {
+                    if let hir::PatternKind::Literal(lit) = &end_pat.kind {
+                        let end_val = self.compile_literal(lit)?.into_int_value();
+                        let cmp_pred = if *inclusive { IntPredicate::SLE } else { IntPredicate::SLT };
+                        let bound_check = self.builder
+                            .build_int_compare(cmp_pred, scrutinee_int, end_val, "range.bound")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        result = self.builder
+                            .build_and(result, bound_check, "and")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    }
+                }
+
+                Ok(result)
+            }
         }
     }
 
@@ -3141,6 +3176,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     // Phase 2+: Full slice pattern bindings require computing
                     // array length at runtime and indexing from the end
                 }
+                Ok(())
+            }
+            hir::PatternKind::Range { .. } => {
+                // Range patterns don't bind any variables
                 Ok(())
             }
         }
