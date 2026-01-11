@@ -18,10 +18,24 @@
 //!
 //! Then link compiled Blood programs with `-lblood_runtime`.
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::{self, Write};
+use std::sync::OnceLock;
 
-use crate::memory::{BloodPtr, PointerMetadata, generation, get_slot_generation};
+use parking_lot::Mutex;
+
+use crate::memory::{BloodPtr, PointerMetadata, generation, get_slot_generation, Region};
+use crate::continuation::{
+    ContinuationRef, Continuation, EffectContext,
+    register_continuation, take_continuation, has_continuation,
+};
+
+/// Fiber handle for continuation capture.
+pub type FiberHandle = u64;
+
+/// Continuation handle for FFI.
+pub type ContinuationHandle = u64;
 
 // ============================================================================
 // I/O Functions
@@ -960,20 +974,288 @@ pub extern "C" fn blood_validate_generation(address: u64, expected_generation: u
 }
 
 // ============================================================================
+// Region Management (for scoped allocation with effect suspension)
+// ============================================================================
+
+/// Global region registry for tracking regions by ID.
+static REGION_REGISTRY: OnceLock<Mutex<HashMap<u64, Region>>> = OnceLock::new();
+
+/// Get or initialize the region registry.
+fn get_region_registry() -> &'static Mutex<HashMap<u64, Region>> {
+    REGION_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Create a new region with the given initial and maximum sizes.
+///
+/// Returns the region ID (0 on failure).
+#[no_mangle]
+pub extern "C" fn blood_region_create(initial_size: usize, max_size: usize) -> u64 {
+    let region = Region::new(initial_size, max_size);
+    let id = region.id().as_u64();
+
+    let registry = get_region_registry();
+    let mut reg = registry.lock();
+    reg.insert(id, region);
+
+    id
+}
+
+/// Destroy a region.
+///
+/// This frees all memory associated with the region.
+/// Any pointers into this region become stale.
+#[no_mangle]
+pub extern "C" fn blood_region_destroy(region_id: u64) {
+    let registry = get_region_registry();
+    let mut reg = registry.lock();
+    reg.remove(&region_id);
+}
+
+/// Get a region by ID.
+///
+/// Returns a raw pointer to the region, or null if not found.
+/// The pointer is only valid while holding the registry lock.
+///
+/// # Safety
+/// The returned pointer must not be used after the registry lock is released.
+fn get_region_by_id(reg: &mut HashMap<u64, Region>, region_id: u64) -> Option<&mut Region> {
+    reg.get_mut(&region_id)
+}
+
+/// Suspend a region (increment suspend count).
+///
+/// Called when an effect captures a continuation that references this region.
+/// Returns the new suspend count.
+#[no_mangle]
+pub extern "C" fn blood_region_suspend(region_id: u64) -> u32 {
+    let registry = get_region_registry();
+    let mut reg = registry.lock();
+
+    if let Some(region) = get_region_by_id(&mut reg, region_id) {
+        region.suspend()
+    } else {
+        0
+    }
+}
+
+/// Resume a region (decrement suspend count).
+///
+/// Called when a continuation referencing this region resumes or is dropped.
+/// Returns (new_suspend_count, should_deallocate) packed as: count | (should_dealloc << 16).
+#[no_mangle]
+pub extern "C" fn blood_region_resume(region_id: u64) -> u32 {
+    let registry = get_region_registry();
+    let mut reg = registry.lock();
+
+    if let Some(region) = get_region_by_id(&mut reg, region_id) {
+        let (count, should_dealloc) = region.resume();
+        count | ((should_dealloc as u32) << 16)
+    } else {
+        0
+    }
+}
+
+/// Exit a region scope.
+///
+/// Called at the end of a region's lexical scope.
+/// Returns 1 if the region should be deallocated immediately, 0 if deferred.
+#[no_mangle]
+pub extern "C" fn blood_region_exit_scope(region_id: u64) -> c_int {
+    let registry = get_region_registry();
+    let mut reg = registry.lock();
+
+    if let Some(region) = get_region_by_id(&mut reg, region_id) {
+        if region.exit_scope() {
+            1 // Deallocate immediately
+        } else {
+            0 // Deferred
+        }
+    } else {
+        1 // Region not found, nothing to do
+    }
+}
+
+/// Get the suspend count of a region.
+#[no_mangle]
+pub extern "C" fn blood_region_get_suspend_count(region_id: u64) -> u32 {
+    let registry = get_region_registry();
+    let reg = registry.lock();
+
+    if let Some(region) = reg.get(&region_id) {
+        region.suspend_count()
+    } else {
+        0
+    }
+}
+
+/// Get the status of a region.
+///
+/// Returns: 0 = Active, 1 = Suspended, 2 = PendingDeallocation.
+#[no_mangle]
+pub extern "C" fn blood_region_get_status(region_id: u64) -> u32 {
+    let registry = get_region_registry();
+    let reg = registry.lock();
+
+    if let Some(region) = reg.get(&region_id) {
+        region.status() as u32
+    } else {
+        0 // Active (default)
+    }
+}
+
+/// Allocate memory from a region.
+///
+/// Returns the address of the allocated memory, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn blood_region_alloc(region_id: u64, size: usize, align: usize) -> u64 {
+    let registry = get_region_registry();
+    let mut reg = registry.lock();
+
+    if let Some(region) = get_region_by_id(&mut reg, region_id) {
+        region.allocate(size, align).map(|p| p as u64).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// Check if a region is suspended.
+#[no_mangle]
+pub extern "C" fn blood_region_is_suspended(region_id: u64) -> c_int {
+    let registry = get_region_registry();
+    let reg = registry.lock();
+
+    if let Some(region) = reg.get(&region_id) {
+        if region.is_suspended() { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Check if a region is pending deallocation.
+#[no_mangle]
+pub extern "C" fn blood_region_is_pending_deallocation(region_id: u64) -> c_int {
+    let registry = get_region_registry();
+    let reg = registry.lock();
+
+    if let Some(region) = reg.get(&region_id) {
+        if region.is_pending_deallocation() { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// Continuation Region Tracking
+// ============================================================================
+
+/// Global side table for tracking suspended regions per continuation.
+///
+/// Maps continuation ID -> list of region IDs that were suspended when
+/// the continuation was captured. Used to restore regions on resume.
+static CONTINUATION_REGIONS: OnceLock<Mutex<HashMap<u64, Vec<u64>>>> = OnceLock::new();
+
+/// Get or initialize the continuation regions table.
+fn get_continuation_regions() -> &'static Mutex<HashMap<u64, Vec<u64>>> {
+    CONTINUATION_REGIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Add a suspended region to a continuation.
+///
+/// This should be called when capturing a continuation that references
+/// allocations in a region. It increments the region's suspend count
+/// and tracks the region ID for later restoration on resume.
+#[no_mangle]
+pub extern "C" fn blood_continuation_add_suspended_region(
+    continuation_id: u64,
+    region_id: u64,
+) {
+    // First suspend the region
+    blood_region_suspend(region_id);
+
+    // Then track it in the continuation's region list
+    let regions = get_continuation_regions();
+    let mut reg = regions.lock();
+    reg.entry(continuation_id).or_default().push(region_id);
+}
+
+/// Get and clear the suspended regions for a continuation.
+///
+/// Called when resuming a continuation to restore region state.
+/// Returns the count of regions, and fills the provided buffer.
+/// Also decrements suspend counts and handles deferred deallocation.
+///
+/// # Safety
+/// The buffer must be large enough to hold all region IDs.
+#[no_mangle]
+pub unsafe extern "C" fn blood_continuation_take_suspended_regions(
+    continuation_id: u64,
+    out_regions: *mut u64,
+    max_count: usize,
+) -> usize {
+    let regions = get_continuation_regions();
+    let mut reg = regions.lock();
+
+    if let Some(region_ids) = reg.remove(&continuation_id) {
+        let count = region_ids.len().min(max_count);
+
+        if !out_regions.is_null() {
+            for (i, &rid) in region_ids.iter().take(count).enumerate() {
+                *out_regions.add(i) = rid;
+            }
+        }
+
+        // Resume all regions (decrement suspend count)
+        for rid in &region_ids {
+            let result = blood_region_resume(*rid);
+            let should_dealloc = (result >> 16) != 0;
+
+            if should_dealloc {
+                // Region's lexical scope ended and this was the last continuation
+                // Deallocate now
+                blood_region_destroy(*rid);
+            }
+        }
+
+        count
+    } else {
+        0
+    }
+}
+
+/// Resume a continuation with region validation.
+///
+/// This wrapper around blood_continuation_resume also handles:
+/// 1. Validating the generation snapshot
+/// 2. Restoring suspended regions
+///
+/// # Safety
+/// The continuation must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn blood_continuation_resume_with_regions(
+    continuation: ContinuationHandle,
+    value: i64,
+) -> i64 {
+    // First, restore suspended regions
+    let mut region_buffer = [0u64; 64]; // Max 64 suspended regions
+    let region_count = blood_continuation_take_suspended_regions(
+        continuation,
+        region_buffer.as_mut_ptr(),
+        region_buffer.len(),
+    );
+
+    // Log for debugging if regions were restored
+    if region_count > 0 {
+        // Regions have been resumed via blood_continuation_take_suspended_regions
+        // No additional action needed here
+    }
+
+    // Now resume the continuation
+    blood_continuation_resume(continuation, value)
+}
+
 // ============================================================================
 // Fiber/Continuation Support (for effect handlers)
 // ============================================================================
-
-use crate::continuation::{
-    ContinuationRef, Continuation, EffectContext,
-    register_continuation, take_continuation, has_continuation,
-};
-
-/// Fiber handle for continuation capture.
-pub type FiberHandle = u64;
-
-/// Continuation handle for FFI.
-pub type ContinuationHandle = u64;
 
 // Thread-local effect context for the current operation.
 std::thread_local! {
@@ -1214,8 +1496,6 @@ pub extern "C" fn blood_effect_context_take_snapshot() -> SnapshotHandle {
 // Work-Stealing Scheduler FFI
 // ============================================================================
 
-use std::sync::OnceLock;
-use parking_lot::Mutex;
 use crate::scheduler::Scheduler;
 use crate::SchedulerConfig;
 
@@ -2053,5 +2333,211 @@ mod tests {
 
         // Clean up
         blood_unregister_allocation(addr);
+    }
+
+    // ========================================================================
+    // Region Suspension Tests
+    // ========================================================================
+
+    #[test]
+    fn test_region_create_destroy() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        assert!(region_id != 0, "Region creation should succeed");
+
+        // Check initial state
+        assert_eq!(blood_region_get_suspend_count(region_id), 0);
+        assert_eq!(blood_region_get_status(region_id), 0); // Active
+
+        blood_region_destroy(region_id);
+    }
+
+    #[test]
+    fn test_region_suspend_resume() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        assert!(region_id != 0);
+
+        // Initially not suspended
+        assert_eq!(blood_region_is_suspended(region_id), 0);
+        assert_eq!(blood_region_get_suspend_count(region_id), 0);
+
+        // Suspend once
+        let count1 = blood_region_suspend(region_id);
+        assert_eq!(count1, 1);
+        assert_eq!(blood_region_is_suspended(region_id), 1);
+        assert_eq!(blood_region_get_status(region_id), 1); // Suspended
+
+        // Suspend again
+        let count2 = blood_region_suspend(region_id);
+        assert_eq!(count2, 2);
+
+        // Resume once - still suspended
+        let result1 = blood_region_resume(region_id);
+        let new_count = result1 & 0xFFFF;
+        let should_dealloc = (result1 >> 16) != 0;
+        assert_eq!(new_count, 1);
+        assert!(!should_dealloc);
+        assert_eq!(blood_region_is_suspended(region_id), 1);
+
+        // Resume again - no longer suspended
+        let result2 = blood_region_resume(region_id);
+        let new_count2 = result2 & 0xFFFF;
+        let should_dealloc2 = (result2 >> 16) != 0;
+        assert_eq!(new_count2, 0);
+        assert!(!should_dealloc2);
+        assert_eq!(blood_region_is_suspended(region_id), 0);
+        assert_eq!(blood_region_get_status(region_id), 0); // Back to Active
+
+        blood_region_destroy(region_id);
+    }
+
+    #[test]
+    fn test_region_exit_scope_immediate() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        assert!(region_id != 0);
+
+        // Exit scope when not suspended should return 1 (deallocate immediately)
+        let should_dealloc = blood_region_exit_scope(region_id);
+        assert_eq!(should_dealloc, 1);
+
+        blood_region_destroy(region_id);
+    }
+
+    #[test]
+    fn test_region_exit_scope_deferred() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        assert!(region_id != 0);
+
+        // Suspend the region
+        blood_region_suspend(region_id);
+
+        // Exit scope when suspended should return 0 (deferred)
+        let should_dealloc = blood_region_exit_scope(region_id);
+        assert_eq!(should_dealloc, 0);
+        assert_eq!(blood_region_is_pending_deallocation(region_id), 1);
+        assert_eq!(blood_region_get_status(region_id), 2); // PendingDeallocation
+
+        // Resume - should now indicate deallocation needed
+        let result = blood_region_resume(region_id);
+        let new_count = result & 0xFFFF;
+        let should_dealloc_now = (result >> 16) != 0;
+        assert_eq!(new_count, 0);
+        assert!(should_dealloc_now, "Should deallocate after last resume");
+
+        blood_region_destroy(region_id);
+    }
+
+    #[test]
+    fn test_region_alloc() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        assert!(region_id != 0);
+
+        // Allocate some memory
+        let addr = blood_region_alloc(region_id, 64, 8);
+        assert!(addr != 0, "Region allocation should succeed");
+
+        // Allocate more
+        let addr2 = blood_region_alloc(region_id, 128, 16);
+        assert!(addr2 != 0, "Second allocation should succeed");
+        assert_ne!(addr, addr2, "Allocations should be at different addresses");
+
+        blood_region_destroy(region_id);
+    }
+
+    #[test]
+    fn test_continuation_suspended_regions() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        let continuation_id = 12345u64; // Fake continuation ID
+
+        // Add suspended region
+        blood_continuation_add_suspended_region(continuation_id, region_id);
+
+        // Region should be suspended
+        assert_eq!(blood_region_is_suspended(region_id), 1);
+        assert_eq!(blood_region_get_suspend_count(region_id), 1);
+
+        // Take suspended regions
+        let mut regions = [0u64; 16];
+        let count = unsafe {
+            blood_continuation_take_suspended_regions(
+                continuation_id,
+                regions.as_mut_ptr(),
+                regions.len(),
+            )
+        };
+
+        assert_eq!(count, 1);
+        assert_eq!(regions[0], region_id);
+
+        // Region should be resumed
+        assert_eq!(blood_region_is_suspended(region_id), 0);
+
+        blood_region_destroy(region_id);
+    }
+
+    #[test]
+    fn test_continuation_multiple_suspended_regions() {
+        let region1 = blood_region_create(1024, 1024 * 1024);
+        let region2 = blood_region_create(1024, 1024 * 1024);
+        let region3 = blood_region_create(1024, 1024 * 1024);
+        let continuation_id = 67890u64;
+
+        // Add all regions
+        blood_continuation_add_suspended_region(continuation_id, region1);
+        blood_continuation_add_suspended_region(continuation_id, region2);
+        blood_continuation_add_suspended_region(continuation_id, region3);
+
+        // All regions should be suspended
+        assert_eq!(blood_region_is_suspended(region1), 1);
+        assert_eq!(blood_region_is_suspended(region2), 1);
+        assert_eq!(blood_region_is_suspended(region3), 1);
+
+        // Take suspended regions
+        let mut regions = [0u64; 16];
+        let count = unsafe {
+            blood_continuation_take_suspended_regions(
+                continuation_id,
+                regions.as_mut_ptr(),
+                regions.len(),
+            )
+        };
+
+        assert_eq!(count, 3);
+
+        // All regions should be resumed
+        assert_eq!(blood_region_is_suspended(region1), 0);
+        assert_eq!(blood_region_is_suspended(region2), 0);
+        assert_eq!(blood_region_is_suspended(region3), 0);
+
+        blood_region_destroy(region1);
+        blood_region_destroy(region2);
+        blood_region_destroy(region3);
+    }
+
+    #[test]
+    fn test_deferred_deallocation_via_continuation() {
+        let region_id = blood_region_create(1024, 1024 * 1024);
+        let continuation_id = 11111u64;
+
+        // Suspend via continuation
+        blood_continuation_add_suspended_region(continuation_id, region_id);
+
+        // Exit scope - should be deferred
+        let immediate = blood_region_exit_scope(region_id);
+        assert_eq!(immediate, 0, "Should defer deallocation");
+        assert_eq!(blood_region_is_pending_deallocation(region_id), 1);
+
+        // Taking regions should handle deallocation
+        let mut regions = [0u64; 16];
+        let count = unsafe {
+            blood_continuation_take_suspended_regions(
+                continuation_id,
+                regions.as_mut_ptr(),
+                regions.len(),
+            )
+        };
+
+        assert_eq!(count, 1);
+        // Region should have been destroyed by take_suspended_regions
+        // since it was pending deallocation
     }
 }

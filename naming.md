@@ -1,6 +1,6 @@
 # Blood Programming Language: Complete Toolchain & Naming Reference
 
-*A comprehensive, research-backed guide to naming tools for the Blood programming language*
+*A comprehensive guide to naming tools for the Blood programming language*
 
 **Document Version:** 3.0
 **Last Updated:** January 2026

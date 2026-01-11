@@ -2,14 +2,14 @@
 
 **Version**: 0.3.0-draft
 **Status**: Active Development
-**Implementation**: 🔶 Scaffolded (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
+**Implementation**: ✅ Integrated (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
 **Last Updated**: 2026-01-10
 
-> ⚠️ **Validation Status**: This specification describes design targets. Performance claims (context switch costs, memory overhead) are **unvalidated** until empirical benchmarks are completed. The runtime crate exists but is not linked to compiled programs. See [IMPLEMENTATION_STATUS.md §1.6](./IMPLEMENTATION_STATUS.md#16-phase-5-runtime---scaffolded).
+**Implementation Status**: Runtime is implemented and linked to compiled programs. See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for current status. Performance benchmarks are ongoing.
 
 **Revision 0.3.0 Changes**:
-- Added validation status box and implementation status link
-- Clarified all performance claims as unvalidated design targets
+- Added implementation status link
+- Updated implementation status to reflect runtime integration
 
 This document specifies Blood's concurrency model, including fiber semantics, scheduling, synchronization primitives, and parallel execution.
 

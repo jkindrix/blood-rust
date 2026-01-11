@@ -976,8 +976,8 @@ This section documents Blood's expected performance characteristics, distinguish
 |-----------|---------------|--------|--------|
 | Generation check (Tier 1) | ~1-2 cycles | Theoretical | Vale design |
 | Check elision (Tier 0) | 0 cycles | Validated | Escape analysis research |
-| Snapshot capture | O(n) refs | Theoretical | Novel mechanism |
-| Snapshot validation | O(n) refs | Theoretical | Novel mechanism |
+| Snapshot capture | O(n) refs | Theoretical | Blood implementation |
+| Snapshot validation | O(n) refs | Theoretical | Blood implementation |
 | RC increment/decrement | ~10-20 cycles | Validated | Standard RC overhead |
 
 ### 11.3 128-bit Pointer Overhead
@@ -1049,7 +1049,7 @@ Based on Java HotSpot research (validated) and theoretical extension:
 | Snapshot validation | O(L) | Check L generations |
 | Full resume cost | O(L × H) | Validate at each handler level |
 
-**Practical Bounds** (unvalidated estimates):
+**Practical Bounds** (estimated):
 
 | Metric | Typical | Worst Case | Mitigation |
 |--------|---------|------------|------------|

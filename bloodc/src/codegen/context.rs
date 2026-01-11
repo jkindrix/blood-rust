@@ -1137,6 +1137,60 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let stale_panic_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function("blood_snapshot_stale_panic", stale_panic_type, None);
 
+        // === Region Management (for scoped allocation with effect suspension) ===
+
+        // blood_region_create(initial_size: i64, max_size: i64) -> i64 (region_id)
+        // Creates a new region with the given initial and maximum sizes
+        let region_create_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_region_create", region_create_type, None);
+
+        // blood_region_destroy(region_id: i64) -> void
+        // Destroys a region and frees all its memory
+        let region_destroy_type = void_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_destroy", region_destroy_type, None);
+
+        // blood_region_alloc(region_id: i64, size: i64, align: i64) -> i64 (address)
+        // Allocates memory from a region
+        let region_alloc_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_region_alloc", region_alloc_type, None);
+
+        // blood_region_suspend(region_id: i64) -> i32 (new suspend count)
+        // Suspends a region (called when effect captures continuation)
+        let region_suspend_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_suspend", region_suspend_type, None);
+
+        // blood_region_resume(region_id: i64) -> i32 (packed: count | (should_dealloc << 16))
+        // Resumes a region (called when continuation resumes or is dropped)
+        let region_resume_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_resume", region_resume_type, None);
+
+        // blood_region_exit_scope(region_id: i64) -> i32 (1 = deallocate now, 0 = deferred)
+        // Exit a region's lexical scope
+        let region_exit_scope_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_exit_scope", region_exit_scope_type, None);
+
+        // blood_region_is_suspended(region_id: i64) -> i32 (bool)
+        let region_is_suspended_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_is_suspended", region_is_suspended_type, None);
+
+        // blood_region_is_pending_deallocation(region_id: i64) -> i32 (bool)
+        self.module.add_function("blood_region_is_pending_deallocation", region_is_suspended_type, None);
+
+        // blood_continuation_add_suspended_region(continuation_id: i64, region_id: i64) -> void
+        // Associates a suspended region with a continuation
+        let cont_add_region_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_continuation_add_suspended_region", cont_add_region_type, None);
+
+        // blood_continuation_take_suspended_regions(continuation_id: i64, out_regions: *i64, max_count: i64) -> i64 (count)
+        // Gets and clears the suspended regions for a continuation (handles deferred deallocation)
+        let cont_take_regions_type = i64_type.fn_type(&[i64_type.into(), void_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_continuation_take_suspended_regions", cont_take_regions_type, None);
+
+        // blood_continuation_resume_with_regions(continuation: i64, value: i64) -> i64
+        // Resume a continuation with automatic region restoration
+        let cont_resume_regions_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_continuation_resume_with_regions", cont_resume_regions_type, None);
+
         // === Multiple Dispatch Runtime ===
 
         // blood_dispatch_lookup(method_slot: i64, type_tag: i64) -> *void (function pointer)

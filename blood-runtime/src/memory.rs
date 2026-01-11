@@ -580,6 +580,32 @@ pub fn next_region_id() -> RegionId {
     RegionId(NEXT_REGION_ID.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Region status for suspension tracking.
+///
+/// Used with atomic operations to track region lifecycle during effect suspension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RegionStatus {
+    /// Region is active and can be allocated from.
+    Active = 0,
+    /// Region is suspended (has active continuations).
+    Suspended = 1,
+    /// Region's lexical scope ended but deallocation is deferred.
+    PendingDeallocation = 2,
+}
+
+impl RegionStatus {
+    /// Convert from u32 value.
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            0 => RegionStatus::Active,
+            1 => RegionStatus::Suspended,
+            2 => RegionStatus::PendingDeallocation,
+            _ => RegionStatus::Active, // Default fallback
+        }
+    }
+}
+
 /// A memory region for scoped allocation.
 pub struct Region {
     /// Region ID.
@@ -592,6 +618,16 @@ pub struct Region {
     max_size: usize,
     /// Whether the region is closed for new allocations.
     closed: AtomicU32,
+    /// Suspension count: number of continuations holding references into this region.
+    ///
+    /// When an effect suspends inside a region scope, this count is incremented.
+    /// When the continuation resumes or is dropped, this count is decremented.
+    /// Deallocation is deferred while suspend_count > 0.
+    suspend_count: AtomicU32,
+    /// Current status of the region.
+    ///
+    /// Tracks whether the region is active, suspended, or pending deallocation.
+    status: AtomicU32,
 }
 
 impl Region {
@@ -603,6 +639,8 @@ impl Region {
             offset: AtomicUsize::new(0),
             max_size,
             closed: AtomicU32::new(0),
+            suspend_count: AtomicU32::new(0),
+            status: AtomicU32::new(RegionStatus::Active as u32),
         }
     }
 
@@ -663,6 +701,94 @@ impl Region {
     pub fn reset(&mut self) {
         self.offset.store(0, Ordering::Release);
         self.closed.store(0, Ordering::Release);
+        self.suspend_count.store(0, Ordering::Release);
+        self.status.store(RegionStatus::Active as u32, Ordering::Release);
+    }
+
+    // ========================================================================
+    // Suspension Support for Effect Handlers
+    // ========================================================================
+
+    /// Get the current suspend count.
+    pub fn suspend_count(&self) -> u32 {
+        self.suspend_count.load(Ordering::Acquire)
+    }
+
+    /// Get the current region status.
+    pub fn status(&self) -> RegionStatus {
+        RegionStatus::from_u32(self.status.load(Ordering::Acquire))
+    }
+
+    /// Check if the region is suspended (has active continuations).
+    pub fn is_suspended(&self) -> bool {
+        self.suspend_count.load(Ordering::Acquire) > 0
+    }
+
+    /// Check if the region is pending deallocation.
+    pub fn is_pending_deallocation(&self) -> bool {
+        self.status() == RegionStatus::PendingDeallocation
+    }
+
+    /// Suspend the region (called when an effect captures a continuation).
+    ///
+    /// Increments the suspend count and sets status to Suspended.
+    /// Returns the new suspend count.
+    pub fn suspend(&self) -> u32 {
+        let new_count = self.suspend_count.fetch_add(1, Ordering::AcqRel) + 1;
+        // Set status to Suspended if not already PendingDeallocation
+        let _ = self.status.compare_exchange(
+            RegionStatus::Active as u32,
+            RegionStatus::Suspended as u32,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        new_count
+    }
+
+    /// Resume the region (called when a continuation resumes or is dropped).
+    ///
+    /// Decrements the suspend count. If the count reaches 0 and status is
+    /// PendingDeallocation, returns true indicating the region should be deallocated.
+    /// Returns (new_count, should_deallocate).
+    pub fn resume(&self) -> (u32, bool) {
+        let old_count = self.suspend_count.fetch_sub(1, Ordering::AcqRel);
+        let new_count = old_count.saturating_sub(1);
+
+        if new_count == 0 {
+            // Check if we should deallocate
+            let status = self.status();
+            if status == RegionStatus::PendingDeallocation {
+                return (new_count, true);
+            }
+            // Otherwise, restore to Active if we were Suspended
+            let _ = self.status.compare_exchange(
+                RegionStatus::Suspended as u32,
+                RegionStatus::Active as u32,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        (new_count, false)
+    }
+
+    /// Exit the region scope (called at end of lexical scope).
+    ///
+    /// If the region is suspended (has active continuations), defers deallocation
+    /// by setting status to PendingDeallocation. Returns true if deallocation
+    /// should proceed immediately, false if deferred.
+    pub fn exit_scope(&self) -> bool {
+        // Close the region for new allocations
+        self.close();
+
+        // Check if we have suspended continuations
+        if self.suspend_count.load(Ordering::Acquire) > 0 {
+            // Defer deallocation
+            self.status.store(RegionStatus::PendingDeallocation as u32, Ordering::Release);
+            false
+        } else {
+            // Immediate deallocation is safe
+            true
+        }
     }
 }
 
@@ -674,6 +800,8 @@ impl fmt::Debug for Region {
             .field("capacity", &self.capacity())
             .field("max_size", &self.max_size)
             .field("closed", &self.is_closed())
+            .field("suspend_count", &self.suspend_count())
+            .field("status", &self.status())
             .finish()
     }
 }

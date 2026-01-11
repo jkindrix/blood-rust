@@ -2,10 +2,10 @@
 
 **Version**: 0.3.0-draft
 **Status**: Active Development
-**Implementation**: 🔶 Scaffolded (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
+**Implementation**: 🔶 In Development (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
 **Last Updated**: 2026-01-10
 
-> ⚠️ **Validation Status**: This specification describes design targets. Platform-specific considerations (§9) are validated only for x86-64 Linux. Other platforms are design targets pending validation. FFI code exists in `blood-runtime/src/ffi.rs` but integration with compiled programs is incomplete.
+**Implementation Status**: FFI code exists in `blood-runtime/src/ffi.rs`. x86-64 Linux is the primary validated platform. Other platforms are in development.
 
 **Revision 0.3.0 Changes**:
 - Added validation status box and implementation status link

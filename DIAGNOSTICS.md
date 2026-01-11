@@ -2,15 +2,15 @@
 
 **Version**: 0.3.0-draft
 **Status**: Active Development
-**Implementation**: ✅ Implemented (Phase 0-1 diagnostics complete)
+**Implementation**: ✅ Implemented (core diagnostics complete)
 **Last Updated**: 2026-01-10
 
 **Revision 0.3.0 Changes**:
-- Added implementation phase scope to error code registry (Appendix A)
-- Added phase status indicators to error code tables
+- Added implementation scope to error code registry (Appendix A)
+- Added status indicators to error code tables
 - Added cross-reference to IMPLEMENTATION_STATUS.md
 
-> **Implementation Scope**: This specification describes the complete diagnostic system. Currently, **Phase 0-1 error codes (E01xx, E02xx partial)** are fully implemented. Phase 2+ error codes (E03xx-E07xx) are specified but not yet integrated. See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
+**Implementation Scope**: Core error codes (E01xx, E02xx) are fully implemented. Effect and memory error codes (E03xx-E07xx) are in development. See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md).
 
 This document specifies Blood's error messages, warnings, and diagnostic output format, designed for maximum developer productivity and clarity.
 
@@ -737,7 +737,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 
 ## Appendix A: Error Code Registry
 
-> **Phase Legend**: ✅ = Implemented and tested, 🔶 = Code exists (scaffolded), 📋 = Specified only
+**Legend**: ✅ = Implemented and tested, 🔶 = In development, 📋 = Planned
 
 ### Parse Errors (E01xx) — ✅ Phase 0 Implemented
 
@@ -763,7 +763,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0206 | Missing trait bound | 🔶 |
 | E0207 | Conflicting trait implementations | 🔶 |
 
-### Effect Errors (E03xx) — 🔶 Phase 2 Scaffolded
+### Effect Errors (E03xx) — 🔶 In Development
 
 | Code | Description | Status |
 |------|-------------|--------|
@@ -774,7 +774,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0305 | Missing effect handler | 🔶 |
 | E0306 | Duplicate effect in row | 🔶 |
 
-### Ownership Errors (E04xx) — 🔶 Phase 3 Scaffolded
+### Ownership Errors (E04xx) — 🔶 In Development
 
 | Code | Description | Status |
 |------|-------------|--------|
@@ -785,7 +785,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0405 | Mutable borrow while immutable borrow exists | 📋 |
 | E0406 | Return of borrowed value | 📋 |
 
-### Lifetime Errors (E05xx) — 🔶 Phase 3 Scaffolded
+### Lifetime Errors (E05xx) — 🔶 In Development
 
 | Code | Description | Status |
 |------|-------------|--------|

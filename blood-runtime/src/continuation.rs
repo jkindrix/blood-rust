@@ -73,6 +73,12 @@ pub struct Continuation {
     closure: Option<ContinuationClosure>,
     /// Whether this continuation has been consumed (one-shot enforcement).
     consumed: bool,
+    /// Regions that were suspended when this continuation was captured.
+    ///
+    /// These regions have their suspend_count incremented and will have
+    /// it decremented when this continuation is resumed or dropped.
+    /// Stored as raw u64 IDs to avoid circular dependency with memory module.
+    suspended_regions: Vec<u64>,
 }
 
 impl Continuation {
@@ -91,6 +97,26 @@ impl Continuation {
                 Box::new(r) as Box<dyn Any + Send>
             })),
             consumed: false,
+            suspended_regions: Vec::new(),
+        }
+    }
+
+    /// Create a new continuation with suspended regions.
+    pub fn with_suspended_regions<F, T, R>(f: F, suspended_regions: Vec<u64>) -> Self
+    where
+        F: FnOnce(T) -> R + Send + 'static,
+        T: Any + Send + 'static,
+        R: Any + Send + 'static,
+    {
+        Self {
+            id: next_continuation_id(),
+            closure: Some(Box::new(move |val: Box<dyn Any + Send>| {
+                let t = *val.downcast::<T>().expect("continuation type mismatch");
+                let r = f(t);
+                Box::new(r) as Box<dyn Any + Send>
+            })),
+            consumed: false,
+            suspended_regions,
         }
     }
 
@@ -102,6 +128,26 @@ impl Continuation {
     /// Check if this continuation has been consumed.
     pub fn is_consumed(&self) -> bool {
         self.consumed
+    }
+
+    /// Get the list of suspended region IDs.
+    pub fn suspended_regions(&self) -> &[u64] {
+        &self.suspended_regions
+    }
+
+    /// Add a suspended region to this continuation.
+    pub fn add_suspended_region(&mut self, region_id: u64) {
+        self.suspended_regions.push(region_id);
+    }
+
+    /// Take the suspended regions, leaving an empty vector.
+    pub fn take_suspended_regions(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.suspended_regions)
+    }
+
+    /// Check if this continuation has any suspended regions.
+    pub fn has_suspended_regions(&self) -> bool {
+        !self.suspended_regions.is_empty()
     }
 
     /// Resume the continuation with a value.
@@ -142,6 +188,7 @@ impl std::fmt::Debug for Continuation {
         f.debug_struct("Continuation")
             .field("id", &self.id)
             .field("consumed", &self.consumed)
+            .field("suspended_regions", &self.suspended_regions.len())
             .finish()
     }
 }

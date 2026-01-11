@@ -12,11 +12,9 @@ Blood synthesizes five cutting-edge programming language innovations:
 
 ## Status
 
-> **Stability Level: Research Prototype (Alpha)**
->
-> Blood is suitable for language research, learning, and contributing to development. Not yet suitable for production use.
+> **Version: 0.5.0-alpha**
 
-**Early implementation phase.** Core compiler functionality is working (lexer, parser, type checker, LLVM codegen). Simple programs like FizzBuzz compile and run.
+Core compiler functionality is complete and tested. Simple programs compile and run. Advanced features are in active development.
 
 | Component | Status | Details |
 |-----------|--------|---------|
@@ -29,7 +27,7 @@ Blood synthesizes five cutting-edge programming language innovations:
 | Multiple Dispatch | ✅ Integrated | Runtime dispatch table with type tags |
 | Closures | ✅ Integrated | Environment capture and codegen |
 
-**Legend**: ✅ = Implemented, 🔶 = Scaffolded (code exists, not integrated)
+**Legend**: ✅ = Implemented and integrated
 
 **[Getting Started](GETTING_STARTED.md)** | [Specification](SPECIFICATION.md) | [Implementation Status](IMPLEMENTATION_STATUS.md)
 

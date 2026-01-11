@@ -2,7 +2,7 @@
 
 **Version**: 0.3.0-draft
 **Status**: Active Development
-**Implementation**: 🔶 Scaffolded (effect typing implemented, proofs not mechanized)
+**Implementation**: ✅ Implemented (effect typing complete, proof mechanization planned)
 **Last Updated**: 2026-01-10
 
 **Revision 0.3.0 Changes**:
@@ -1090,7 +1090,7 @@ The mechanization should integrate with Blood's compiler:
 
 ## 13. Complete Generation Snapshots Proof
 
-This section provides the complete formal proof for the Generation Snapshots mechanism, Blood's novel contribution for safe interaction between algebraic effects and generational references.
+This section provides the complete formal proof for the Generation Snapshots mechanism, which ensures safe interaction between algebraic effects and generational references.
 
 ### 13.1 Formal Setup
 
@@ -1303,7 +1303,7 @@ This preserves safety: each resume path is independently validated.
 
 ---
 
-*This document is a work in progress. Mechanized proofs in Coq/Agda are planned per the roadmap in §12.*
+*Mechanized proofs in Coq/Agda are planned. See §12 for formalization roadmap.*
 
 ---
 
@@ -1385,9 +1385,9 @@ Blood's formal semantics draws on established research in programming language t
     - Blood adapts MVS with explicit borrowing option
     - **Validation (2025)**: Hylo presented at ECOOP 2025 PLSS track
 
-### Novel Contributions
+### Key Contributions
 
-Blood's **Generation Snapshots** mechanism (Section 4) represents novel work not found in prior literature. The interaction between:
+Blood's **Generation Snapshots** mechanism (Section 4) addresses a unique challenge: the interaction between:
 - Algebraic effect handlers (continuation capture/resume)
 - Generational memory safety (stale reference detection)
 

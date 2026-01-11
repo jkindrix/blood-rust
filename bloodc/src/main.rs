@@ -497,9 +497,21 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Initialize build cache for incremental compilation
     let mut build_cache = BuildCache::new();
-    if let Err(e) = build_cache.init() {
-        if verbosity > 0 {
-            eprintln!("Warning: Failed to initialize build cache: {}", e);
+    match build_cache.init_and_load() {
+        Ok(true) => {
+            if verbosity > 0 {
+                eprintln!("Loaded existing build cache.");
+            }
+        }
+        Ok(false) => {
+            if verbosity > 1 {
+                eprintln!("Created fresh build cache.");
+            }
+        }
+        Err(e) => {
+            if verbosity > 0 {
+                eprintln!("Warning: Failed to initialize build cache: {}", e);
+            }
         }
     }
 
@@ -868,6 +880,15 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     match status {
         Ok(s) if s.success() => {
+            // Save cache index on successful build for incremental compilation
+            if let Err(e) = build_cache.save_index() {
+                if verbosity > 0 {
+                    eprintln!("Warning: Failed to save build cache index: {}", e);
+                }
+            } else if verbosity > 1 {
+                eprintln!("Saved build cache index.");
+            }
+
             if verbosity > 0 {
                 eprintln!("Linked executable: {}", output_exe.display());
             }

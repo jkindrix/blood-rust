@@ -282,7 +282,9 @@ pub fn import_codebase(
             "effect" => codebase.add_effect(source)?,
             "handler" => codebase.add_handler(source)?,
             "test" => codebase.add_test(source)?,
-            _ => continue, // Skip unknown kinds
+            other => return Err(UcmError::ParseError(
+                format!("Unknown definition kind '{}' in import data", other)
+            )),
         };
         imported += 1;
     }

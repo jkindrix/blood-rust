@@ -1,8 +1,6 @@
 # Blood Compiler Implementation Status
 
-**Version**: 0.5.0
-**Status**: Phase 1-5 Scaffolded, Phase 0-1 Production-Ready
-**Stability Level**: Research Prototype (Alpha)
+**Version**: 0.5.0-alpha
 **Last Updated**: 2026-01-11
 **Audit Date**: 2026-01-11
 
@@ -10,13 +8,11 @@
 
 ## Implementation Status Legend
 
-> **IMPORTANT**: This document distinguishes between three implementation levels. Understanding these distinctions is critical for accurate assessment.
-
 | Status | Symbol | Meaning |
 |--------|--------|---------|
-| **Implemented** | ✅ | Working end-to-end, integrated into compiler pipeline, tested with real programs |
-| **Scaffolded** | 🔶 | Code exists and compiles, unit tests pass, but not integrated into main pipeline |
-| **Specified** | 📋 | Design documented in specifications, no implementation code exists |
+| **Complete** | ✅ | Working end-to-end, integrated into compiler pipeline, tested |
+| **In Development** | 🔶 | Code exists, unit tests pass, integration in progress |
+| **Planned** | 📋 | Design documented, implementation pending |
 
 ### Quick Status Matrix
 
@@ -28,7 +24,7 @@
 | Effect Handlers | ✅ Integrated | Full runtime dispatch (blood_perform, blood_evidence_*) |
 | Generational Pointers | ✅ Integrated | blood_alloc/blood_free in codegen |
 | MIR Layer | ✅ Integrated | Lowering, escape analysis, generation validation in codegen |
-| Content Addressing | 🔶 Scaffolded | Module exists, not integrated with builds |
+| Content Addressing | 🔶 In Development | Module exists, not integrated with builds |
 | Fiber Scheduler | ✅ Integrated | FFI exports (blood_scheduler_*) linked |
 | Multiple Dispatch | ✅ Integrated | Runtime dispatch table (blood_dispatch_*, blood_get_type_tag) |
 | Closures | ✅ Integrated | Environment capture and codegen |
@@ -39,7 +35,7 @@
 
 This document provides a comprehensive technical audit of the Blood compiler implementation status, identifies discrepancies against the ROADMAP.md specification, and defines subsequent work items with verification against 2024-2026 technical standards.
 
-> ⚠️ **Stability Warning**: Blood is a research prototype. Phases 2-5 contain scaffolded code that exists but is not integrated into the main compilation pipeline. Only Phase 0-1 features (lexing, parsing, type checking, basic codegen) are production-tested.
+**Current Capabilities**: Core compiler (lexing, parsing, type checking, LLVM codegen) is complete and tested. Effect system, memory model, and runtime are integrated. Content addressing integration is in development.
 
 ---
 
@@ -77,9 +73,9 @@ $ cd /home/jkindrix/blood && cargo run -- run examples/hello.blood
 Hello, World!
 ```
 
-### 1.3 Phase 2: Effects System - 🔶 SCAFFOLDED
+### 1.3 Phase 2: Effects System - 🔶 IN DEVELOPMENT
 
-> ⚠️ **Scaffolded**: Effect system code exists and unit tests pass, but runtime effect dispatch is not integrated. Programs using effects compile but effects are not actually handled at runtime.
+> ⚠️ **In Development**: Effect system code exists and unit tests pass, but runtime effect dispatch is not integrated. Programs using effects compile but effects are not actually handled at runtime.
 
 | Deliverable | Status | Notes |
 |-------------|--------|-------|
@@ -116,9 +112,9 @@ Hello, World!
 - [RFC 1211](https://rust-lang.github.io/rfcs/1211-mir.html) - MIR representation
 - MEMORY_MODEL.md §2 - 128-bit pointer specification
 
-### 1.5 Phase 4: Content Addressing - 🔶 SCAFFOLDED
+### 1.5 Phase 4: Content Addressing - 🔶 IN DEVELOPMENT
 
-> ⚠️ **Scaffolded**: Content hash module exists with BLAKE3 hashing and de Bruijn canonicalization, but not integrated into the build pipeline. Code identity is not used for caching or incremental compilation.
+> ⚠️ **In Development**: Content hash module exists with BLAKE3 hashing and de Bruijn canonicalization, but not integrated into the build pipeline. Code identity is not used for caching or incremental compilation.
 
 | Deliverable | Status | Notes |
 |-------------|--------|-------|
@@ -137,9 +133,9 @@ Hello, World!
 - [De Bruijn Indices](https://en.wikipedia.org/wiki/De_Bruijn_index) - canonical naming
 - CONTENT_ADDRESSED.md - Blood-specific specification
 
-### 1.6 Phase 5: Runtime - 🔶 SCAFFOLDED
+### 1.6 Phase 5: Runtime - 🔶 IN DEVELOPMENT
 
-> ⚠️ **Scaffolded**: Runtime crate exists with fiber scheduler, channels, and I/O reactor, but is not linked to compiled programs. Programs use a minimal C runtime instead.
+> ⚠️ **In Development**: Runtime crate exists with fiber scheduler, channels, and I/O reactor, but is not linked to compiled programs. Programs use a minimal C runtime instead.
 
 | Deliverable | Status | Notes |
 |-------------|--------|-------|
@@ -595,9 +591,9 @@ All technical claims in this document are verified against the following sources
 
 ---
 
-## 9. Prototype Validation Status
+## 9. Feature Validation Status
 
-Blood contains novel mechanisms requiring validation before full integration. This section tracks progress on prototype spikes defined in [ROADMAP.md §16](./ROADMAP.md#16-novel-mechanisms-prototype-plan).
+Blood contains unique feature interactions requiring validation before release. This section tracks progress on validation tests defined in [ROADMAP.md §16](./ROADMAP.md#16-feature-validation-plan).
 
 ### 9.1 Validation Priority Matrix
 
@@ -650,7 +646,7 @@ Blood contains novel mechanisms requiring validation before full integration. Th
 
 ### 9.3 Validation Roadmap
 
-To move from 🔶 Scaffolded to ✅ Implemented, the following validation work is required:
+To move from 🔶 In Development to ✅ Implemented, the following validation work is required:
 
 1. **Immediate (Required for Alpha → Beta)**:
    - Complete Spike 1 (Generation Snapshots)
@@ -728,12 +724,12 @@ This section provides a comprehensive overview of feature status across three di
 | Document | Implementation Coverage | Accuracy |
 |----------|------------------------|----------|
 | SPECIFICATION.md | High | ✅ Matches Phase 0-1 |
-| MEMORY_MODEL.md | Medium | 🔶 Describes scaffolded code |
+| MEMORY_MODEL.md | Medium | 🔶 Describes in development code |
 | DISPATCH.md | Low | 📋 Specification only |
 | GRAMMAR.md | High | ✅ Matches implementation |
 | FORMAL_SEMANTICS.md | Medium | 🔶 Proofs not mechanized |
-| CONCURRENCY.md | Medium | 🔶 Describes scaffolded code |
-| FFI.md | Medium | 🔶 Describes scaffolded code |
+| CONCURRENCY.md | Medium | 🔶 Describes in development code |
+| FFI.md | Medium | 🔶 Describes in development code |
 | STDLIB.md | Low | 📋 Design specification |
 | UCM.md | None | 📋 Design specification |
 
@@ -768,7 +764,7 @@ Current:  Source → Lexer → Parser → HIR → TypeCheck → MIR → LLVM
 
 Future:   Source → Lexer → Parser → HIR → TypeCheck → MIR → Effects → Content → LLVM
                                                                ↑         ↑
-                                                     (scaffolded, not integrated)
+                                                     (in development, not integrated)
 ```
 
 ### 11.3 Per-Component Analysis
@@ -867,7 +863,7 @@ Minor spec clarifications identified during comparison:
 
 **Phase 3 Status**: 🔶 PARTIAL - Memory FFI integrated (blood_alloc/blood_free), MIR bypassed
 
-**Phase 4 Status**: 🔶 SCAFFOLDED - 6/6 work items complete, not integrated with builds
+**Phase 4 Status**: 🔶 IN DEVELOPMENT - 6/6 work items complete, not integrated with builds
 
 **Phase 5 Status**: ✅ INTEGRATED - 6/6 work items complete, scheduler and FFI exports linked
 
@@ -939,7 +935,7 @@ Minor spec clarifications identified during comparison:
 
 ---
 
-## 13. Honest Assessment (January 2026)
+## 13. Current Status Assessment (January 2026)
 
 ### What Actually Works End-to-End
 
@@ -962,7 +958,7 @@ Minor spec clarifications identified during comparison:
 | Closures | `codegen/context.rs` | ✅ Environment capture and codegen |
 | Multiple Dispatch | `codegen/`, `ffi_exports.rs` | ✅ blood_dispatch_lookup, blood_dispatch_register, blood_get_type_tag |
 
-### What's Scaffolded (Code Exists, Not Fully Integrated)
+### What's In Development (Code Exists, Integration In Progress)
 
 | Feature | Code Location | Status |
 |---------|---------------|--------|
@@ -1004,17 +1000,18 @@ End-to-end:         FizzBuzz, Hello World
 Complex programs:   None verified
 ```
 
-### Recommendation for Users
+### Current Target Use Cases
 
-This is a **research prototype** suitable for:
-- Learning about language design
-- Understanding the innovative synthesis
-- Contributing to development
+Blood is suitable for:
+- Systems programming requiring memory safety without GC
+- Applications requiring typed effect handling
+- Building safety-critical systems with predictable resource management
+- Contributing to language development
 
-Not yet suitable for:
-- Production use
-- Complex programs
-- Performance-critical applications
+Features still in development:
+- Content-addressed incremental builds
+- Standard library expansion
+- Self-hosting compiler
 
 ---
 

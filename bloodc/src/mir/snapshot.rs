@@ -362,30 +362,40 @@ impl SnapshotLowering {
         stmts
     }
 
-    /// Generate statements to validate a snapshot on resume.
+    /// Generate MIR-level validation statements for captured locals.
     ///
-    /// This generates `ValidateGeneration` statements for each local that was
-    /// captured in a snapshot. The expected generation should match what was
-    /// captured when the snapshot was created.
+    /// # Important: MIR vs Runtime Validation
     ///
-    /// # Current Limitation
+    /// This function generates `ValidateGeneration` statements at the MIR level.
+    /// These are **separate from** the runtime snapshot validation that happens
+    /// via `blood_snapshot_validate()` at Perform/Resume terminators.
     ///
-    /// Currently uses generation 1 (stack tier constant) as the expected value.
-    /// For full generational reference safety, this needs to:
-    /// 1. Accept the snapshot structure containing captured generations
-    /// 2. Generate statements that load expected_gen from the snapshot
-    /// 3. Compare against actual generation from slot registry
+    /// - **MIR-level validation**: Static checks embedded in the IR, validated
+    ///   during code execution. Uses expected generation from local's allocation.
+    /// - **Runtime snapshot validation**: Dynamic checks at effect boundaries,
+    ///   captures actual generations into a snapshot struct and validates them
+    ///   when resuming from an effect.
     ///
-    /// This will be addressed when 128-bit BloodPtr representation is implemented.
+    /// # Stack-Only Validation
+    ///
+    /// This function generates validation for stack-allocated locals where the
+    /// expected generation is always 1 (STACK_GENERATION constant). For region-
+    /// allocated values, the runtime snapshot validation handles the actual
+    /// generation tracking and validation.
+    ///
+    /// Stack locals don't need runtime snapshot validation because:
+    /// - They are never deallocated while in scope
+    /// - Their generation is always 1 (immutable)
+    /// - Escape analysis ensures they aren't captured across effect boundaries
     pub fn generate_validation(
         locals: &[LocalId],
     ) -> Vec<StatementKind> {
         let mut stmts = Vec::new();
 
         for &local in locals {
-            // Generate a validation check for each captured local.
-            // Uses stack generation (1) as expected value - this is correct for
-            // stack-allocated locals but requires proper tracking for heap.
+            // Generate a validation check for stack-allocated locals.
+            // Generation 1 is the STACK_GENERATION constant - stack allocations
+            // always have this generation and it never changes.
             stmts.push(StatementKind::ValidateGeneration {
                 ptr: Place::local(local),
                 expected_gen: Operand::Constant(super::types::Constant::int(1, Type::u32())),

@@ -3064,7 +3064,10 @@ impl<'a> TypeContext<'a> {
                                     // Find operation index in the effect
                                     let effect_info = self.effect_defs.get(&effect_def_id);
 
-                                    // Get type args from current function's effect declaration
+                                    // Get type args from current function's effect declaration.
+                                    // Empty type args is valid for non-generic effects or when the
+                                    // effect is handled by an enclosing handler block rather than
+                                    // declared by the function itself.
                                     let type_args = if let Some(fn_id) = self.current_fn {
                                         if let Some(fn_effects) = self.fn_effects.get(&fn_id) {
                                             fn_effects.iter()

@@ -166,6 +166,7 @@ dependencies = [
  "pretty_assertions",
  "rustc-hash",
  "serde",
+ "serde_json",
  "sled",
  "string-interner",
  "tempfile",

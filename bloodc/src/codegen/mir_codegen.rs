@@ -481,19 +481,21 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             StatementKind::CaptureSnapshot(local) => {
-                // Capture generation snapshot for effect handler
-                // This emits code to add the local's address and generation to the
-                // current effect's snapshot. The snapshot is stored in a thread-local
-                // context during effect operations.
+                // CaptureSnapshot statements are intentionally no-ops in codegen.
                 //
-                // For now, this is a placeholder that logs the capture intent.
-                // Full implementation requires:
-                // 1. Access to the current effect context's snapshot handle
-                // 2. Extraction of address/generation from BloodPtr
-                // 3. Calling blood_snapshot_add_entry
+                // The snapshot lifecycle is handled entirely by the Perform terminator:
+                // 1. Perform creates a snapshot via blood_snapshot_create()
+                // 2. Perform iterates effect-captured locals (from escape analysis)
+                // 3. For each captured local, Perform calls blood_snapshot_add_entry()
+                // 4. After the effect operation returns, Perform validates the snapshot
+                // 5. Perform destroys the snapshot via blood_snapshot_destroy()
                 //
-                // The Perform terminator handles the full snapshot lifecycle,
-                // so individual CaptureSnapshot statements are less critical.
+                // CaptureSnapshot statements exist in MIR for:
+                // - Future optimization passes that may want per-statement granularity
+                // - Documentation of which values are being captured
+                // - Alternative backends that prefer statement-level capture
+                //
+                // The current LLVM backend uses bulk capture at Perform time instead.
                 let _ = local;
             }
 
@@ -972,6 +974,12 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // 3. Call blood_continuation_create(callback, context)
                     // 4. Store continuation handle in effect context before blood_perform
                     // 5. Handler retrieves continuation and calls blood_continuation_resume
+                    // 6. **Region Suspension**: For each active region scope containing effect-
+                    //    captured allocations, call blood_continuation_add_suspended_region()
+                    //    to defer deallocation until the continuation is resumed or dropped.
+                    //    The runtime handles this automatically via:
+                    //    - blood_continuation_add_suspended_region(cont_id, region_id) at capture
+                    //    - blood_continuation_resume_with_regions() handles restoration on resume
                     //
                     // For now, non-tail-resumptive effects work correctly if the handler
                     // either resumes immediately or is a final control effect (like throw).
@@ -2199,31 +2207,35 @@ fn tier_name(tier: MemoryTier) -> &'static str {
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     /// Get the generation for an address by calling the runtime's blood_get_generation.
-    /// Falls back to generation 1 (FIRST) if the runtime function is unavailable.
+    ///
+    /// This function requires the runtime to be properly declared via
+    /// `declare_runtime_functions()` which is called by `CodegenContext::new()`.
     fn get_generation_for_address(
         &self,
         address: inkwell::values::IntValue<'ctx>,
-        i32_ty: inkwell::types::IntType<'ctx>,
+        _i32_ty: inkwell::types::IntType<'ctx>,
         span: Span,
     ) -> Result<inkwell::values::IntValue<'ctx>, Vec<Diagnostic>> {
-        if let Some(get_gen_fn) = self.module.get_function("blood_get_generation") {
-            let gen_call_result = self.builder.build_call(
-                get_gen_fn,
-                &[address.into()],
-                "gen_lookup"
-            ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
+        let get_gen_fn = self.module.get_function("blood_get_generation")
+            .ok_or_else(|| vec![ice_err!(
+                span,
+                "Runtime function blood_get_generation not declared";
+                "context" => "This function should be declared by CodegenContext::new()"
+            )])?;
 
-            match gen_call_result.try_as_basic_value().left() {
-                Some(val) => Ok(val.into_int_value()),
-                None => {
-                    // blood_get_generation returned void unexpectedly - use fallback
-                    Ok(i32_ty.const_int(1, false))
-                }
-            }
-        } else {
-            // blood_get_generation not available - use generation 1 as fallback
-            Ok(i32_ty.const_int(1, false))
-        }
+        let gen_call_result = self.builder.build_call(
+            get_gen_fn,
+            &[address.into()],
+            "gen_lookup"
+        ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
+
+        gen_call_result.try_as_basic_value().left()
+            .map(|val| val.into_int_value())
+            .ok_or_else(|| vec![ice_err!(
+                span,
+                "blood_get_generation returned void unexpectedly";
+                "expected" => "i32 return value from runtime function"
+            )])
     }
 
     /// Compute the effective type of a place after applying projections.

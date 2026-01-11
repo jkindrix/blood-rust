@@ -274,7 +274,7 @@ This combination is unprecedented and required formal analysis of interaction sa
 - Rich feature set enabling new programming patterns
 - Formal proofs provide confidence in soundness (see FORMAL_SEMANTICS.md §10)
 
-**Novel Contribution**: The composition and its formal analysis constitute Blood's primary research contribution.
+**Key Innovation**: The composition of these five features enables new programming patterns not available in any single existing language.
 
 ---
 
@@ -302,7 +302,7 @@ This combination is unprecedented and required formal analysis of interaction sa
 - Observability metrics for swap progress
 - Clear semantics for each consistency level
 
-**Novel Contribution**: Integrating hot-swap with algebraic effect handlers is novel to Blood.
+**Key Feature**: Blood integrates hot-swap with algebraic effect handlers, enabling zero-downtime updates.
 
 ---
 
@@ -331,7 +331,7 @@ This combination is unprecedented and required formal analysis of interaction sa
 - Multi-shot handlers require stricter escape classification
 - Effect inference provides information for escape analysis
 
-**Novel Contribution**: This interaction between escape analysis and algebraic effects is novel to Blood.
+**Key Feature**: Blood's escape analysis understands effect boundaries for optimal memory allocation.
 
 ---
 
@@ -447,40 +447,40 @@ $ blood build --use-profile=my_program.profdata -O3
 
 ---
 
-## ADR-016: Prototype-First Validation Strategy
+## ADR-016: Incremental Validation Strategy
 
 **Status**: Accepted
 
-**Context**: Blood combines five cutting-edge innovations, several of which have novel interactions (e.g., generation snapshots + effect resume, linear types + multi-shot handlers). Implementing the full compiler without validating these novel mechanisms risks significant rework if design flaws are discovered late.
+**Context**: Blood combines features from multiple systems (Vale, Koka, Unison, Hylo, Julia). Some feature interactions (e.g., generation snapshots + effect resume, linear types + multi-shot handlers) require validation to ensure correct behavior.
 
-**Decision**: Before proceeding past Phase 0, validate all novel mechanisms through isolated Rust prototypes (see ROADMAP.md §16).
+**Decision**: Validate feature interactions through isolated tests and incremental integration.
 
 **Rationale**:
-- Novel mechanisms (generation snapshots, region suspension) have no prior art to reference
+- Feature interactions require empirical validation
 - Early validation reduces costly rework later
-- Prototypes provide performance data for design validation
-- Safety properties can be tested with property-based testing before formal proofs
+- Tests provide performance data for design validation
+- Safety properties can be tested with property-based testing
 
-**Validation Spikes**:
+**Validation Approach**:
 
-| Spike | Priority | Validates |
-|-------|----------|-----------|
+| Feature Interaction | Priority | Specification |
+|---------------------|----------|---------------|
 | Generation Snapshots + Resume | P0 (Critical) | MEMORY_MODEL.md §4, FORMAL_SEMANTICS.md §4 |
 | Effects + Linear Types | P1 (High) | FORMAL_SEMANTICS.md §8 |
 | Region Suspension | P1 (High) | MEMORY_MODEL.md §6 |
 | Reserved Generation Values | P2 (Medium) | MEMORY_MODEL.md §3.4 |
 
 **Success Criteria**:
-- 100% detection of stale references in prototype
+- 100% detection of stale references
 - No linear value escapes in multi-shot scenarios
 - Performance overhead within design targets
-- Property-based tests pass (100+ random scenarios per spike)
+- Property-based tests pass (100+ random scenarios)
 
 **Consequences**:
-- Phase 1 blocked until P0 spikes validate successfully
-- May require specification amendments based on prototype findings
-- Provides empirical data for MEMORY_MODEL.md performance claims
-- Creates reference implementations for full compiler
+- Integration proceeds after validation passes
+- May require specification amendments based on findings
+- Provides empirical data for performance claims
+- Creates regression tests for ongoing development
 
 ---
 
@@ -668,50 +668,45 @@ benches/
 
 ---
 
-## ADR-020: Research Publication Strategy
+## ADR-020: External Validation Strategy
 
 **Status**: Accepted
 
-**Context**: Blood contains genuine novel contributions (generation snapshots, effects+generational composition, effect-aware escape analysis) that merit academic publication. Publication increases credibility, attracts collaborators, and provides external peer review.
+**Context**: Blood combines features from multiple established systems (Vale, Koka, Unison, Hylo, Julia). External validation ensures the implementation is correct and performant.
 
-**Decision**: Pursue academic publication for Blood's novel contributions.
+**Decision**: Pursue external validation through benchmarks, community engagement, and formal analysis.
 
-**Publication Targets**:
+**Validation Approach**:
 
-| Contribution | Venue | Target Date |
-|--------------|-------|-------------|
-| Five Innovation Composition | OOPSLA/ECOOP workshop | After prototype validation |
-| Generation Snapshots | PLDI/ICFP | After implementation |
-| Effect-Aware Escape Analysis | CC (Compiler Construction) | After Phase 3 |
-| Full Language Design | JFP/TOPLAS | After self-hosting |
+| Validation Type | Method | Status |
+|-----------------|--------|--------|
+| Correctness | Test suite, property-based testing | Ongoing |
+| Performance | Benchmark suite vs. comparable systems | Planned |
+| Formal properties | Proof mechanization | Planned |
+| Community feedback | Open source, community engagement | Active |
 
-**Publication Preparation**:
-1. **Formalization**: Mechanize proofs in Coq/Agda before submission
-2. **Evaluation**: Include empirical benchmarks
-3. **Comparison**: Position against related work (Vale, Koka, Unison, etc.)
-4. **Reproducibility**: Provide artifact for paper evaluation
+**Validation Preparation**:
+1. **Benchmarking**: Compare against Rust, Go, and Koka on equivalent programs
+2. **Formalization**: Mechanize proofs in Coq/Agda for critical properties
+3. **Comparison**: Document differences from Vale, Koka, Unison approaches
+4. **Reproducibility**: Provide benchmark artifacts for independent verification
 
 **Collaboration Opportunities**:
-- Programming language research groups (PLDI/POPL community)
-- Systems research groups (for safety-critical applications)
-- Industry partners interested in memory safety
-
-**Pre-Publication Actions**:
-- Write technical reports documenting novel mechanisms
-- Present at regional PL seminars/workshops
-- Engage with Koka, Vale, Hylo communities for feedback
+- Systems programming community
+- Safety-critical systems developers
+- Language implementers interested in effect systems
 
 **Rationale**:
-- External validation of novel contributions
-- Attracts academic collaborators
-- Increases project credibility
-- Provides rigorous feedback on formal semantics
+- External validation builds confidence in correctness
+- Benchmarks guide optimization priorities
+- Community feedback identifies real-world requirements
+- Formal proofs provide soundness guarantees
 
 **Consequences**:
-- Requires investment in mechanized proofs
-- Publication timeline adds pressure
-- May receive feedback requiring design changes
-- Increases visibility and contributor pool
+- Requires investment in benchmark infrastructure
+- Formal proofs require specialized expertise
+- Community feedback may drive design changes
+- Increases adoption confidence
 
 ---
 

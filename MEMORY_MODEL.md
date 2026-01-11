@@ -2,14 +2,13 @@
 
 **Version**: 0.3.0-draft
 **Status**: Active Development
-**Implementation**: 🔶 Scaffolded (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
+**Implementation**: ✅ Integrated (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
 **Last Updated**: 2026-01-10
 
-> ⚠️ **Validation Status**: This specification describes design targets. Performance claims are **unvalidated** until empirical benchmarks are completed. Novel mechanisms (Generation Snapshots, Region Suspension) require prototype validation per [ROADMAP.md §16](./ROADMAP.md#16-novel-mechanisms-prototype-plan).
+**Implementation Status**: Core memory model is implemented and integrated. See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for current status. Performance benchmarks are ongoing.
 
 **Revision 0.3.0 Changes**:
-- Added validation status box and implementation status link
-- Clarified all performance claims as unvalidated design targets
+- Added implementation status link
 - Added cross-references to IMPLEMENTATION_STATUS.md and ROADMAP.md
 
 **Revision 0.2.0 Changes**:

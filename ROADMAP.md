@@ -1087,23 +1087,23 @@ The following research questions have been resolved based on literature review a
 
 ---
 
-## 16. Novel Mechanisms Prototype Plan
+## 16. Feature Validation Plan
 
-Blood contains several novel mechanisms with no prior implementation. This section defines a spike/prototype plan to validate these mechanisms before full implementation.
+This section defines the validation approach for Blood's feature interactions to ensure correct behavior before release.
 
-### 16.1 Novel Mechanisms Overview
+### 16.1 Feature Interaction Matrix
 
-| Mechanism | Novelty | Risk | Validation Priority |
-|-----------|---------|------|---------------------|
-| **Generation Snapshots** | No prior art for effect continuations | High | P0 (Critical) |
-| **Snapshot + Linear Types** | Novel interaction | Medium | P1 (High) |
-| **Effects + Generations** | Novel safety model | High | P0 (Critical) |
-| **Region Suspension** | Deferred deallocation for effects | Medium | P1 (High) |
-| **Reserved Generation Values** | Overflow without collision | Low | P2 (Medium) |
+| Feature Interaction | Risk | Validation Priority |
+|---------------------|------|---------------------|
+| **Generation Snapshots + Effect Resume** | High | P0 (Critical) |
+| **Snapshots + Linear Types** | Medium | P1 (High) |
+| **Effects + Generational References** | High | P0 (Critical) |
+| **Region Suspension** | Medium | P1 (High) |
+| **Reserved Generation Values** | Low | P2 (Medium) |
 
-### 16.2 Prototype Architecture
+### 16.2 Validation Architecture
 
-The prototype validates novel mechanisms in isolation using Rust (the bootstrap language), without building a full compiler.
+Feature interactions are validated through targeted tests using the Rust implementation before integration into the full compiler.
 
 ```
 blood-prototype/
@@ -1138,7 +1138,7 @@ blood-prototype/
     └── stress_tests.rs       # Concurrent stress tests
 ```
 
-### 16.3 Spike 1: Generation Snapshots + Effect Resume (P0)
+### 16.3 Test 1: Generation Snapshots + Effect Resume (P0)
 
 **Goal**: Validate that generation snapshots correctly detect stale references on continuation resume.
 
@@ -1194,7 +1194,7 @@ impl Continuation {
 - [ ] Snapshot overhead < 100ns per captured reference
 - [ ] Validation overhead < 50ns per reference checked
 
-### 16.4 Spike 2: Effects + Linear Types (P1)
+### 16.4 Test 2: Effects + Linear Types (P1)
 
 **Goal**: Validate that linear values cannot be captured in multi-shot handlers.
 
@@ -1241,7 +1241,7 @@ fn capture_in_continuation(
 | Affine in deep handler | Allowed (at-most-once) |
 | Linear returned from handler | Must be used in handler body |
 
-### 16.5 Spike 3: Region Suspension (P1)
+### 16.5 Test 3: Region Suspension (P1)
 
 **Goal**: Validate that regions with suspended references defer deallocation correctly.
 
@@ -1290,7 +1290,7 @@ impl Region {
 | Exit region with 2 suspended refs | Deferred until both resume |
 | Nested regions with suspension | Inner deferred, outer waits |
 
-### 16.6 Spike 4: Reserved Generation Values (P2)
+### 16.6 Test 4: Reserved Generation Values (P2)
 
 **Goal**: Validate generation overflow handling without collision with reserved values.
 
@@ -1302,21 +1302,21 @@ impl Region {
 | Rapid alloc/free cycles | Promotion before overflow |
 | PERSISTENT_MARKER never from increment | Invariant preserved |
 
-### 16.7 Prototype Timeline
+### 16.7 Validation Schedule
 
-| Week | Activities | Deliverables |
-|------|------------|--------------|
-| 1 | Setup, Spike 1 implementation | Generation snapshot prototype |
-| 2 | Spike 1 tests, Spike 2 implementation | Snapshot tests passing |
-| 3 | Spike 2 tests, Spike 3 implementation | Linear+effects tests passing |
-| 4 | Spike 3 tests, Spike 4, integration | Region suspension tests, full integration |
-| 5 | Performance benchmarks, documentation | Benchmark report, lessons learned |
+| Milestone | Activities | Deliverables |
+|-----------|------------|--------------|
+| M1 | Setup, Test 1 implementation | Generation snapshot validation |
+| M2 | Test 1 complete, Test 2 implementation | Snapshot tests passing |
+| M3 | Test 2 complete, Test 3 implementation | Linear+effects tests passing |
+| M4 | Test 3 complete, Test 4, integration | Region suspension tests, full integration |
+| M5 | Performance benchmarks, documentation | Benchmark report, documentation |
 
 ### 16.8 Success Criteria
 
-The prototype validates Blood's novel mechanisms if:
+Feature validation is complete when:
 
-1. **Safety**: All property-based tests pass (100+ random scenarios per spike)
+1. **Safety**: All property-based tests pass (100+ random scenarios per validation test)
 2. **Correctness**: No stale reference escapes detection
 3. **Performance**: Overhead within design targets (see §16.3)
 4. **Composability**: Mechanisms work correctly when combined
@@ -1331,9 +1331,9 @@ The prototype validates Blood's novel mechanisms if:
 | Linear escape in edge case | Expand test coverage, formal model |
 | Performance cliff in combination | Identify hot paths, optimize |
 
-### 16.10 Lessons Learned Template
+### 16.10 Validation Report Template
 
-After prototype completion, document:
+After validation completion, document:
 
 1. **What worked well**: Design decisions validated
 2. **What needed adjustment**: Changes from original spec

@@ -2,10 +2,10 @@
 
 **Version**: 0.3.0-draft
 **Status**: Design Specification
-**Implementation**: 📋 Specified (not yet implemented)
+**Implementation**: 📋 Planned
 **Last Updated**: 2026-01-10
 
-> ⚠️ **Implementation Status**: This document is a **design specification** for a planned component. UCM does not exist yet. Current Blood development uses standard file-based compilation via `bloodc`. UCM implementation is planned for Phase 6+ per [ROADMAP.md](./ROADMAP.md).
+**Implementation Status**: This document is a design specification for a planned component. Current Blood development uses standard file-based compilation via `bloodc`. UCM implementation is planned for a future release. See [ROADMAP.md](./ROADMAP.md).
 
 **Revision 0.3.0 Changes**:
 - Added implementation status clarification (specification only, not implemented)

@@ -26,12 +26,17 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Format version for hash computation.
 /// Increment when changing canonicalization or serialization.
 pub const FORMAT_VERSION: u8 = 1;
 
 /// A 256-bit content hash (BLAKE3).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Serializes to/from hex string for JSON compatibility.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct ContentHash([u8; 32]);
 
 impl ContentHash {
@@ -102,6 +107,33 @@ impl fmt::Debug for ContentHash {
 impl fmt::Display for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "#{}", self.short_display())
+    }
+}
+
+impl From<ContentHash> for String {
+    fn from(hash: ContentHash) -> Self {
+        // Convert to hex string for serialization
+        hash.0.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+impl TryFrom<String> for ContentHash {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if s.len() != 64 {
+            return Err(format!("expected 64 hex characters, got {}", s.len()));
+        }
+
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            let hex_str = std::str::from_utf8(chunk)
+                .map_err(|_| "invalid UTF-8 in hex string")?;
+            bytes[i] = u8::from_str_radix(hex_str, 16)
+                .map_err(|_| format!("invalid hex at position {}", i * 2))?;
+        }
+
+        Ok(ContentHash(bytes))
     }
 }
 

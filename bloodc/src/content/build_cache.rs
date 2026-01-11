@@ -29,6 +29,8 @@ use std::fs;
 use std::io::{self, Read, Write as IoWrite};
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use super::hash::{ContentHash, ContentHasher};
 use crate::hir;
 
@@ -70,6 +72,8 @@ pub enum CacheError {
     Corrupted(String),
     /// Cache version mismatch.
     VersionMismatch { expected: u32, found: u32 },
+    /// JSON serialization/deserialization error.
+    Json(String),
 }
 
 impl std::fmt::Display for CacheError {
@@ -80,6 +84,7 @@ impl std::fmt::Display for CacheError {
             Self::VersionMismatch { expected, found } => {
                 write!(f, "cache version mismatch: expected {}, found {}", expected, found)
             }
+            Self::Json(msg) => write!(f, "cache JSON error: {}", msg),
         }
     }
 }
@@ -90,6 +95,23 @@ impl From<io::Error> for CacheError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
     }
+}
+
+impl From<serde_json::Error> for CacheError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e.to_string())
+    }
+}
+
+/// Persistent cache index for dependency tracking.
+///
+/// This is serialized to `deps.json` in the cache directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CacheIndex {
+    /// Cache format version for compatibility checking.
+    version: u32,
+    /// Dependency graph: hash → list of dependency hashes.
+    dependencies: HashMap<ContentHash, Vec<ContentHash>>,
 }
 
 impl BuildCache {
@@ -339,6 +361,75 @@ impl BuildCache {
         self.object_cache.clear();
         self.dependencies.clear();
         self.init()
+    }
+
+    /// Get the path to the dependency index file.
+    fn deps_path(&self) -> PathBuf {
+        self.version_dir().join("deps.json")
+    }
+
+    /// Save the dependency index to disk.
+    ///
+    /// This persists the dependency graph so that subsequent builds
+    /// can use it for incremental invalidation.
+    pub fn save_index(&self) -> Result<(), CacheError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let index = CacheIndex {
+            version: CACHE_VERSION,
+            dependencies: self.dependencies.clone(),
+        };
+
+        let json = serde_json::to_string_pretty(&index)?;
+        let path = self.deps_path();
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::write(&path, json)?;
+        Ok(())
+    }
+
+    /// Load the dependency index from disk.
+    ///
+    /// Returns `Ok(true)` if the index was successfully loaded,
+    /// `Ok(false)` if no index exists (fresh cache), or an error.
+    pub fn load_index(&mut self) -> Result<bool, CacheError> {
+        if !self.enabled {
+            return Ok(false);
+        }
+
+        let path = self.deps_path();
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        let json = fs::read_to_string(&path)?;
+        let index: CacheIndex = serde_json::from_str(&json)?;
+
+        // Verify version compatibility
+        if index.version != CACHE_VERSION {
+            return Err(CacheError::VersionMismatch {
+                expected: CACHE_VERSION,
+                found: index.version,
+            });
+        }
+
+        self.dependencies = index.dependencies;
+        Ok(true)
+    }
+
+    /// Initialize and load existing cache data.
+    ///
+    /// This creates the cache directory structure and loads any
+    /// existing dependency index.
+    pub fn init_and_load(&mut self) -> Result<bool, CacheError> {
+        self.init()?;
+        self.load_index()
     }
 }
 
@@ -1474,5 +1565,92 @@ mod tests {
 
         cache.clear().unwrap();
         assert!(!cache.has_object(&hash));
+    }
+
+    #[test]
+    fn test_build_cache_save_and_load_index() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let hash_a = ContentHash::compute(b"a");
+        let hash_b = ContentHash::compute(b"b");
+        let hash_c = ContentHash::compute(b"c");
+
+        // Create cache, add dependencies, save index
+        {
+            let mut cache = BuildCache::with_dir(temp_dir.path().to_path_buf());
+            cache.init().unwrap();
+
+            cache.record_dependencies(hash_b, vec![hash_a]);
+            cache.record_dependencies(hash_c, vec![hash_b, hash_a]);
+
+            cache.save_index().unwrap();
+        }
+
+        // Create new cache instance and load index
+        {
+            let mut cache = BuildCache::with_dir(temp_dir.path().to_path_buf());
+            let loaded = cache.load_index().unwrap();
+            assert!(loaded);
+
+            // Verify dependencies were restored
+            let deps_b = cache.get_dependencies(&hash_b).unwrap();
+            assert_eq!(deps_b.len(), 1);
+            assert!(deps_b.contains(&hash_a));
+
+            let deps_c = cache.get_dependencies(&hash_c).unwrap();
+            assert_eq!(deps_c.len(), 2);
+            assert!(deps_c.contains(&hash_a));
+            assert!(deps_c.contains(&hash_b));
+        }
+    }
+
+    #[test]
+    fn test_build_cache_load_nonexistent_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut cache = BuildCache::with_dir(temp_dir.path().to_path_buf());
+        cache.init().unwrap();
+
+        // Should return Ok(false) for missing index
+        let loaded = cache.load_index().unwrap();
+        assert!(!loaded);
+    }
+
+    #[test]
+    fn test_build_cache_init_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let hash_a = ContentHash::compute(b"a");
+        let hash_b = ContentHash::compute(b"b");
+
+        // First build: create and save
+        {
+            let mut cache = BuildCache::with_dir(temp_dir.path().to_path_buf());
+            cache.init().unwrap();
+            cache.record_dependencies(hash_b, vec![hash_a]);
+            cache.save_index().unwrap();
+        }
+
+        // Second build: init_and_load should restore dependencies
+        {
+            let mut cache = BuildCache::with_dir(temp_dir.path().to_path_buf());
+            let loaded = cache.init_and_load().unwrap();
+            assert!(loaded);
+
+            let deps = cache.get_dependencies(&hash_b).unwrap();
+            assert!(deps.contains(&hash_a));
+        }
+    }
+
+    #[test]
+    fn test_content_hash_serialization_roundtrip() {
+        let original = ContentHash::compute(b"test serialization");
+
+        // Serialize to string
+        let serialized: String = original.into();
+        assert_eq!(serialized.len(), 64); // 32 bytes * 2 hex chars
+
+        // Deserialize back
+        let deserialized = ContentHash::try_from(serialized).unwrap();
+        assert_eq!(original, deserialized);
     }
 }
