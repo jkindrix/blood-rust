@@ -187,6 +187,10 @@ impl TypeError {
                 "E0302",
                 format!("effect mismatch: expected `{expected}`, found `{found}`"),
             ),
+            TypeErrorKind::ResumeTypeMismatch { expected, found } => (
+                "E0303",
+                format!("resume type mismatch: expected `{expected}`, found `{found}`"),
+            ),
             TypeErrorKind::InvalidHandler { reason } => (
                 "E0305",
                 format!("invalid effect handler: {reason}"),
@@ -386,6 +390,11 @@ pub enum TypeErrorKind {
     /// Unhandled effect.
     UnhandledEffect {
         effect: String,
+    },
+    /// Resume type mismatch - value passed to resume doesn't match expected type.
+    ResumeTypeMismatch {
+        expected: String,
+        found: String,
     },
     /// Invalid effect handler.
     InvalidHandler {

@@ -90,6 +90,9 @@ pub struct TypeContext<'a> {
     /// Type parameter bounds: maps TyVarId to list of trait DefIds it must implement.
     /// Used for method lookup on generic type parameters.
     type_param_bounds: HashMap<TyVarId, Vec<DefId>>,
+    /// Expected type for `resume(value)` in the current handler operation body.
+    /// Set when entering a handler operation scope, used for E0303 error checking.
+    current_resume_type: Option<Type>,
 }
 
 /// Information about a struct.
@@ -158,6 +161,9 @@ pub struct HandlerInfo {
     pub kind: ast::HandlerKind,
     /// The effect this handler handles (DefId of the effect).
     pub effect_id: DefId,
+    /// Type arguments to the effect (e.g., `State<i32>` -> `[i32]`).
+    /// Used to substitute the effect's generic params when type-checking handler operations.
+    pub effect_type_args: Vec<Type>,
     /// The operations implemented by this handler (name, body_id).
     pub operations: Vec<(String, hir::BodyId)>,
     pub generics: Vec<TyVarId>,
@@ -315,6 +321,7 @@ impl<'a> TypeContext<'a> {
             method_self_types: HashMap::new(),
             trait_defs: HashMap::new(),
             type_param_bounds: HashMap::new(),
+            current_resume_type: None,
         };
         ctx.register_builtins();
         ctx
@@ -1183,26 +1190,31 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect a const declaration.
+    ///
+    /// Currently, const items are parsed but not yet fully implemented in codegen.
+    /// This function reports an explicit error rather than silently ignoring the declaration.
     fn collect_const(&mut self, const_decl: &ast::ConstDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(const_decl.name.node);
-        let _def_id = self.resolver.define_item(
-            name,
-            hir::DefKind::Const,
+        Err(TypeError::new(
+            TypeErrorKind::UnsupportedFeature {
+                feature: format!("const item `{}` - const declarations are not yet implemented", name),
+            },
             const_decl.span,
-        )?;
-        // Type-checking const values is deferred
-        Ok(())
+        ))
     }
 
     /// Collect a static declaration.
+    ///
+    /// Currently, static items are parsed but not yet fully implemented in codegen.
+    /// This function reports an explicit error rather than silently ignoring the declaration.
     fn collect_static(&mut self, static_decl: &ast::StaticDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(static_decl.name.node);
-        let _def_id = self.resolver.define_item(
-            name,
-            hir::DefKind::Static,
+        Err(TypeError::new(
+            TypeErrorKind::UnsupportedFeature {
+                feature: format!("static item `{}` - static declarations are not yet implemented", name),
+            },
             static_decl.span,
-        )?;
-        Ok(())
+        ))
     }
 
     /// Collect an effect declaration.
@@ -1394,6 +1406,7 @@ impl<'a> TypeContext<'a> {
             name,
             kind: handler.kind,
             effect_id,
+            effect_type_args: effect_ref.type_args.clone(),
             operations: Vec::new(), // Will be populated during body type-checking
             generics: generics_vec,
             fields,
@@ -1906,7 +1919,7 @@ impl<'a> TypeContext<'a> {
         // Phase 1: Check coherence (no overlapping impls)
         self.check_coherence();
 
-        // Phase 2: Type-check function bodies
+        // Type-check function bodies
         let pending = std::mem::take(&mut self.pending_bodies);
         for (def_id, func) in pending {
             if let Err(e) = self.check_function_body(def_id, &func) {
@@ -2202,6 +2215,15 @@ impl<'a> TypeContext<'a> {
                 handler.span,
             ))?;
 
+        // Build substitution map from effect's generic params to handler's type args.
+        // This is needed because the effect's operation types (e.g., `put(s: S)`) use
+        // the effect's TyVarIds, but the handler's state fields use the handler's TyVarIds.
+        // We substitute effect's params with the handler's type args to unify them.
+        let effect_subst: HashMap<TyVarId, Type> = effect_info.generics.iter()
+            .zip(handler_info.effect_type_args.iter())
+            .map(|(ty_var, ty_arg)| (*ty_var, ty_arg.clone()))
+            .collect();
+
         // Collect operation body IDs
         let mut operation_body_ids: Vec<(String, hir::BodyId)> = Vec::new();
 
@@ -2228,9 +2250,11 @@ impl<'a> TypeContext<'a> {
 
             // Add return place (unit type for operations that use resume)
             // Note: The actual return happens through resume, not normal return
+            // Substitute effect's type params with handler's type args
+            let return_ty = self.substitute_type_vars(&effect_op.return_ty, &effect_subst);
             self.locals.push(hir::Local {
                 id: LocalId::RETURN_PLACE,
-                ty: effect_op.return_ty.clone(),
+                ty: return_ty,
                 mutable: false,
                 name: None,
                 span: op_impl.span,
@@ -2257,11 +2281,13 @@ impl<'a> TypeContext<'a> {
             }
 
             // Add operation parameters to scope
+            // Substitute effect's type params with handler's type args
             for (param_idx, param) in op_impl.params.iter().enumerate() {
                 if let ast::PatternKind::Ident { name, mutable, .. } = &param.kind {
                     let param_name = self.symbol_to_string(name.node);
                     let param_ty = if param_idx < effect_op.params.len() {
-                        effect_op.params[param_idx].clone()
+                        // Apply substitution to get the handler's type args
+                        self.substitute_type_vars(&effect_op.params[param_idx], &effect_subst)
                     } else {
                         // Should not happen if effect validation passed
                         Type::unit()
@@ -2286,7 +2312,9 @@ impl<'a> TypeContext<'a> {
             // Add 'resume' to scope as a special continuation function
             // Resume is a function that takes the return value and returns unit
             // (the actual continuation handling happens at runtime)
-            let resume_ty = Type::function(vec![effect_op.return_ty.clone()], Type::unit());
+            // Use the substituted return type for consistency with handler's type args
+            let resume_return_ty = self.substitute_type_vars(&effect_op.return_ty, &effect_subst);
+            let resume_ty = Type::function(vec![resume_return_ty.clone()], Type::unit());
             let resume_local_id = self.resolver.define_local(
                 "resume".to_string(),
                 resume_ty.clone(),
@@ -2300,6 +2328,9 @@ impl<'a> TypeContext<'a> {
                 name: Some("resume".to_string()),
                 span: op_impl.span,
             });
+
+            // Set the expected resume type for E0303 checking
+            self.current_resume_type = Some(resume_return_ty);
 
             // Type-check the body (expected type is unit since resume handles the return)
             let body_expr = self.check_block(&op_impl.body, &Type::unit())?;
@@ -2319,6 +2350,7 @@ impl<'a> TypeContext<'a> {
             operation_body_ids.push((op_name, body_id));
 
             self.resolver.pop_scope();
+            self.current_resume_type = None;
         }
 
         // Type-check return clause if present
@@ -3242,6 +3274,21 @@ impl<'a> TypeContext<'a> {
                 }
 
                 let value_expr = self.infer_expr(value)?;
+
+                // Check that the value type matches the expected resume type (E0303)
+                if let Some(ref expected_ty) = self.current_resume_type {
+                    let value_ty = self.unifier.resolve(&value_expr.ty);
+                    let expected = self.unifier.resolve(expected_ty);
+                    if self.unifier.unify(&value_ty, &expected, expr.span).is_err() {
+                        return Err(TypeError::new(
+                            TypeErrorKind::ResumeTypeMismatch {
+                                expected: format!("{}", expected),
+                                found: format!("{}", value_ty),
+                            },
+                            expr.span,
+                        ));
+                    }
+                }
 
                 // The type of the resume expression depends on the continuation's return type.
                 // For deep handlers, this is typically the handler's overall return type.
