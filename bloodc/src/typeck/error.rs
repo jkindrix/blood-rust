@@ -188,6 +188,10 @@ impl TypeError {
                 "E1038",
                 "type annotations needed for parameter".to_string(),
             ),
+            TypeErrorKind::TraitBoundNotSatisfied { ty, trait_name } => (
+                "E1039",
+                format!("the trait bound `{ty}: {trait_name}` is not satisfied"),
+            ),
         };
 
         let mut diag = Diagnostic::error(message, self.span).with_code(code);
@@ -352,6 +356,11 @@ pub enum TypeErrorKind {
     },
     /// Type annotation required.
     TypeAnnotationRequired,
+    /// Trait bound not satisfied.
+    TraitBoundNotSatisfied {
+        ty: Type,
+        trait_name: String,
+    },
 }
 
 impl fmt::Display for TypeError {

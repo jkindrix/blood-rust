@@ -58,6 +58,8 @@ pub struct TypeContext<'a> {
     /// This is populated when entering a generic function/struct/enum
     /// and cleared when leaving.
     generic_params: HashMap<String, TyVarId>,
+    /// Trait bounds for type parameters (TyVarId -> list of required trait DefIds).
+    type_param_bounds: HashMap<TyVarId, Vec<DefId>>,
     /// Next type parameter ID for generating unique TyVarIds.
     next_type_param_id: u32,
     /// Builtin function names (DefId -> function name).
@@ -286,6 +288,7 @@ impl<'a> TypeContext<'a> {
             next_body_id: 0,
             locals: Vec::new(),
             generic_params: HashMap::new(),
+            type_param_bounds: HashMap::new(),
             next_type_param_id: 0,
             builtin_fns: HashMap::new(),
             effect_defs: HashMap::new(),
@@ -428,6 +431,127 @@ impl<'a> TypeContext<'a> {
         }
 
         Ok(())
+    }
+
+    /// Register type parameters and their trait bounds.
+    ///
+    /// This saves the current generic params, registers new ones with their bounds,
+    /// and returns the TyVarIds for the registered params. The caller must restore
+    /// generic_params after processing.
+    fn register_type_params(
+        &mut self,
+        type_params: Option<&ast::TypeParams>,
+    ) -> Result<(HashMap<String, TyVarId>, Vec<TyVarId>), TypeError> {
+        let saved = std::mem::take(&mut self.generic_params);
+        let _saved_bounds = std::mem::take(&mut self.type_param_bounds);
+        let mut generics_vec = Vec::new();
+
+        if let Some(params) = type_params {
+            for type_param in &params.params {
+                let param_name = self.symbol_to_string(type_param.name.node);
+                let ty_var_id = TyVarId(self.next_type_param_id);
+                self.next_type_param_id += 1;
+                self.generic_params.insert(param_name.clone(), ty_var_id);
+                generics_vec.push(ty_var_id);
+
+                // Process trait bounds for this type parameter
+                let mut bounds = Vec::new();
+                for bound_ty in &type_param.bounds {
+                    match &bound_ty.kind {
+                        ast::TypeKind::Path(path) => {
+                            if !path.segments.is_empty() {
+                                let bound_name = self.symbol_to_string(path.segments[0].name.node);
+                                match self.resolver.lookup(&bound_name) {
+                                    Some(Binding::Def(def_id)) => {
+                                        if let Some(info) = self.resolver.def_info.get(&def_id) {
+                                            if matches!(info.kind, hir::DefKind::Trait) {
+                                                bounds.push(def_id);
+                                            } else {
+                                                return Err(TypeError::new(
+                                                    TypeErrorKind::TraitNotFound { name: bound_name },
+                                                    bound_ty.span,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(TypeError::new(
+                                            TypeErrorKind::TraitNotFound { name: bound_name },
+                                            bound_ty.span,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(TypeError::new(
+                                TypeErrorKind::UnsupportedFeature {
+                                    feature: "complex trait bounds".to_string(),
+                                },
+                                bound_ty.span,
+                            ));
+                        }
+                    }
+                }
+
+                if !bounds.is_empty() {
+                    self.type_param_bounds.insert(ty_var_id, bounds);
+                }
+            }
+        }
+
+        Ok((saved, generics_vec))
+    }
+
+    /// Restore saved generic params and bounds.
+    fn restore_type_params(
+        &mut self,
+        saved_params: HashMap<String, TyVarId>,
+    ) {
+        self.generic_params = saved_params;
+        // Note: type_param_bounds are kept for later checking
+    }
+
+    /// Check if a type satisfies all trait bounds required by a type parameter.
+    #[allow(dead_code)]
+    fn check_trait_bounds(
+        &self,
+        ty: &Type,
+        bounds: &[DefId],
+        span: Span,
+    ) -> Result<(), TypeError> {
+        for &trait_def_id in bounds {
+            if !self.type_implements_trait(ty, trait_def_id) {
+                let trait_name = self.trait_defs.get(&trait_def_id)
+                    .map(|info| info.name.clone())
+                    .unwrap_or_else(|| format!("{:?}", trait_def_id));
+                return Err(TypeError::new(
+                    TypeErrorKind::TraitBoundNotSatisfied {
+                        ty: ty.clone(),
+                        trait_name,
+                    },
+                    span,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if a type implements a trait.
+    ///
+    /// Currently checks if there's an impl block for the type that implements the trait.
+    fn type_implements_trait(&self, ty: &Type, trait_def_id: DefId) -> bool {
+        // For now, we check if any impl block for this type implements the trait
+        for impl_block in &self.impl_blocks {
+            if impl_block.trait_ref == Some(trait_def_id) && impl_block.self_ty == *ty {
+                return true;
+            }
+        }
+
+        // TODO: Check built-in trait implementations (e.g., Copy for primitives)
+        // For now, we're lenient and return true if we can't prove it's false
+        // This is a simplification until full trait solving is implemented
+        false
     }
 
     /// Collect a declaration.
