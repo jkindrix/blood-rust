@@ -21,8 +21,18 @@ pub fn type_size(ty: &Type) -> usize {
         TypeKind::Fn { .. } => 8, // function pointer
         TypeKind::Closure { .. } => 8, // closure (function pointer + captured environment)
         TypeKind::Adt { .. } => 8, // Placeholder - ADT sizes should be computed from field layout
+        TypeKind::Range { element, inclusive } => {
+            // Range<T>: { start: T, end: T } or RangeInclusive<T>: { start: T, end: T, exhausted: bool }
+            let elem_size = type_size(element);
+            if *inclusive {
+                elem_size * 2 + 1 // start + end + exhausted (bool)
+            } else {
+                elem_size * 2 // start + end
+            }
+        }
         TypeKind::Never => 0, // uninhabited type, zero-sized
         TypeKind::Error => 0, // error recovery, treated as zero-sized
+        TypeKind::DynTrait { .. } => 16, // fat pointer (data ptr + vtable ptr)
         TypeKind::Infer(var_id) => {
             // Type variable should be resolved before codegen
             ice!("type_size called on unresolved type variable"; "var_id" => var_id);
@@ -84,8 +94,10 @@ pub fn type_alignment(ty: &Type) -> usize {
         TypeKind::Fn { .. } => 8, // function pointer alignment
         TypeKind::Closure { .. } => 8, // closure alignment
         TypeKind::Adt { .. } => 8, // conservative default - should compute from fields
+        TypeKind::Range { element, .. } => type_alignment(element), // align to element
         TypeKind::Never => 1, // zero-sized, minimal alignment
         TypeKind::Error => 1, // error recovery
+        TypeKind::DynTrait { .. } => 8, // fat pointer alignment
         TypeKind::Infer(var_id) => {
             ice!("type_alignment called on unresolved type variable"; "var_id" => var_id);
             8 // conservative default

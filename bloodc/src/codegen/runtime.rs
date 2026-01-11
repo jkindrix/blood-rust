@@ -19,16 +19,36 @@
 //! ### I/O
 //! - `print_int`, `println_int` - Integer output
 //! - `print_str`, `println_str` - String output
+//! - `print_bool`, `println_bool` - Boolean output
 //!
 //! ### Memory (Generational References)
 //! - `blood_alloc` - Allocate with generation tracking
 //! - `blood_free` - Free allocated memory
-//! - `blood_check_generation` - Validate reference freshness
+//! - `blood_validate_generation` - Validate address/generation pair (0=valid, 1=stale)
+//! - `blood_register_allocation` - Register address in slot registry
+//! - `blood_unregister_allocation` - Remove address from slot registry
+//! - `blood_get_generation` - Get current generation for address
+//! - `blood_increment_generation` - Increment generation (invalidates refs)
 //! - `blood_stale_reference_panic` - Handle stale reference errors
 //!
 //! ### Effects
 //! - `blood_evidence_create/destroy/push/pop/get` - Evidence vectors
-//! - `blood_fiber_create/suspend/resume` - Continuation support
+//! - `blood_evidence_register` - Register handler with operations
+//! - `blood_evidence_set_state/get_state` - Handler state management
+//! - `blood_evidence_current` - Get current evidence vector
+//! - `blood_perform` - Perform effect operation
+//! - `blood_handler_depth` - Get handler depth for effect
+//!
+//! ### Continuations
+//! - `blood_fiber_create/suspend/resume` - Fiber support
+//! - `blood_snapshot_create/add_entry/validate/destroy` - Generation snapshots
+//!
+//! ### Multiple Dispatch
+//! - `blood_dispatch_register/lookup` - Method dispatch tables
+//! - `blood_get_type_tag` - Runtime type information
+//!
+//! ### Scheduler
+//! - `blood_scheduler_init/spawn/yield/run` - Work-stealing scheduler
 //!
 //! ### Runtime Lifecycle
 //! - `blood_runtime_init` - Initialize runtime
@@ -92,8 +112,26 @@ pub mod functions {
     /// Free memory.
     pub const FREE: &str = "blood_free";
 
-    /// Check if a generational reference is valid.
+    /// Allocate memory (aborts on failure).
+    pub const ALLOC_OR_ABORT: &str = "blood_alloc_or_abort";
+
+    /// Check if a generational reference is valid (legacy).
     pub const CHECK_GENERATION: &str = "blood_check_generation";
+
+    /// Validate generation for an address (returns 0=valid, 1=stale).
+    pub const VALIDATE_GENERATION: &str = "blood_validate_generation";
+
+    /// Register an allocation in the slot registry.
+    pub const REGISTER_ALLOCATION: &str = "blood_register_allocation";
+
+    /// Unregister an allocation from the slot registry.
+    pub const UNREGISTER_ALLOCATION: &str = "blood_unregister_allocation";
+
+    /// Get the current generation for an address.
+    pub const GET_GENERATION: &str = "blood_get_generation";
+
+    /// Increment the generation for an address (invalidates references).
+    pub const INCREMENT_GENERATION: &str = "blood_increment_generation";
 
     /// Called on stale reference access.
     pub const STALE_REFERENCE_PANIC: &str = "blood_stale_reference_panic";
@@ -114,6 +152,30 @@ pub mod functions {
 
     /// Get handler from evidence vector.
     pub const EVIDENCE_GET: &str = "blood_evidence_get";
+
+    /// Push handler with state onto evidence vector.
+    pub const EVIDENCE_PUSH_WITH_STATE: &str = "blood_evidence_push_with_state";
+
+    /// Set the current evidence vector.
+    pub const EVIDENCE_SET_CURRENT: &str = "blood_evidence_set_current";
+
+    /// Register handler with operations for an effect.
+    pub const EVIDENCE_REGISTER: &str = "blood_evidence_register";
+
+    /// Set state for current handler.
+    pub const EVIDENCE_SET_STATE: &str = "blood_evidence_set_state";
+
+    /// Get state for handler at index.
+    pub const EVIDENCE_GET_STATE: &str = "blood_evidence_get_state";
+
+    /// Get current evidence vector.
+    pub const EVIDENCE_CURRENT: &str = "blood_evidence_current";
+
+    /// Perform an effect operation.
+    pub const PERFORM: &str = "blood_perform";
+
+    /// Get handler depth for an effect.
+    pub const HANDLER_DEPTH: &str = "blood_handler_depth";
 
     // === Fiber/Continuation Support ===
 
@@ -153,6 +215,52 @@ pub mod functions {
 
     /// Panic handler.
     pub const PANIC: &str = "blood_panic";
+
+    // === Multiple Dispatch ===
+
+    /// Register a method implementation for a type.
+    pub const DISPATCH_REGISTER: &str = "blood_dispatch_register";
+
+    /// Look up a method implementation for a type.
+    pub const DISPATCH_LOOKUP: &str = "blood_dispatch_lookup";
+
+    /// Get the runtime type tag from an object.
+    pub const GET_TYPE_TAG: &str = "blood_get_type_tag";
+
+    // === Work-Stealing Scheduler ===
+
+    /// Initialize the scheduler.
+    pub const SCHEDULER_INIT: &str = "blood_scheduler_init";
+
+    /// Spawn a task with argument.
+    pub const SCHEDULER_SPAWN: &str = "blood_scheduler_spawn";
+
+    /// Spawn a task without argument.
+    pub const SCHEDULER_SPAWN_SIMPLE: &str = "blood_scheduler_spawn_simple";
+
+    /// Yield the current task.
+    pub const SCHEDULER_YIELD: &str = "blood_scheduler_yield";
+
+    /// Run the scheduler.
+    pub const SCHEDULER_RUN: &str = "blood_scheduler_run";
+
+    /// Run the scheduler in background.
+    pub const SCHEDULER_RUN_BACKGROUND: &str = "blood_scheduler_run_background";
+
+    /// Shutdown the scheduler.
+    pub const SCHEDULER_SHUTDOWN: &str = "blood_scheduler_shutdown";
+
+    /// Wait for all tasks to complete.
+    pub const SCHEDULER_WAIT: &str = "blood_scheduler_wait";
+
+    /// Get count of active fibers.
+    pub const SCHEDULER_ACTIVE_FIBERS: &str = "blood_scheduler_active_fibers";
+
+    /// Get count of runnable fibers.
+    pub const SCHEDULER_RUNNABLE_FIBERS: &str = "blood_scheduler_runnable_fibers";
+
+    /// Check if scheduler is running.
+    pub const SCHEDULER_IS_RUNNING: &str = "blood_scheduler_is_running";
 }
 
 /// Generate a minimal C runtime source.
@@ -174,6 +282,66 @@ pub fn generate_c_runtime() -> String {
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+#define GENERATION_PERSISTENT UINT32_MAX
+#define SLOT_REGISTRY_SIZE 65536
+#define MAX_EVIDENCE_DEPTH 64
+#define MAX_HANDLERS_PER_EFFECT 16
+#define MAX_SNAPSHOT_ENTRIES 256
+
+// ============================================================================
+// Generation Tracking - Slot Registry
+// ============================================================================
+
+typedef struct {
+    uint64_t address;
+    uint32_t generation;
+    uint32_t size;
+    uint8_t in_use;
+} SlotEntry;
+
+static SlotEntry slot_registry[SLOT_REGISTRY_SIZE];
+static uint32_t next_generation = 1;
+
+static size_t slot_hash(uint64_t addr) {
+    // Simple hash for address to slot index
+    return (size_t)((addr >> 3) ^ (addr >> 17)) % SLOT_REGISTRY_SIZE;
+}
+
+static SlotEntry* find_slot(uint64_t addr) {
+    size_t idx = slot_hash(addr);
+    size_t start = idx;
+    do {
+        if (slot_registry[idx].in_use && slot_registry[idx].address == addr) {
+            return &slot_registry[idx];
+        }
+        if (!slot_registry[idx].in_use) {
+            return NULL; // Not found
+        }
+        idx = (idx + 1) % SLOT_REGISTRY_SIZE;
+    } while (idx != start);
+    return NULL;
+}
+
+static SlotEntry* find_or_create_slot(uint64_t addr) {
+    size_t idx = slot_hash(addr);
+    size_t start = idx;
+    SlotEntry* first_empty = NULL;
+    do {
+        if (slot_registry[idx].in_use && slot_registry[idx].address == addr) {
+            return &slot_registry[idx];
+        }
+        if (!slot_registry[idx].in_use && !first_empty) {
+            first_empty = &slot_registry[idx];
+        }
+        idx = (idx + 1) % SLOT_REGISTRY_SIZE;
+    } while (idx != start);
+    return first_empty;
+}
 
 // ============================================================================
 // I/O Functions
@@ -256,39 +424,150 @@ void blood_todo(void) {
 }
 
 // ============================================================================
-// Memory Management (Simple - no generational tracking)
+// Memory Management with Generation Tracking
 // ============================================================================
 
 int blood_alloc(size_t size, uint64_t* out_addr, uint64_t* out_gen_meta) {
     if (!out_addr || !out_gen_meta) return -1;
     void* ptr = malloc(size);
     if (!ptr) return -3;
-    *out_addr = (uint64_t)ptr;
-    *out_gen_meta = ((uint64_t)1 << 32) | 2; // gen=1, metadata=REGION
+
+    uint64_t addr = (uint64_t)ptr;
+    uint32_t gen = next_generation++;
+
+    // Register in slot registry
+    SlotEntry* slot = find_or_create_slot(addr);
+    if (slot) {
+        slot->address = addr;
+        slot->generation = gen;
+        slot->size = (uint32_t)size;
+        slot->in_use = 1;
+    }
+
+    *out_addr = addr;
+    *out_gen_meta = ((uint64_t)gen << 32) | 2; // gen in high bits, metadata=REGION in low
     return 0;
 }
 
 void blood_free(uint64_t addr, size_t size) {
-    (void)size; // unused in simple implementation
-    if (addr) free((void*)addr);
+    (void)size;
+    if (!addr) return;
+
+    // Remove from registry and increment generation (invalidates refs)
+    SlotEntry* slot = find_slot(addr);
+    if (slot) {
+        slot->generation++; // Increment so outstanding refs become stale
+        slot->in_use = 0;
+    }
+
+    free((void*)addr);
+}
+
+uint64_t blood_alloc_or_abort(size_t size) {
+    void* ptr = malloc(size);
+    if (!ptr) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: Memory allocation failed (size=%zu)\n", size);
+        abort();
+    }
+
+    uint64_t addr = (uint64_t)ptr;
+    uint32_t gen = next_generation++;
+
+    // Register in slot registry
+    SlotEntry* slot = find_or_create_slot(addr);
+    if (slot) {
+        slot->address = addr;
+        slot->generation = gen;
+        slot->size = (uint32_t)size;
+        slot->in_use = 1;
+    }
+
+    return addr;
+}
+
+int32_t blood_register_allocation(uint64_t addr, int64_t size) {
+    if (!addr) return 0;
+
+    uint32_t gen = next_generation++;
+    SlotEntry* slot = find_or_create_slot(addr);
+    if (slot) {
+        slot->address = addr;
+        slot->generation = gen;
+        slot->size = (uint32_t)size;
+        slot->in_use = 1;
+    }
+    return (int32_t)gen;
+}
+
+void blood_unregister_allocation(uint64_t addr) {
+    if (!addr) return;
+    SlotEntry* slot = find_slot(addr);
+    if (slot) {
+        slot->generation++; // Invalidate outstanding references
+        slot->in_use = 0;
+    }
 }
 
 int blood_check_generation(uint32_t expected, uint32_t actual) {
-    if (expected == UINT32_MAX) return 1; // PERSISTENT always valid
+    if (expected == GENERATION_PERSISTENT) return 1; // PERSISTENT always valid
     return expected == actual ? 1 : 0;
 }
 
-uint32_t blood_get_generation(uint64_t addr) {
-    (void)addr;
-    return 1; // Simple: always return first generation
+int32_t blood_validate_generation(uint64_t addr, int32_t expected_gen) {
+    // Returns 0 if valid, 1 if stale
+    if ((uint32_t)expected_gen == GENERATION_PERSISTENT) return 0; // Always valid
+    if (!addr) return 1; // Null is stale
+
+    SlotEntry* slot = find_slot(addr);
+    if (!slot) {
+        // Not in registry - assume valid (untracked stack allocation)
+        return 0;
+    }
+
+    if (slot->generation == (uint32_t)expected_gen) {
+        return 0; // Valid
+    }
+    return 1; // Stale
+}
+
+int32_t blood_get_generation(uint64_t addr) {
+    if (!addr) return 0;
+    SlotEntry* slot = find_slot(addr);
+    if (slot && slot->in_use) {
+        return (int32_t)slot->generation;
+    }
+    return 1; // Default generation for untracked memory
+}
+
+void blood_increment_generation(void* addr) {
+    if (!addr) return;
+    SlotEntry* slot = find_slot((uint64_t)addr);
+    if (slot && slot->in_use) {
+        slot->generation++;
+    }
 }
 
 // ============================================================================
-// Effect Runtime (Stubs)
+// Effect Runtime - Evidence Vectors
 // ============================================================================
 
+typedef struct {
+    void* ops[MAX_HANDLERS_PER_EFFECT];  // Function pointers for operations
+    uint64_t op_count;
+    void* state;                          // Handler state
+} EffectHandler;
+
+typedef struct {
+    EffectHandler handlers[MAX_EVIDENCE_DEPTH];
+    uint64_t depth;
+    uint64_t effect_ids[MAX_EVIDENCE_DEPTH];
+} EvidenceVector;
+
+static EvidenceVector* current_evidence = NULL;
+
 void* blood_evidence_create(void) {
-    return malloc(sizeof(uint64_t) * 16);
+    EvidenceVector* ev = (EvidenceVector*)calloc(1, sizeof(EvidenceVector));
+    return ev;
 }
 
 void blood_evidence_destroy(void* ev) {
@@ -296,34 +575,328 @@ void blood_evidence_destroy(void* ev) {
 }
 
 void blood_evidence_push(void* ev, uint64_t handler) {
-    (void)ev; (void)handler; // Stub
+    EvidenceVector* vec = (EvidenceVector*)ev;
+    if (vec && vec->depth < MAX_EVIDENCE_DEPTH) {
+        vec->handlers[vec->depth].ops[0] = (void*)handler;
+        vec->handlers[vec->depth].op_count = 1;
+        vec->depth++;
+    }
 }
 
 uint64_t blood_evidence_pop(void* ev) {
-    (void)ev;
-    return 0; // Stub
+    EvidenceVector* vec = (EvidenceVector*)ev;
+    if (vec && vec->depth > 0) {
+        vec->depth--;
+        return (uint64_t)vec->handlers[vec->depth].ops[0];
+    }
+    return 0;
 }
 
 uint64_t blood_evidence_get(void* ev, size_t index) {
-    (void)ev; (void)index;
-    return 0; // Stub
+    EvidenceVector* vec = (EvidenceVector*)ev;
+    if (vec && index < vec->depth) {
+        return (uint64_t)vec->handlers[index].ops[0];
+    }
+    return 0;
+}
+
+void blood_evidence_push_with_state(void* ev, uint64_t effect_id, void* state) {
+    EvidenceVector* vec = (EvidenceVector*)ev;
+    if (!vec || vec->depth >= MAX_EVIDENCE_DEPTH) return;
+
+    size_t idx = vec->depth;
+    vec->effect_ids[idx] = effect_id;
+    vec->handlers[idx].state = state;
+    vec->handlers[idx].op_count = 0; // Ops registered separately
+    vec->depth++;
+}
+
+void blood_evidence_set_current(void* ev) {
+    current_evidence = (EvidenceVector*)ev;
+}
+
+void blood_evidence_register(void* ev, uint64_t effect_id, void** ops, uint64_t op_count) {
+    EvidenceVector* vec;
+    if (ev) {
+        vec = (EvidenceVector*)ev;
+    } else {
+        // Use current_evidence, creating it lazily if needed
+        if (!current_evidence) {
+            current_evidence = (EvidenceVector*)blood_evidence_create();
+        }
+        vec = current_evidence;
+    }
+    if (!vec || vec->depth >= MAX_EVIDENCE_DEPTH) return;
+
+    size_t idx = vec->depth;
+    vec->effect_ids[idx] = effect_id;
+    vec->handlers[idx].op_count = op_count;
+    for (uint64_t i = 0; i < op_count && i < MAX_HANDLERS_PER_EFFECT; i++) {
+        vec->handlers[idx].ops[i] = ops[i];
+    }
+    vec->depth++;
+}
+
+void blood_evidence_set_state(void* ev, void* state) {
+    EvidenceVector* vec = (EvidenceVector*)ev;
+    if (vec && vec->depth > 0) {
+        vec->handlers[vec->depth - 1].state = state;
+    }
+}
+
+void* blood_evidence_get_state(void* ev, uint64_t index) {
+    EvidenceVector* vec = (EvidenceVector*)ev;
+    if (vec && index < vec->depth) {
+        return vec->handlers[index].state;
+    }
+    return NULL;
+}
+
+void* blood_evidence_current(void) {
+    return current_evidence;
+}
+
+int64_t blood_handler_depth(uint64_t effect_id) {
+    if (!current_evidence) return -1;
+
+    // Search from top to bottom for the effect
+    for (int64_t i = (int64_t)current_evidence->depth - 1; i >= 0; i--) {
+        if (current_evidence->effect_ids[i] == effect_id) {
+            return i;
+        }
+    }
+    return -1; // Not found
+}
+
+int64_t blood_perform(uint64_t effect_id, int32_t op_index, int64_t* args, int64_t arg_count) {
+    if (!current_evidence) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: perform called with no evidence vector\n");
+        abort();
+    }
+
+    // Find handler for this effect
+    int64_t handler_idx = blood_handler_depth(effect_id);
+    if (handler_idx < 0) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: No handler for effect %lu\n",
+                (unsigned long)effect_id);
+        abort();
+    }
+
+    EffectHandler* handler = &current_evidence->handlers[handler_idx];
+    if ((uint64_t)op_index >= handler->op_count) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: Invalid operation index %d for effect %lu\n",
+                op_index, (unsigned long)effect_id);
+        abort();
+    }
+
+    // Get the operation function pointer
+    void* op_fn = handler->ops[op_index];
+    if (!op_fn) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: Null operation at index %d\n", op_index);
+        abort();
+    }
+
+    // Call the operation - simplified dispatch based on arg count
+    // In a full implementation, this would use proper continuation-passing style
+    typedef int64_t (*op_fn_0)(void*);
+    typedef int64_t (*op_fn_1)(void*, int64_t);
+    typedef int64_t (*op_fn_2)(void*, int64_t, int64_t);
+    typedef int64_t (*op_fn_3)(void*, int64_t, int64_t, int64_t);
+
+    void* state = handler->state;
+
+    switch (arg_count) {
+        case 0: return ((op_fn_0)op_fn)(state);
+        case 1: return ((op_fn_1)op_fn)(state, args[0]);
+        case 2: return ((op_fn_2)op_fn)(state, args[0], args[1]);
+        case 3: return ((op_fn_3)op_fn)(state, args[0], args[1], args[2]);
+        default:
+            fprintf(stderr, "BLOOD RUNTIME ERROR: Too many arguments (%ld) for perform\n",
+                    (long)arg_count);
+            abort();
+    }
 }
 
 // ============================================================================
-// Fiber Support (Stubs - not supported in minimal runtime)
+// Fiber Support (Minimal - no real continuations in C runtime)
 // ============================================================================
 
+static uint64_t next_fiber_id = 1;
+
 uint64_t blood_fiber_create(void) {
-    static uint64_t next_id = 1;
-    return next_id++;
+    return next_fiber_id++;
 }
 
 uint64_t blood_fiber_suspend(void) {
+    // In minimal runtime, suspend is not supported
+    fprintf(stderr, "BLOOD RUNTIME WARNING: fiber suspend not supported in minimal runtime\n");
     return 0;
 }
 
 void blood_fiber_resume(uint64_t fiber, uint64_t value) {
     (void)fiber; (void)value;
+    fprintf(stderr, "BLOOD RUNTIME WARNING: fiber resume not supported in minimal runtime\n");
+}
+
+// ============================================================================
+// Generation Snapshots
+// ============================================================================
+
+typedef struct {
+    uint64_t addresses[MAX_SNAPSHOT_ENTRIES];
+    int32_t generations[MAX_SNAPSHOT_ENTRIES];
+    uint64_t count;
+} GenerationSnapshot;
+
+static uint64_t next_snapshot_id = 1;
+static GenerationSnapshot* snapshots[256] = {NULL};
+
+uint64_t blood_snapshot_create(void) {
+    GenerationSnapshot* snap = (GenerationSnapshot*)calloc(1, sizeof(GenerationSnapshot));
+    if (!snap) return 0;
+
+    uint64_t id = next_snapshot_id++;
+    size_t idx = id % 256;
+    if (snapshots[idx]) {
+        free(snapshots[idx]);
+    }
+    snapshots[idx] = snap;
+    return id;
+}
+
+void blood_snapshot_add_entry(uint64_t snapshot_id, uint64_t address, int32_t generation) {
+    size_t idx = snapshot_id % 256;
+    GenerationSnapshot* snap = snapshots[idx];
+    if (!snap || snap->count >= MAX_SNAPSHOT_ENTRIES) return;
+
+    snap->addresses[snap->count] = address;
+    snap->generations[snap->count] = generation;
+    snap->count++;
+}
+
+int64_t blood_snapshot_validate(uint64_t snapshot_id) {
+    size_t idx = snapshot_id % 256;
+    GenerationSnapshot* snap = snapshots[idx];
+    if (!snap) return -1; // Invalid snapshot
+
+    for (uint64_t i = 0; i < snap->count; i++) {
+        int32_t result = blood_validate_generation(snap->addresses[i], snap->generations[i]);
+        if (result != 0) {
+            return (int64_t)(i + 1); // Return 1-indexed position of first stale ref
+        }
+    }
+    return 0; // All valid
+}
+
+int64_t blood_snapshot_len(uint64_t snapshot_id) {
+    size_t idx = snapshot_id % 256;
+    GenerationSnapshot* snap = snapshots[idx];
+    if (!snap) return 0;
+    return (int64_t)snap->count;
+}
+
+void blood_snapshot_destroy(uint64_t snapshot_id) {
+    size_t idx = snapshot_id % 256;
+    if (snapshots[idx]) {
+        free(snapshots[idx]);
+        snapshots[idx] = NULL;
+    }
+}
+
+// ============================================================================
+// Multiple Dispatch Runtime
+// ============================================================================
+
+typedef struct {
+    uint64_t method_slot;
+    uint64_t type_tag;
+    void* impl_ptr;
+} DispatchEntry;
+
+#define DISPATCH_TABLE_SIZE 1024
+static DispatchEntry dispatch_table[DISPATCH_TABLE_SIZE];
+static size_t dispatch_count = 0;
+
+void blood_dispatch_register(uint64_t method_slot, uint64_t type_tag, void* impl_ptr) {
+    if (dispatch_count >= DISPATCH_TABLE_SIZE) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: Dispatch table full\n");
+        return;
+    }
+    dispatch_table[dispatch_count].method_slot = method_slot;
+    dispatch_table[dispatch_count].type_tag = type_tag;
+    dispatch_table[dispatch_count].impl_ptr = impl_ptr;
+    dispatch_count++;
+}
+
+void* blood_dispatch_lookup(uint64_t method_slot, uint64_t type_tag) {
+    for (size_t i = 0; i < dispatch_count; i++) {
+        if (dispatch_table[i].method_slot == method_slot &&
+            dispatch_table[i].type_tag == type_tag) {
+            return dispatch_table[i].impl_ptr;
+        }
+    }
+    return NULL; // Not found
+}
+
+uint64_t blood_get_type_tag(void* obj) {
+    if (!obj) return 0;
+    // In a real implementation, objects would have a header with type info
+    // For minimal runtime, return 0 (unknown type)
+    return 0;
+}
+
+// ============================================================================
+// Work-Stealing Scheduler (Stubs - single-threaded in minimal runtime)
+// ============================================================================
+
+int32_t blood_scheduler_init(int64_t num_workers) {
+    (void)num_workers;
+    return 0; // Success
+}
+
+uint64_t blood_scheduler_spawn(void* task_fn, void* arg) {
+    // In minimal runtime, just call the task directly
+    if (task_fn) {
+        typedef void (*task_fn_t)(void*);
+        ((task_fn_t)task_fn)(arg);
+    }
+    return next_fiber_id++;
+}
+
+uint64_t blood_scheduler_spawn_simple(void* task_fn) {
+    return blood_scheduler_spawn(task_fn, NULL);
+}
+
+void blood_scheduler_yield(void) {
+    // No-op in single-threaded runtime
+}
+
+void blood_scheduler_run(void) {
+    // No-op in single-threaded runtime - tasks run immediately
+}
+
+void blood_scheduler_run_background(void) {
+    // No-op in single-threaded runtime
+}
+
+void blood_scheduler_shutdown(void) {
+    // No-op in minimal runtime
+}
+
+void blood_scheduler_wait(void) {
+    // No-op in single-threaded runtime
+}
+
+int64_t blood_scheduler_active_fibers(void) {
+    return 0; // No fibers in minimal runtime
+}
+
+int64_t blood_scheduler_runnable_fibers(void) {
+    return 0; // No fibers in minimal runtime
+}
+
+int32_t blood_scheduler_is_running(void) {
+    return 0; // Not running in minimal runtime
 }
 
 // ============================================================================
@@ -347,11 +920,32 @@ void blood_panic(const char* msg) {
 // ============================================================================
 
 int blood_runtime_init(void) {
+    // Initialize slot registry
+    memset(slot_registry, 0, sizeof(slot_registry));
+    next_generation = 1;
+
+    // Create default evidence vector if not already created
+    // (may have been created lazily by blood_evidence_register during global init)
+    if (!current_evidence) {
+        current_evidence = (EvidenceVector*)blood_evidence_create();
+    }
+
     return 0;
 }
 
 void blood_runtime_shutdown(void) {
-    // Nothing to do in minimal runtime
+    if (current_evidence) {
+        blood_evidence_destroy(current_evidence);
+        current_evidence = NULL;
+    }
+
+    // Clean up snapshots
+    for (size_t i = 0; i < 256; i++) {
+        if (snapshots[i]) {
+            free(snapshots[i]);
+            snapshots[i] = NULL;
+        }
+    }
 }
 "#.to_string()
 }

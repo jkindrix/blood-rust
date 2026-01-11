@@ -1109,6 +1109,28 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let snapshot_destroy_type = void_type.fn_type(&[i64_type.into()], false);
         self.module.add_function("blood_snapshot_destroy", snapshot_destroy_type, None);
 
+        // === Effect Context Snapshot Functions ===
+
+        // blood_effect_context_set_snapshot(snapshot: i64) -> void
+        // Store snapshot in thread-local effect context during perform
+        let ctx_set_snapshot_type = void_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_effect_context_set_snapshot", ctx_set_snapshot_type, None);
+
+        // blood_effect_context_get_snapshot() -> i64 (SnapshotHandle, null if none)
+        // Retrieve snapshot from effect context during resume for validation
+        let ctx_get_snapshot_type = i64_type.fn_type(&[], false);
+        self.module.add_function("blood_effect_context_get_snapshot", ctx_get_snapshot_type, None);
+
+        // blood_effect_context_take_snapshot() -> i64 (SnapshotHandle, null if none)
+        // Take ownership of snapshot from effect context
+        let ctx_take_snapshot_type = i64_type.fn_type(&[], false);
+        self.module.add_function("blood_effect_context_take_snapshot", ctx_take_snapshot_type, None);
+
+        // blood_snapshot_stale_panic(snapshot: i64, stale_index: i64) -> void (noreturn)
+        // Called when snapshot validation fails - panics with stale reference error
+        let stale_panic_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_snapshot_stale_panic", stale_panic_type, None);
+
         // === Multiple Dispatch Runtime ===
 
         // blood_dispatch_lookup(method_slot: i64, type_tag: i64) -> *void (function pointer)
@@ -1326,9 +1348,29 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // The closure function is called directly, environment passed as first arg
                 self.context.i8_type().ptr_type(AddressSpace::default()).into()
             }
-            TypeKind::Slice { .. } => {
-                // Slice type - use pointer
-                self.context.i8_type().ptr_type(AddressSpace::default()).into()
+            TypeKind::Slice { element } => {
+                // Slice type - fat pointer: { ptr: *element, len: i64 }
+                let elem_ty = self.lower_type(element);
+                let ptr_ty = elem_ty.ptr_type(AddressSpace::default());
+                let len_ty = self.context.i64_type();
+                self.context.struct_type(&[ptr_ty.into(), len_ty.into()], false).into()
+            }
+            TypeKind::Range { element, inclusive } => {
+                // Range type - struct: { start: T, end: T } or { start: T, end: T, exhausted: bool }
+                let elem_ty = self.lower_type(element);
+                if *inclusive {
+                    self.context.struct_type(
+                        &[elem_ty, elem_ty, self.context.bool_type().into()],
+                        false
+                    ).into()
+                } else {
+                    self.context.struct_type(&[elem_ty, elem_ty], false).into()
+                }
+            }
+            TypeKind::DynTrait { .. } => {
+                // Trait object - fat pointer: { data_ptr: *i8, vtable_ptr: *i8 }
+                let ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
+                self.context.struct_type(&[ptr_ty.into(), ptr_ty.into()], false).into()
             }
         }
     }
