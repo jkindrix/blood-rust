@@ -923,18 +923,11 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         if escape.is_effect_captured(local.id) && self.type_may_contain_genref(&local.ty) {
                             // Get the local's storage
                             if let Some(&local_ptr) = self.locals.get(&local.id) {
-                                // For now, we assume the local stores a pointer value.
-                                // Full 128-bit pointer support would extract address and generation
-                                // from the BloodPtr structure. For now, we use the pointer address
-                                // and a placeholder generation.
-                                //
-                                // TODO: When 128-bit BloodPtr is implemented:
-                                // 1. Load the BloodPtr struct from local_ptr
-                                // 2. Extract address field (bits 0-63)
-                                // 3. Extract generation field (bits 64-95)
-                                // 4. Call blood_snapshot_add_entry(snapshot, address, generation)
-                                //
-                                // For now, use pointer-to-int conversion as address with gen=1
+                                // Load the pointer value and extract address/generation.
+                                // - For 128-bit BloodPtr: extract address from high 64 bits,
+                                //   generation from bits 32-63
+                                // - For 64-bit pointers: use ptr-to-int for address,
+                                //   look up generation via blood_get_generation runtime call
                                 let ptr_val = self.builder.build_load(local_ptr, &format!("cap_{}", local.id.index))
                                     .map_err(|e| vec![Diagnostic::error(format!("LLVM load error: {}", e), term.span)])?;
 
@@ -946,8 +939,8 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                         "addr"
                                     ).map_err(|e| vec![Diagnostic::error(format!("LLVM ptr_to_int error: {}", e), term.span)])?;
 
-                                    // Use generation 1 (FIRST) as placeholder until 128-bit pointers
-                                    let generation = i32_ty.const_int(1, false);
+                                    // Get the actual generation from the slot registry
+                                    let generation = self.get_generation_for_address(address, i32_ty, term.span)?;
 
                                     self.builder.build_call(
                                         snapshot_add_entry,
@@ -957,19 +950,53 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 } else if ptr_val.is_int_value() {
                                     // If it's already an int (could be packed pointer), use it directly
                                     let int_val = ptr_val.into_int_value();
-                                    let address = if int_val.get_type().get_bit_width() < 64 {
-                                        self.builder.build_int_z_extend(int_val, i64_ty, "addr")
-                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM extend error: {}", e), term.span)])?
-                                    } else {
-                                        int_val
-                                    };
-                                    let generation = i32_ty.const_int(1, false);
+                                    let bit_width = int_val.get_type().get_bit_width();
 
-                                    self.builder.build_call(
-                                        snapshot_add_entry,
-                                        &[snapshot.into(), address.into(), generation.into()],
-                                        ""
-                                    ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), term.span)])?;
+                                    // Handle 128-bit BloodPtr: extract address (bits 64-127) and generation (bits 32-63)
+                                    if bit_width == 128 {
+                                        // Extract address from high 64 bits
+                                        let address = self.builder.build_right_shift(
+                                            int_val,
+                                            int_val.get_type().const_int(64, false),
+                                            false,
+                                            "addr_extract"
+                                        ).map_err(|e| vec![Diagnostic::error(format!("LLVM shift error: {}", e), term.span)])?;
+                                        let address = self.builder.build_int_truncate(address, i64_ty, "addr")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM truncate error: {}", e), term.span)])?;
+
+                                        // Extract generation from bits 32-63 (next 32 bits after metadata)
+                                        let gen_shifted = self.builder.build_right_shift(
+                                            int_val,
+                                            int_val.get_type().const_int(32, false),
+                                            false,
+                                            "gen_shift"
+                                        ).map_err(|e| vec![Diagnostic::error(format!("LLVM shift error: {}", e), term.span)])?;
+                                        let generation = self.builder.build_int_truncate(gen_shifted, i32_ty, "gen")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM truncate error: {}", e), term.span)])?;
+
+                                        self.builder.build_call(
+                                            snapshot_add_entry,
+                                            &[snapshot.into(), address.into(), generation.into()],
+                                            ""
+                                        ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), term.span)])?;
+                                    } else {
+                                        // 64-bit pointer: extend if needed and look up generation
+                                        let address = if bit_width < 64 {
+                                            self.builder.build_int_z_extend(int_val, i64_ty, "addr")
+                                                .map_err(|e| vec![Diagnostic::error(format!("LLVM extend error: {}", e), term.span)])?
+                                        } else {
+                                            int_val
+                                        };
+
+                                        // Get the actual generation from the slot registry
+                                        let generation = self.get_generation_for_address(address, i32_ty, term.span)?;
+
+                                        self.builder.build_call(
+                                            snapshot_add_entry,
+                                            &[snapshot.into(), address.into(), generation.into()],
+                                            ""
+                                        ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), term.span)])?;
+                                    }
                                 }
                                 // For non-pointer types, skip (they don't contain genrefs)
                             }
@@ -1948,6 +1975,34 @@ fn tier_name(tier: MemoryTier) -> &'static str {
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
+    /// Get the generation for an address by calling the runtime's blood_get_generation.
+    /// Falls back to generation 1 (FIRST) if the runtime function is unavailable.
+    fn get_generation_for_address(
+        &self,
+        address: inkwell::values::IntValue<'ctx>,
+        i32_ty: inkwell::types::IntType<'ctx>,
+        span: Span,
+    ) -> Result<inkwell::values::IntValue<'ctx>, Vec<Diagnostic>> {
+        if let Some(get_gen_fn) = self.module.get_function("blood_get_generation") {
+            let gen_call_result = self.builder.build_call(
+                get_gen_fn,
+                &[address.into()],
+                "gen_lookup"
+            ).map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), span)])?;
+
+            match gen_call_result.try_as_basic_value().left() {
+                Some(val) => Ok(val.into_int_value()),
+                None => {
+                    // blood_get_generation returned void unexpectedly - use fallback
+                    Ok(i32_ty.const_int(1, false))
+                }
+            }
+        } else {
+            // blood_get_generation not available - use generation 1 as fallback
+            Ok(i32_ty.const_int(1, false))
+        }
+    }
+
     /// Compute the effective type of a place after applying projections.
     ///
     /// This walks through the projection chain and computes what type the

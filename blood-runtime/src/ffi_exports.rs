@@ -1368,11 +1368,44 @@ pub extern "C" fn blood_scheduler_is_running() -> c_int {
 // Panic/Error Handling
 // ============================================================================
 
+/// Well-known effect ID for StaleReference (must match bloodc/src/effects/std_effects.rs)
+const STALE_REFERENCE_EFFECT_ID: i64 = 0x1004;
+
+/// Operation indices for StaleReference effect
+#[allow(dead_code)] // Kept for documentation - validate_ptr is handled differently
+const STALE_REFERENCE_OP_VALIDATE_PTR: i32 = 0;
+const STALE_REFERENCE_OP_STALE_ERROR: i32 = 1;
+
 /// Called when a stale reference is dereferenced.
 ///
-/// By default, this aborts the program.
+/// This attempts to perform the StaleReference.stale_error effect.
+/// If a handler is installed, it will be invoked.
+/// If no handler is installed, the program aborts.
 #[no_mangle]
 pub extern "C" fn blood_stale_reference_panic(expected: u32, actual: u32) -> ! {
+    // Check if there's a StaleReference handler installed
+    let depth = blood_handler_depth(STALE_REFERENCE_EFFECT_ID);
+
+    if depth > 0 {
+        // Handler is installed - perform the stale_error effect
+        // Pack the error information into args
+        let args: [i64; 2] = [expected as i64, actual as i64];
+
+        unsafe {
+            // Perform the stale_error operation (op_index = 1)
+            // This may not return if the handler decides to abort
+            let _result = blood_perform(
+                STALE_REFERENCE_EFFECT_ID,
+                STALE_REFERENCE_OP_STALE_ERROR,
+                args.as_ptr(),
+                2,
+            );
+            // If we get here, the handler resumed (which is wrong for stale_error -> !)
+            // but we handle it gracefully by aborting anyway
+        }
+    }
+
+    // No handler or handler returned - abort with error message
     eprintln!(
         "BLOOD RUNTIME ERROR: Stale reference detected!\n\
          Expected generation: {expected}, Actual: {actual}\n\

@@ -41,6 +41,10 @@ pub const IO_EFFECT_ID: u32 = 0x1002;
 /// Well-known DefId for the Console effect.
 pub const CONSOLE_EFFECT_ID: u32 = 0x1003;
 
+/// Well-known DefId for the StaleReference effect.
+/// This effect is raised when a generational pointer validation fails.
+pub const STALE_REFERENCE_EFFECT_ID: u32 = 0x1004;
+
 // ============================================================================
 // State Effect (WI-018)
 // ============================================================================
@@ -377,7 +381,11 @@ impl StandardEffects {
     /// Check if a DefId is a standard effect.
     pub fn is_standard_effect(def_id: DefId) -> bool {
         let id = def_id.index;
-        id == STATE_EFFECT_ID || id == ERROR_EFFECT_ID || id == IO_EFFECT_ID || id == CONSOLE_EFFECT_ID
+        id == STATE_EFFECT_ID
+            || id == ERROR_EFFECT_ID
+            || id == IO_EFFECT_ID
+            || id == CONSOLE_EFFECT_ID
+            || id == STALE_REFERENCE_EFFECT_ID
     }
 
     /// Get the name of a standard effect by DefId.
@@ -387,17 +395,20 @@ impl StandardEffects {
             x if x == ERROR_EFFECT_ID => Some("Error"),
             x if x == IO_EFFECT_ID => Some("IO"),
             x if x == CONSOLE_EFFECT_ID => Some("Console"),
+            x if x == STALE_REFERENCE_EFFECT_ID => Some("StaleReference"),
             _ => None,
         }
     }
 
     /// Check if an effect is tail-resumptive by DefId.
+    /// StaleReference is not tail-resumptive because stale_error never returns.
     pub fn is_tail_resumptive(def_id: DefId) -> Option<bool> {
         match def_id.index {
             x if x == STATE_EFFECT_ID => Some(true),
             x if x == ERROR_EFFECT_ID => Some(false),
             x if x == IO_EFFECT_ID => Some(true),
             x if x == CONSOLE_EFFECT_ID => Some(true),
+            x if x == STALE_REFERENCE_EFFECT_ID => Some(false),
             _ => None,
         }
     }
