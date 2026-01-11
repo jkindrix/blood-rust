@@ -451,6 +451,12 @@ pub enum PatternKind {
         mutable: bool,
         inner: Box<Pattern>,
     },
+    /// Range: `0..10`, `'a'..='z'`
+    Range {
+        start: Option<Box<Pattern>>,
+        end: Option<Box<Pattern>>,
+        inclusive: bool,
+    },
 }
 
 /// A field pattern.

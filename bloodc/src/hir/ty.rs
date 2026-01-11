@@ -239,6 +239,11 @@ impl Type {
         Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U64)))
     }
 
+    /// Create a usize type.
+    pub fn usize() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::Usize)))
+    }
+
     /// Create an f32 type.
     pub fn f32() -> Self {
         Self::new(TypeKind::Primitive(PrimitiveTy::Float(FloatTy::F32)))
