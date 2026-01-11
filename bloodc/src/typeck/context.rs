@@ -3448,37 +3448,217 @@ impl<'a> TypeContext<'a> {
                     pattern.span,
                 ));
             }
-            ast::PatternKind::Ref { .. } => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "reference patterns (&x) are not yet supported".to_string(),
-                    },
-                    pattern.span,
-                ));
+            ast::PatternKind::Ref { mutable, inner } => {
+                // Reference pattern: &x or &mut x
+                // The expected type must be a reference type
+                match expected_ty.kind() {
+                    TypeKind::Ref { inner: inner_ty, mutable: ty_mutable } => {
+                        // Check mutability matches (mutable pattern requires mutable reference)
+                        if *mutable && !ty_mutable {
+                            return Err(TypeError::new(
+                                TypeErrorKind::PatternMismatch {
+                                    expected: expected_ty.clone(),
+                                    pattern: "&mut pattern but type is &".to_string(),
+                                },
+                                pattern.span,
+                            ));
+                        }
+                        let inner_pat = self.lower_pattern(inner, inner_ty)?;
+                        hir::PatternKind::Ref {
+                            mutable: *mutable,
+                            inner: Box::new(inner_pat),
+                        }
+                    }
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::PatternMismatch {
+                                expected: expected_ty.clone(),
+                                pattern: "reference pattern".to_string(),
+                            },
+                            pattern.span,
+                        ));
+                    }
+                }
             }
-            ast::PatternKind::Struct { .. } => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "struct patterns are not yet supported".to_string(),
-                    },
-                    pattern.span,
-                ));
+            ast::PatternKind::Struct { path, fields, rest } => {
+                // Struct pattern: Point { x, y }
+                // Expected type must be a struct ADT
+                let (struct_def_id, _type_args) = match expected_ty.kind() {
+                    TypeKind::Adt { def_id, args, .. } => (*def_id, args.clone()),
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotAStruct { ty: expected_ty.clone() },
+                            pattern.span,
+                        ));
+                    }
+                };
+
+                // Verify path matches the struct (if provided)
+                if !path.segments.is_empty() {
+                    let path_name = self.symbol_to_string(path.segments[0].name.node);
+                    // Could add stricter checking here that path_name matches struct name
+                    let _ = path_name; // Acknowledge the path
+                }
+
+                // Get struct definition
+                let struct_info = self.struct_defs.get(&struct_def_id).cloned().ok_or_else(|| {
+                    TypeError::new(
+                        TypeErrorKind::TypeNotFound { name: format!("struct {:?}", struct_def_id) },
+                        pattern.span,
+                    )
+                })?;
+
+                // Process each field pattern
+                let mut hir_fields = Vec::new();
+                let mut bound_fields = std::collections::HashSet::new();
+
+                for field_pattern in fields {
+                    let field_name = self.symbol_to_string(field_pattern.name.node);
+
+                    // Look up the field in the struct
+                    let field_info = struct_info.fields.iter()
+                        .find(|f| f.name == field_name)
+                        .ok_or_else(|| TypeError::new(
+                            TypeErrorKind::NoField {
+                                ty: expected_ty.clone(),
+                                field: field_name.clone(),
+                            },
+                            field_pattern.span,
+                        ))?;
+
+                    bound_fields.insert(field_name.clone());
+
+                    // Lower the field pattern
+                    let inner_pattern = if let Some(ref inner) = field_pattern.pattern {
+                        // Field with explicit pattern: `x: pat`
+                        self.lower_pattern(inner, &field_info.ty)?
+                    } else {
+                        // Shorthand field: `x` means binding to x
+                        let local_id = self.resolver.define_local(
+                            field_name.clone(),
+                            field_info.ty.clone(),
+                            false,
+                            field_pattern.span,
+                        )?;
+                        self.locals.push(hir::Local {
+                            id: local_id,
+                            name: Some(field_name),
+                            ty: field_info.ty.clone(),
+                            mutable: false,
+                            span: field_pattern.span,
+                        });
+                        hir::Pattern {
+                            kind: hir::PatternKind::Binding {
+                                local_id,
+                                mutable: false,
+                                subpattern: None,
+                            },
+                            ty: field_info.ty.clone(),
+                            span: field_pattern.span,
+                        }
+                    };
+
+                    hir_fields.push(hir::FieldPattern {
+                        field_idx: field_info.index,
+                        pattern: inner_pattern,
+                    });
+                }
+
+                // If not using rest (..), verify all fields are bound
+                if !*rest {
+                    for field_info in &struct_info.fields {
+                        if !bound_fields.contains(&field_info.name) {
+                            return Err(TypeError::new(
+                                TypeErrorKind::MissingField {
+                                    ty: expected_ty.clone(),
+                                    field: field_info.name.clone(),
+                                },
+                                pattern.span,
+                            ));
+                        }
+                    }
+                }
+
+                hir::PatternKind::Struct {
+                    def_id: struct_def_id,
+                    fields: hir_fields,
+                }
             }
-            ast::PatternKind::Slice { .. } => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "slice patterns are not yet supported".to_string(),
-                    },
-                    pattern.span,
-                ));
+            ast::PatternKind::Slice { elements, rest_pos } => {
+                // Slice pattern: [first, second, .., last]
+                // Expected type must be an array or slice
+                let elem_ty = match expected_ty.kind() {
+                    TypeKind::Array { element, .. } => element.clone(),
+                    TypeKind::Slice { element } => element.clone(),
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::PatternMismatch {
+                                expected: expected_ty.clone(),
+                                pattern: "slice pattern".to_string(),
+                            },
+                            pattern.span,
+                        ));
+                    }
+                };
+
+                // Split elements into prefix and suffix around rest position
+                let (prefix_pats, rest_pattern, suffix_pats) = if let Some(rest_idx) = rest_pos {
+                    let rest_idx = *rest_idx;
+                    let prefix: Vec<_> = elements.iter().take(rest_idx).cloned().collect();
+                    let suffix: Vec<_> = elements.iter().skip(rest_idx + 1).cloned().collect();
+                    // The rest pattern captures the middle portion as a slice
+                    let rest_pat = if rest_idx < elements.len() {
+                        Some(Box::new(hir::Pattern {
+                            kind: hir::PatternKind::Wildcard, // Rest captures as slice
+                            ty: Type::slice(elem_ty.clone()),
+                            span: pattern.span,
+                        }))
+                    } else {
+                        None
+                    };
+                    (prefix, rest_pat, suffix)
+                } else {
+                    // No rest pattern - all elements must match
+                    (elements.clone(), None, Vec::new())
+                };
+
+                // Lower prefix patterns
+                let mut prefix = Vec::new();
+                for p in &prefix_pats {
+                    prefix.push(self.lower_pattern(p, &elem_ty)?);
+                }
+
+                // Lower suffix patterns
+                let mut suffix = Vec::new();
+                for p in &suffix_pats {
+                    suffix.push(self.lower_pattern(p, &elem_ty)?);
+                }
+
+                hir::PatternKind::Slice {
+                    prefix,
+                    slice: rest_pattern,
+                    suffix,
+                }
             }
-            ast::PatternKind::Or(_) => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "or patterns (A | B) are not yet supported".to_string(),
-                    },
-                    pattern.span,
-                ));
+            ast::PatternKind::Or(alternatives) => {
+                // Or pattern: A | B | C
+                // All alternatives must have the same type and bind the same variables
+                if alternatives.is_empty() {
+                    return Err(TypeError::new(
+                        TypeErrorKind::PatternMismatch {
+                            expected: expected_ty.clone(),
+                            pattern: "empty or pattern".to_string(),
+                        },
+                        pattern.span,
+                    ));
+                }
+
+                let mut hir_alternatives = Vec::new();
+                for alt in alternatives {
+                    hir_alternatives.push(self.lower_pattern(alt, expected_ty)?);
+                }
+
+                hir::PatternKind::Or(hir_alternatives)
             }
             ast::PatternKind::Range { .. } => {
                 return Err(TypeError::new(
