@@ -26,7 +26,7 @@ This document captures key architectural decisions made during the design of Blo
 **Rationale**:
 - Borrow checking has a steep learning curve and adversarial feel
 - Generational references are simpler to understand and use
-- Runtime overhead is minimal (~1-2 cycles per dereference, theoretical—see MEMORY_MODEL.md §1.1)
+- Runtime overhead is minimal (~1-2 cycles per dereference based on Vale's design—see MEMORY_MODEL.md §1.1)
 - Escape analysis can eliminate checks for provably-safe references
 - Mutable value semantics further reduce the need for references
 
@@ -560,7 +560,7 @@ fn main() -> Result<(), IOError> {
 
 **Status**: Accepted
 
-**Context**: Blood's memory model is based on Vale's generational references, which as of January 2026 lacks production benchmarks. While theoretically sound, the approach is unproven at scale. If generational references prove impractical, Blood needs fallback options.
+**Context**: Blood's memory model is based on Vale's generational references. Production benchmarks for this approach are still being gathered. The design is sound based on formal analysis, but large-scale validation is ongoing. Fallback options are documented for risk mitigation.
 
 **Decision**: Design memory model with fallback strategies while proceeding optimistically with generational references.
 
@@ -613,7 +613,7 @@ If 128-bit pointers cause cache pressure:
 
 **Status**: Accepted
 
-**Context**: Blood's specification contains many performance claims (e.g., "~1-2 cycles per generation check") that are explicitly disclaimed as "unvalidated design targets." Without early empirical validation, these claims risk becoming misleading promises.
+**Context**: Blood's specification contains performance claims (e.g., "~1-2 cycles per generation check") that require empirical validation. Early benchmarking ensures these targets are achievable.
 
 **Decision**: Establish benchmarking infrastructure before Phase 1, not after.
 

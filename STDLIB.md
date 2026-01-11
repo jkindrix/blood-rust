@@ -1,7 +1,7 @@
 # Blood Standard Library Specification
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
+**Version**: 0.3.0
+**Status**: Specified
 **Last Updated**: 2026-01-10
 
 This document specifies Blood's standard library, including core types, traits, effects, and handlers.

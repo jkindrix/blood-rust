@@ -1,11 +1,10 @@
 # Blood Foreign Function Interface (FFI) Specification
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
-**Implementation**: 🔶 In Development (see [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md))
+**Version**: 0.3.0
+**Status**: Partially Implemented (see table in §1.3)
 **Last Updated**: 2026-01-10
 
-**Implementation Status**: FFI code exists in `blood-runtime/src/ffi.rs`. x86-64 Linux is the primary validated platform. Other platforms are in development.
+**Implementation Status**: Runtime FFI code (DynamicLibrary, FfiValue, FfiType, symbol resolution) is implemented in `blood-runtime/src/ffi.rs` and validated on x86-64 Linux. Bridge block parsing/codegen is designed but not yet implemented in the compiler frontend.
 
 **Revision 0.3.0 Changes**:
 - Added validation status box and implementation status link
@@ -64,7 +63,7 @@ The following table tracks implementation status of FFI subsystems:
 | Bridge block parsing | 📋 Designed | — | Grammar specified, not parsed |
 | Bridge block codegen | 📋 Designed | — | Awaits bridge parsing |
 | Type mapping validation | 📋 Designed | — | Per §3 specification |
-| Calling conventions | 📋 Designed | — | sysv64 only for now |
+| Calling conventions | 📋 Designed | — | sysv64 (Linux x86-64 primary target) |
 | Platform validation (Linux) | ✅ Validated | `blood-runtime/tests/` | Primary development platform |
 | Platform validation (macOS) | ⚠️ Partial | — | Expected to work, not CI tested |
 | Platform validation (Windows) | ⚠️ Partial | — | Expected to work, not CI tested |

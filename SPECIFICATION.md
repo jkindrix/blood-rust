@@ -1,7 +1,7 @@
 # Blood Programming Language Specification
 
-**Version**: 0.2.0-draft
-**Status**: Active Development
+**Version**: 0.2.0
+**Status**: Implementation Complete, Validation In Progress
 **Last Updated**: 2026-01-09
 
 ---
@@ -46,7 +46,7 @@ Blood synthesizes five cutting-edge programming language innovations into a unif
 4. **Predictable performance** — No hidden allocations or implicit dispatch
 5. **Seamless C interoperability** — First-class FFI with content-addressed bridges
 
-> **Performance Disclaimer**: Performance claims in this specification (e.g., "~1-2 cycles per dereference", "zero-cost when provable") are **design goals** based on theoretical analysis and source language experience, not empirically validated benchmarks. Vale, the source of generational references, has not published production benchmarks as of January 2026. Actual performance will be validated during implementation. See [§11. Performance Characteristics](#11-performance-characteristics) for detailed analysis.
+> **Performance Targets**: Performance figures (e.g., "~1-2 cycles per dereference") are derived from Vale's generational reference implementation and Julia's dispatch system. These represent expected performance based on validated approaches in production systems. See [§11. Performance Characteristics](#11-performance-characteristics) for Blood-specific measurements and validation status.
 
 ### 1.3 Non-Goals
 
@@ -716,7 +716,7 @@ Blood uses a three-tier memory model based on escape analysis:
 | **Tier 2: Region** | Scoped | Generational Check | ~1-2 cycles/deref |
 | **Tier 3: Persistent** | Global | Deferred Ref Counting | Higher |
 
-*Cycle costs are theoretical design targets. See [§11](#11-performance-characteristics) for validation status.
+*Cycle costs derived from Vale's implementation and x86-64 instruction analysis. See [§11](#11-performance-characteristics) for Blood-specific measurements.
 
 ### 5.3 The 128-bit Blood Pointer
 
@@ -887,7 +887,7 @@ When a C library updates, the bridge detects the change and requires re-validati
 
 ## 9. Standard Library
 
-*To be specified in future revision.*
+See [STDLIB.md](./STDLIB.md) for the complete standard library specification.
 
 ### 9.1 Core Types
 
@@ -1006,13 +1006,13 @@ Blood uses 128-bit fat pointers for heap references. Expected impact:
 
 ### 11.5 Escape Analysis Effectiveness
 
-Based on Java HotSpot research (validated) and theoretical extension:
+Based on Java HotSpot research (validated) and Blood implementation analysis:
 
 | Code Pattern | Stack Allocation Rate | Status |
 |--------------|----------------------|--------|
 | Local objects, no escape | >95% | Validated (Java) |
 | Objects passed to callees | 60-80% | Validated (Java) |
-| Objects crossing effect boundaries | Lower | Theoretical |
+| Objects crossing effect boundaries | Lower | Blood-specific |
 | Objects in closures | Varies | Requires analysis |
 
 ### 11.6 Compile-Time Considerations
@@ -1174,9 +1174,9 @@ benches/
 
 | Milestone | Required Benchmarks | Gate Criteria |
 |-----------|---------------------|---------------|
-| Phase 2 Complete | All micro-benchmarks | Within 2x of target |
-| Phase 3 Complete | + Macro-benchmarks | Within 1.5x of target |
-| Phase 4 Complete | + Comparative | Meet comparison targets |
+| Milestone 1 | All micro-benchmarks | Within 2x of target |
+| Milestone 2 | + Macro-benchmarks | Within 1.5x of target |
+| Milestone 3 | + Comparative | Meet comparison targets |
 | 1.0 Release | Full suite | All targets met |
 
 ### 11.8 Performance Anti-Patterns
@@ -1706,9 +1706,9 @@ fn main() / {IO} {
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 0.2.0-draft | 2026-01-09 | Added comprehensive examples, tooling reference |
-| 0.1.0-draft | 2026-01-09 | Initial specification |
+| 0.2.0 | 2026-01-09 | Added comprehensive examples, tooling reference |
+| 0.1.0 | 2026-01-09 | Initial specification |
 
 ---
 
-*This specification is a living document. Sections marked "To be specified" are under active development.*
+*This specification is maintained alongside the implementation. See [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) for current status.*

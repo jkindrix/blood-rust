@@ -1,7 +1,7 @@
 # Blood Implementation Roadmap
 
-**Version**: 0.2.0-draft
-**Status**: Active Development
+**Version**: 0.2.0
+**Status**: Implementation In Progress
 **Last Updated**: 2026-01-09
 
 This document outlines the implementation strategy for the Blood programming language, including compiler architecture, phases, milestones, and the bootstrap plan.
@@ -863,7 +863,7 @@ jobs:
 
 ## 13. Effect Compilation Strategy
 
-Blood uses **generalized evidence passing** for effect handler compilation, based on research from [Xie & Leijen (ICFP 2021)](https://dl.acm.org/doi/10.1145/3473576).
+Blood uses **generalized evidence passing** for effect handler compilation, following the approach validated in [Xie & Leijen (ICFP 2021)](https://dl.acm.org/doi/10.1145/3473576) and implemented in Koka.
 
 ### 13.1 Strategy Overview
 
@@ -1008,9 +1008,9 @@ For non-tail-resumptive handlers, continuations are captured:
 | **Debug info format** | DWARF / CodeView / Custom | DWARF (tentative) |
 | **C++ interop** | Via C / Direct Itanium ABI | Via C (simpler) |
 
-### 15.2 Resolved Research Questions
+### 15.2 Resolved Design Questions
 
-The following research questions have been resolved based on literature review and analysis of existing implementations.
+The following design questions have been resolved based on analysis of existing implementations.
 
 #### Effect Polymorphism Erasure
 

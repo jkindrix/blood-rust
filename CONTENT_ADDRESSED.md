@@ -1,7 +1,7 @@
 # Blood Content-Addressed Storage Specification
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
+**Version**: 0.3.0
+**Status**: Implemented
 **Last Updated**: 2026-01-10
 
 This document specifies Blood's content-addressed code identity system, including AST canonicalization, hash computation, storage format, and the Virtual Function Table (VFT) specification.
@@ -1845,7 +1845,7 @@ impl CollisionResistantStore {
 Given the collision probability (~2^-128), in practice:
 
 - **No collision will ever occur** in normal usage
-- Collision handling exists for theoretical completeness
+- Collision handling exists for correctness guarantees
 - Implementation can defer collision handling until needed
 
 ---

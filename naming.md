@@ -86,13 +86,13 @@ This origin provides rich thematic territory for toolchain naming while reinforc
 ### Current Implementation Status
 
 ```
-Phase 0: ✓ Lexer, parser, AST, type checker
-Phase 1: ✓ blood build/run, FizzBuzz works
-Phase 2: ✓ Effect system (handlers, evidence passing)
-Phase 3: ✓ MIR with 128-bit generational pointers
-Phase 4: ✓ Content addressing (BLAKE3 hashing)
-Phase 5: ✓ Runtime (fiber scheduler, channels, I/O reactor)
-Phase 6: → Self-hosting and standard library (current)
+✓ Lexer, parser, AST, type checker
+✓ blood build/run, FizzBuzz works
+✓ Effect system (handlers, evidence passing)
+✓ MIR with 128-bit generational pointers
+✓ Content addressing (BLAKE3 hashing)
+✓ Runtime (fiber scheduler, channels, I/O reactor)
+→ Self-hosting and standard library (current)
 ```
 
 ---
@@ -106,7 +106,7 @@ Blood uses **content-addressed code** inspired by Unison. This is fundamentally 
 | Traditional Approach | Blood's Content-Addressed Approach |
 |---------------------|-----------------------------------|
 | Code identified by file path | Code identified by hash of AST |
-| Names are identities | Names are just metadata/pointers |
+| Names are identities | Names are metadata/pointers to hashes |
 | Renaming breaks references | Renaming is free and instant |
 | Version conflicts ("dependency hell") | Exact hashes, no conflicts possible |
 | Merge conflicts on refactoring | Structure-aware, conflict-free merges |

@@ -1,7 +1,7 @@
 # Blood Formal Semantics
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
+**Version**: 0.3.0
+**Status**: Specified
 **Implementation**: ✅ Implemented (effect typing complete, proof mechanization planned)
 **Last Updated**: 2026-01-10
 
@@ -1410,6 +1410,6 @@ The following theorems require formal mechanized proofs:
 When referencing Blood's formal semantics:
 
 ```
-Blood Programming Language Formal Semantics, v0.2.0-draft.
+Blood Programming Language Formal Semantics, v0.3.0.
 Available at: [repository URL]
 ```

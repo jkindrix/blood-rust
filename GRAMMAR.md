@@ -1,7 +1,7 @@
 # Blood Surface Syntax Grammar
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
+**Version**: 0.3.0
+**Status**: Implemented
 **Implementation**: ✅ Implemented (lexer and parser complete)
 **Last Updated**: 2026-01-10
 

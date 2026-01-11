@@ -1,7 +1,7 @@
 # Blood Codebase Manager (UCM) Specification
 
-**Version**: 0.3.0-draft
-**Status**: Design Specification
+**Version**: 0.3.0
+**Status**: Specified (Implementation Planned)
 **Implementation**: 📋 Planned
 **Last Updated**: 2026-01-10
 
@@ -892,8 +892,9 @@ Blood's UCM is inspired by [Unison's UCM](https://www.unison-lang.org/docs/ucm-c
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 0.1.0-draft | 2026-01-09 | Initial specification |
+| 0.3.0 | 2026-01-11 | Updated status, implementation planned |
+| 0.1.0 | 2026-01-09 | Initial specification |
 
 ---
 
-*This specification is a living document. See [ROADMAP.md](./ROADMAP.md) for implementation timeline.*
+*This is a design specification for planned functionality. See [ROADMAP.md](./ROADMAP.md) for implementation timeline.*

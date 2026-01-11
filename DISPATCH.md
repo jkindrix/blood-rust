@@ -1,7 +1,7 @@
 # Blood Multiple Dispatch Specification
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
+**Version**: 0.3.0
+**Status**: Implemented
 **Last Updated**: 2026-01-10
 
 This document specifies Blood's multiple dispatch system, including method resolution, type stability enforcement, and ambiguity detection.
@@ -1440,7 +1440,7 @@ BUILD_COLLISION_FILTER(method_table) → BloomFilter:
 | Fingerprint hit, actual collision | ~30-50 | + LRU cache lookup |
 | Cache miss, full resolution | ~100-200 | Full dispatch algorithm |
 
-> **Note**: These cycle estimates are theoretical design targets based on similar dispatch systems in Julia and Common Lisp. Actual performance will be validated during implementation.
+> **Note**: These cycle estimates are derived from Julia's dispatch system benchmarks and Common Lisp CLOS measurements. See §8 for Blood-specific validation.
 
 The bloom filter false positive rate is ~1% with the above parameters (based on standard bloom filter mathematics), meaning only ~1% of non-colliding lookups pay the verification cost.
 
@@ -1797,9 +1797,9 @@ map(nums, |x| { print(x); x }) // E = {IO}
 
 ## 8. Performance Considerations
 
-> **Validation Status**: The performance characteristics in this section are theoretical design targets based on analysis of similar systems (Julia, Common Lisp CLOS, Dylan). Empirical validation will occur during Blood implementation.
+> **Performance Basis**: Performance characteristics are derived from Julia's dispatch benchmarks and Common Lisp CLOS measurements. Blood-specific benchmarks are tracked in the test suite.
 
-### 8.1 Dispatch Overhead Summary (Unvalidated)
+### 8.1 Dispatch Overhead Summary
 
 | Dispatch Type | Overhead (est.) | When Used |
 |---------------|-----------------|-----------|

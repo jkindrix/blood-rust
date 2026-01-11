@@ -1,7 +1,7 @@
 # Blood Diagnostics Specification
 
-**Version**: 0.3.0-draft
-**Status**: Active Development
+**Version**: 0.3.0
+**Status**: Implemented
 **Implementation**: ✅ Implemented (core diagnostics complete)
 **Last Updated**: 2026-01-10
 
@@ -739,7 +739,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 
 **Legend**: ✅ = Implemented and tested, 🔶 = In development, 📋 = Planned
 
-### Parse Errors (E01xx) — ✅ Phase 0 Implemented
+### Parse Errors (E01xx) — ✅ Implemented
 
 | Code | Description | Status |
 |------|-------------|--------|
@@ -751,7 +751,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0106 | Invalid escape sequence | ✅ |
 | E0107 | Invalid number format | ✅ |
 
-### Type Errors (E02xx) — ✅ Phase 1 Implemented (partial)
+### Type Errors (E02xx) — ✅ Implemented (partial)
 
 | Code | Description | Status |
 |------|-------------|--------|
@@ -759,33 +759,33 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0202 | Cannot infer type | ✅ |
 | E0203 | Missing type parameter | ✅ |
 | E0204 | Invalid type application | ✅ |
-| E0205 | Recursive type without indirection | 🔶 |
-| E0206 | Missing trait bound | 🔶 |
-| E0207 | Conflicting trait implementations | 🔶 |
+| E0205 | Recursive type without indirection | ✅ |
+| E0206 | Missing trait bound | ✅ |
+| E0207 | Trait not found | ✅ |
 
-### Effect Errors (E03xx) — 🔶 In Development
+### Effect Errors (E03xx) — Partially Implemented
 
 | Code | Description | Status |
 |------|-------------|--------|
-| E0301 | Unhandled effect | 🔶 |
-| E0302 | Effect signature mismatch | 🔶 |
-| E0303 | Resume type mismatch | 🔶 |
+| E0301 | Unhandled effect | ✅ |
+| E0302 | Effect signature mismatch | ✅ |
+| E0303 | Resume type mismatch | ✅ |
 | E0304 | Linear value in multi-shot handler | 📋 |
-| E0305 | Missing effect handler | 🔶 |
-| E0306 | Duplicate effect in row | 🔶 |
+| E0305 | Invalid effect handler | ✅ |
+| E0306 | Not an effect | ✅ |
 
-### Ownership Errors (E04xx) — 🔶 In Development
+### Ownership Errors (E04xx) — 🔶 Not Yet Implemented
 
 | Code | Description | Status |
 |------|-------------|--------|
-| E0401 | Use of moved value | 🔶 |
-| E0402 | Cannot borrow as mutable | 🔶 |
+| E0401 | Cannot borrow as mutable | 🔶 |
+| E0402 | Cannot borrow while mutably borrowed | 🔶 |
 | E0403 | Linear value not consumed | 🔶 |
 | E0404 | Double-free | 📋 |
 | E0405 | Mutable borrow while immutable borrow exists | 📋 |
 | E0406 | Return of borrowed value | 📋 |
 
-### Lifetime Errors (E05xx) — 🔶 In Development
+### Lifetime Errors (E05xx) — 🔶 Not Yet Implemented
 
 | Code | Description | Status |
 |------|-------------|--------|
@@ -794,7 +794,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0503 | Lifetime bound not satisfied | 📋 |
 | E0504 | Region escape | 📋 |
 
-### Dispatch Errors (E06xx) — 📋 Phase 6+ Specified
+### Dispatch Errors (E06xx) — 📋 Planned
 
 | Code | Description | Status |
 |------|-------------|--------|
@@ -803,7 +803,7 @@ error[E0201]: type mismatch: expected `i32`, found `String`
 | E0603 | Type instability | 📋 |
 | E0604 | Circular dispatch | 📋 |
 
-### Name Resolution Errors (E07xx) — ✅ Phase 0-1 Implemented
+### Name Resolution Errors (E07xx) — ✅ Implemented
 
 | Code | Description | Status |
 |------|-------------|--------|
