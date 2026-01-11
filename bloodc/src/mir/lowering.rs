@@ -422,6 +422,10 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             ExprKind::Handle { body, handler_id, handler_instance } => {
                 self.lower_handle(body, *handler_id, handler_instance, &expr.ty, expr.span)
             }
+
+            ExprKind::Range { start, end, inclusive } => {
+                self.lower_range(start.as_deref(), end.as_deref(), *inclusive, &expr.ty, expr.span)
+            }
         }
     }
 
@@ -705,6 +709,87 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
 
         // Store the body result
         self.push_assign(dest_place.clone(), Rvalue::Use(body_result));
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower a range expression `start..end` or `start..=end`.
+    ///
+    /// Range expressions are lowered to aggregate construction:
+    /// - Range<T>: { start, end }
+    /// - RangeInclusive<T>: { start, end, exhausted: false }
+    fn lower_range(
+        &mut self,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        inclusive: bool,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Create destination for the range
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        // Get the element type from the Range type
+        let elem_ty = match ty.kind() {
+            TypeKind::Range { element, .. } => element.clone(),
+            _ => {
+                // Fallback: infer from start or end
+                if let Some(s) = start {
+                    s.ty.clone()
+                } else if let Some(e) = end {
+                    e.ty.clone()
+                } else {
+                    Type::unit()
+                }
+            }
+        };
+
+        // Build operands for the range struct
+        let mut operands = Vec::new();
+
+        // Lower start if present, otherwise use default value
+        if let Some(s) = start {
+            let start_op = self.lower_expr(s)?;
+            operands.push(start_op);
+        } else {
+            // For RangeTo (..end), start is not present
+            // Use minimum value for the type (requires type info)
+            operands.push(Operand::Constant(Constant::new(
+                elem_ty.clone(),
+                ConstantKind::Int(0), // Default start for now
+            )));
+        }
+
+        // Lower end if present
+        if let Some(e) = end {
+            let end_op = self.lower_expr(e)?;
+            operands.push(end_op);
+        } else {
+            // For RangeFrom (start..), end is not present
+            // Use maximum value for the type (requires type info)
+            operands.push(Operand::Constant(Constant::new(
+                elem_ty.clone(),
+                ConstantKind::Int(i64::MAX as i128), // Default end for now
+            )));
+        }
+
+        // For inclusive ranges, add the exhausted field
+        if inclusive {
+            operands.push(Operand::Constant(Constant::new(
+                Type::bool(),
+                ConstantKind::Bool(false),
+            )));
+        }
+
+        // Create the aggregate
+        self.push_assign(
+            dest_place.clone(),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Range { element: elem_ty, inclusive },
+                operands,
+            },
+        );
 
         Ok(Operand::Copy(dest_place))
     }

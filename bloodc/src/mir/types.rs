@@ -646,6 +646,11 @@ pub enum AggregateKind {
     Closure {
         def_id: DefId,
     },
+    /// Range (start, end, [exhausted]).
+    Range {
+        element: Type,
+        inclusive: bool,
+    },
 }
 
 // ============================================================================
