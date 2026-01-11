@@ -57,12 +57,13 @@
 use std::collections::HashMap;
 
 use inkwell::basic_block::BasicBlock;
+use inkwell::intrinsics::Intrinsic;
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, PointerValue};
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::{AddressSpace, IntPredicate};
 
 use crate::diagnostics::Diagnostic;
-use crate::hir::{DefId, LocalId, Type, TypeKind};
+use crate::hir::{DefId, LocalId, PrimitiveTy, Type, TypeKind};
 use crate::mir::body::MirBody;
 use crate::mir::types::{
     BasicBlockId, StatementKind, Statement, Terminator, TerminatorKind,
@@ -1195,10 +1196,14 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             TerminatorKind::Resume { value } => {
-                // Resume from effect handler - return value to continuation
+                // Resume from effect handler - validate snapshot before returning
+                let fn_value = self.current_fn.ok_or_else(|| {
+                    vec![Diagnostic::error("No current function for Resume", term.span)]
+                })?;
+
+                // Store return value first (if any)
                 if let Some(val_op) = value {
                     let val = self.compile_mir_operand(val_op, body, escape_results)?;
-                    // Store return value in return place
                     if let Some(&ret_ptr) = self.locals.get(&LocalId::new(0)) {
                         self.builder.build_store(ret_ptr, val)
                             .map_err(|e| vec![Diagnostic::error(
@@ -1206,7 +1211,97 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             )])?;
                     }
                 }
-                // Return from handler - the caller will resume the continuation
+
+                // Get the snapshot from effect context
+                let get_snapshot_fn = self.module.get_function("blood_effect_context_get_snapshot")
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "Runtime function blood_effect_context_get_snapshot not found", term.span
+                    )])?;
+
+                let snapshot = self.builder.build_call(get_snapshot_fn, &[], "snapshot")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), term.span
+                    )])?
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "blood_effect_context_get_snapshot returned void", term.span
+                    )])?;
+
+                // Check if snapshot is null (no validation needed for tail-resumptive handlers)
+                let i64_ty = self.context.i64_type();
+                let null_snapshot = i64_ty.const_zero();
+                let snapshot_is_null = self.builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    snapshot.into_int_value(),
+                    null_snapshot,
+                    "snapshot_is_null"
+                ).map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM compare error: {}", e), term.span
+                )])?;
+
+                // Create basic blocks for validation path
+                let validate_bb = self.context.append_basic_block(fn_value, "resume_validate");
+                let stale_bb = self.context.append_basic_block(fn_value, "resume_stale");
+                let ok_bb = self.context.append_basic_block(fn_value, "resume_ok");
+
+                // Branch: if null snapshot, skip validation; otherwise validate
+                self.builder.build_conditional_branch(snapshot_is_null, ok_bb, validate_bb)
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM branch error: {}", e), term.span
+                    )])?;
+
+                // Validation block: call blood_snapshot_validate
+                self.builder.position_at_end(validate_bb);
+                let validate_fn = self.module.get_function("blood_snapshot_validate")
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "Runtime function blood_snapshot_validate not found", term.span
+                    )])?;
+
+                let stale_index = self.builder.build_call(validate_fn, &[snapshot.into()], "stale_index")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), term.span
+                    )])?
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "blood_snapshot_validate returned void", term.span
+                    )])?;
+
+                // Check if validation passed (stale_index == 0)
+                let is_valid = self.builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    stale_index.into_int_value(),
+                    i64_ty.const_zero(),
+                    "is_valid"
+                ).map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM compare error: {}", e), term.span
+                )])?;
+
+                self.builder.build_conditional_branch(is_valid, ok_bb, stale_bb)
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM branch error: {}", e), term.span
+                    )])?;
+
+                // Stale block: call panic function
+                self.builder.position_at_end(stale_bb);
+                let panic_fn = self.module.get_function("blood_snapshot_stale_panic")
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "Runtime function blood_snapshot_stale_panic not found", term.span
+                    )])?;
+
+                self.builder.build_call(panic_fn, &[snapshot.into(), stale_index.into()], "")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), term.span
+                    )])?;
+
+                self.builder.build_unreachable()
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM unreachable error: {}", e), term.span
+                    )])?;
+
+                // OK block: return from handler
+                self.builder.position_at_end(ok_bb);
                 self.builder.build_return(None)
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM return error: {}", e), term.span
@@ -1274,10 +1369,12 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             Rvalue::CheckedBinaryOp { op, left, right } => {
-                // For now, same as unchecked - TODO: return tuple with overflow flag
+                // Checked operations return (result, overflow_flag) tuple
+                let operand_ty = self.get_operand_type(left, body);
+                let is_signed = self.is_signed_type(operand_ty);
                 let lhs = self.compile_mir_operand(left, body, escape_results)?;
                 let rhs = self.compile_mir_operand(right, body, escape_results)?;
-                self.compile_binary_op(*op, lhs, rhs)
+                self.compile_checked_binary_op(*op, lhs, rhs, is_signed)
             }
 
             Rvalue::UnaryOp { op, operand } => {
@@ -1303,7 +1400,7 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             Rvalue::Len(place) => {
                 // Array/slice length computation
                 // For arrays, we extract the static size from the type
-                // For slices, we load the length from the fat pointer (not yet implemented)
+                // For slices, we load the length from the fat pointer (field 1 of slice struct)
 
                 // Get the base type from the local
                 let base_ty = body.locals[place.local.index() as usize].ty.clone();
@@ -1319,14 +1416,27 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         Ok(len_val.into())
                     }
                     TypeKind::Slice { .. } => {
-                        // For slices, we need to extract the length from the fat pointer
-                        // A slice is represented as (ptr, len), so we need to load the second element
-                        // This requires fat pointer support which is complex to implement correctly
-                        Err(vec![Diagnostic::error(
-                            "Slice length extraction not yet implemented. \
-                             Slices are fat pointers requiring special handling.",
-                            Span::dummy()
-                        )])
+                        // For slices, extract the length from the fat pointer struct
+                        // A slice is represented as { ptr: *element, len: i64 }
+                        // We need to load the slice value and extract field 1 (len)
+                        let slice_ptr = self.compile_mir_place(place, body)?;
+
+                        // Get pointer to the length field (index 1)
+                        let len_ptr = self.builder.build_struct_gep(
+                            slice_ptr,
+                            1,
+                            "slice_len_ptr"
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM struct gep error: {}", e), Span::dummy()
+                        )])?;
+
+                        // Load the length value
+                        let len_val = self.builder.build_load(len_ptr, "slice_len")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM load error: {}", e), Span::dummy()
+                            )])?;
+
+                        Ok(len_val)
                     }
                     TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
                         // For references/pointers to arrays, extract from the inner type
@@ -1336,10 +1446,30 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 Ok(len_val.into())
                             }
                             TypeKind::Slice { .. } => {
-                                Err(vec![Diagnostic::error(
-                                    "Slice length extraction through reference not yet implemented.",
-                                    Span::dummy()
-                                )])
+                                // For &[T] or *[T], load the pointer and extract length from fat pointer
+                                // First, load the pointer to get the slice value
+                                let ref_ptr = self.compile_mir_place(place, body)?;
+                                let slice_ptr = self.builder.build_load(ref_ptr, "slice_deref")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), Span::dummy()
+                                    )])?.into_pointer_value();
+
+                                // Get pointer to the length field (index 1)
+                                let len_ptr = self.builder.build_struct_gep(
+                                    slice_ptr,
+                                    1,
+                                    "slice_len_ptr"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM struct gep error: {}", e), Span::dummy()
+                                )])?;
+
+                                // Load the length value
+                                let len_val = self.builder.build_load(len_ptr, "slice_len")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), Span::dummy()
+                                    )])?;
+
+                                Ok(len_val)
                             }
                             _ => {
                                 Err(vec![Diagnostic::error(
@@ -1913,11 +2043,17 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             // Closures might capture genrefs in their environment
             TypeKind::Closure { .. } => true,
 
+            // Range types may contain genrefs if their element type does
+            TypeKind::Range { ref element, .. } => self.type_may_contain_genref(element),
+
             // Primitives don't contain genrefs
             TypeKind::Primitive(_) => false,
 
             // Never and Error types don't contain genrefs
             TypeKind::Never | TypeKind::Error => false,
+
+            // Trait objects may contain genrefs (data pointer)
+            TypeKind::DynTrait { .. } => true,
 
             // Inference and type parameters - be conservative
             TypeKind::Infer(_) | TypeKind::Param(_) => true,
@@ -2149,6 +2285,115 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(result.into())
     }
 
+    /// Get the type of an MIR operand.
+    fn get_operand_type<'b>(&self, operand: &'b Operand, body: &'b MirBody) -> &'b Type {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => {
+                &body.locals[place.local.index() as usize].ty
+            }
+            Operand::Constant(constant) => &constant.ty,
+        }
+    }
+
+    /// Check if a type is signed (for overflow intrinsic selection).
+    fn is_signed_type(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            TypeKind::Primitive(PrimitiveTy::Int(_)) => true,
+            TypeKind::Primitive(PrimitiveTy::Uint(_)) => false,
+            // Default to signed for other types (conservative)
+            _ => true,
+        }
+    }
+
+    /// Compile a checked binary operation using LLVM overflow intrinsics.
+    ///
+    /// Returns a struct `(result, overflow_flag)` where overflow_flag is true
+    /// if the operation overflowed.
+    fn compile_checked_binary_op(
+        &mut self,
+        op: BinOp,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+        is_signed: bool,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        let lhs_int = lhs.into_int_value();
+        let rhs_int = rhs.into_int_value();
+        let int_type = lhs_int.get_type();
+
+        // Determine the intrinsic name based on operation and signedness
+        let intrinsic_name = match (op, is_signed) {
+            (BinOp::Add, true) => "llvm.sadd.with.overflow",
+            (BinOp::Add, false) => "llvm.uadd.with.overflow",
+            (BinOp::Sub, true) => "llvm.ssub.with.overflow",
+            (BinOp::Sub, false) => "llvm.usub.with.overflow",
+            (BinOp::Mul, true) => "llvm.smul.with.overflow",
+            (BinOp::Mul, false) => "llvm.umul.with.overflow",
+            // For operations without overflow intrinsics, fall back to unchecked
+            // and return (result, false)
+            _ => {
+                let result = self.compile_binary_op(op, lhs, rhs)?;
+                // Build a struct with result and false (no overflow)
+                let bool_type = self.context.bool_type();
+                let no_overflow = bool_type.const_zero();
+                let struct_type = self.context.struct_type(
+                    &[int_type.into(), bool_type.into()],
+                    false,
+                );
+                let mut struct_val = struct_type.get_undef();
+                struct_val = self.builder.build_insert_value(struct_val, result.into_int_value(), 0, "checked_result")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM insert_value error: {}", e), Span::dummy()
+                    )])?
+                    .into_struct_value();
+                struct_val = self.builder.build_insert_value(struct_val, no_overflow, 1, "checked_overflow")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM insert_value error: {}", e), Span::dummy()
+                    )])?
+                    .into_struct_value();
+                return Ok(struct_val.into());
+            }
+        };
+
+        // Get the LLVM intrinsic
+        let intrinsic = Intrinsic::find(intrinsic_name).ok_or_else(|| {
+            vec![Diagnostic::error(
+                format!("LLVM intrinsic {} not found", intrinsic_name),
+                Span::dummy(),
+            )]
+        })?;
+
+        // Get the declaration for this specific type
+        let intrinsic_fn = intrinsic
+            .get_declaration(&self.module, &[int_type.into()])
+            .ok_or_else(|| {
+                vec![Diagnostic::error(
+                    format!("Could not get declaration for {} intrinsic", intrinsic_name),
+                    Span::dummy(),
+                )]
+            })?;
+
+        // Call the intrinsic
+        let call_result = self.builder
+            .build_call(
+                intrinsic_fn,
+                &[lhs_int.into(), rhs_int.into()],
+                "checked_op",
+            )
+            .map_err(|e| vec![Diagnostic::error(
+                format!("LLVM call error: {}", e), Span::dummy()
+            )])?;
+
+        // The intrinsic returns {iN, i1} - extract as a struct value
+        let result_struct = call_result.try_as_basic_value().left().ok_or_else(|| {
+            vec![Diagnostic::error(
+                "Overflow intrinsic did not return a value".to_string(),
+                Span::dummy(),
+            )]
+        })?;
+
+        Ok(result_struct)
+    }
+
     /// Compile a unary operation.
     fn compile_unary_op(
         &mut self,
@@ -2323,6 +2568,53 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         )])?;
 
                     Ok(env_ptr.into())
+                }
+            }
+
+            AggregateKind::Range { element, inclusive } => {
+                // Range is a struct: { start: T, end: T } or { start: T, end: T, exhausted: bool }
+                let elem_ty = self.lower_type(element);
+
+                if *inclusive {
+                    // RangeInclusive: { start, end, exhausted }
+                    if vals.len() != 3 {
+                        return Err(vec![Diagnostic::error(
+                            format!("RangeInclusive expects 3 fields, got {}", vals.len()),
+                            Span::dummy()
+                        )]);
+                    }
+                    let struct_ty = self.context.struct_type(
+                        &[elem_ty, elem_ty, self.context.bool_type().into()],
+                        false
+                    );
+                    let mut range_val = struct_ty.get_undef();
+                    range_val = self.builder.build_insert_value(range_val, vals[0], 0, "start")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM insert error: {}", e), Span::dummy())])?
+                        .into_struct_value();
+                    range_val = self.builder.build_insert_value(range_val, vals[1], 1, "end")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM insert error: {}", e), Span::dummy())])?
+                        .into_struct_value();
+                    range_val = self.builder.build_insert_value(range_val, vals[2], 2, "exhausted")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM insert error: {}", e), Span::dummy())])?
+                        .into_struct_value();
+                    Ok(range_val.into())
+                } else {
+                    // Range: { start, end }
+                    if vals.len() != 2 {
+                        return Err(vec![Diagnostic::error(
+                            format!("Range expects 2 fields, got {}", vals.len()),
+                            Span::dummy()
+                        )]);
+                    }
+                    let struct_ty = self.context.struct_type(&[elem_ty, elem_ty], false);
+                    let mut range_val = struct_ty.get_undef();
+                    range_val = self.builder.build_insert_value(range_val, vals[0], 0, "start")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM insert error: {}", e), Span::dummy())])?
+                        .into_struct_value();
+                    range_val = self.builder.build_insert_value(range_val, vals[1], 1, "end")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM insert error: {}", e), Span::dummy())])?
+                        .into_struct_value();
+                    Ok(range_val.into())
                 }
             }
         }
