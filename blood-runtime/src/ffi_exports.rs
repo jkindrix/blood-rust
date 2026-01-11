@@ -231,17 +231,19 @@ pub extern "C" fn blood_check_generation(
 
 /// Get current generation from a memory slot.
 ///
+/// Returns the current generation for the given address, or `FIRST` (1) if
+/// the address is not tracked in the slot registry.
+///
 /// # Safety
-/// The address must point to a valid Blood allocation header.
+/// The address should point to memory allocated via `blood_alloc`.
 #[no_mangle]
 pub unsafe extern "C" fn blood_get_generation(addr: u64) -> u32 {
     if addr == 0 {
         return 0;
     }
 
-    // In a real implementation, this would read from the slot header
-    // For now, return a placeholder
-    1
+    // Look up the actual generation from the slot registry
+    get_slot_generation(addr).unwrap_or(generation::FIRST)
 }
 
 // ============================================================================
@@ -1161,6 +1163,53 @@ pub extern "C" fn blood_effect_is_tail_resumptive() -> bool {
     })
 }
 
+/// Set the generation snapshot for the current effect context.
+///
+/// This should be called during `perform` to capture the generations of
+/// references that will be accessed after the handler resumes.
+#[no_mangle]
+pub extern "C" fn blood_effect_context_set_snapshot(snapshot: SnapshotHandle) {
+    EFFECT_CONTEXT.with(|ctx| {
+        let mut ctx_ref = ctx.borrow_mut();
+        if let Some(ref mut effect_ctx) = *ctx_ref {
+            // Convert the raw SnapshotHandle to the continuation module's SnapshotHandle type
+            effect_ctx.set_snapshot(snapshot as crate::continuation::SnapshotHandle);
+        }
+    });
+}
+
+/// Get the generation snapshot from the current effect context.
+///
+/// This should be called during `resume` to validate captured references
+/// before returning to user code. Returns null if no snapshot was captured.
+#[no_mangle]
+pub extern "C" fn blood_effect_context_get_snapshot() -> SnapshotHandle {
+    EFFECT_CONTEXT.with(|ctx| {
+        let ctx_ref = ctx.borrow();
+        ctx_ref
+            .as_ref()
+            .and_then(|c| c.snapshot)
+            .map(|s| s as SnapshotHandle)
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
+/// Take the generation snapshot from the current effect context.
+///
+/// This transfers ownership - the caller is responsible for destroying it.
+/// Returns null if no snapshot was captured.
+#[no_mangle]
+pub extern "C" fn blood_effect_context_take_snapshot() -> SnapshotHandle {
+    EFFECT_CONTEXT.with(|ctx| {
+        let mut ctx_ref = ctx.borrow_mut();
+        ctx_ref
+            .as_mut()
+            .and_then(|c| c.take_snapshot())
+            .map(|s| s as SnapshotHandle)
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
 // ============================================================================
 // Work-Stealing Scheduler FFI
 // ============================================================================
@@ -1410,6 +1459,42 @@ pub extern "C" fn blood_stale_reference_panic(expected: u32, actual: u32) -> ! {
         "BLOOD RUNTIME ERROR: Stale reference detected!\n\
          Expected generation: {expected}, Actual: {actual}\n\
          This indicates use-after-free. Aborting."
+    );
+    std::process::abort();
+}
+
+/// Called when snapshot validation fails during effect resume.
+///
+/// This is called when `blood_snapshot_validate` returns a non-zero value,
+/// indicating that one or more generational references have become stale
+/// while the continuation was suspended.
+///
+/// # Arguments
+/// * `snapshot` - The snapshot that was validated
+/// * `stale_index` - The 1-based index of the first stale entry (from blood_snapshot_validate)
+#[no_mangle]
+pub unsafe extern "C" fn blood_snapshot_stale_panic(snapshot: SnapshotHandle, stale_index: i64) -> ! {
+    if !snapshot.is_null() && stale_index > 0 {
+        let snap = &*(snapshot as *const GenerationSnapshot);
+        let idx = (stale_index - 1) as usize;
+
+        if let Some(entry) = snap.entries.get(idx) {
+            let actual_gen = get_slot_generation(entry.address).unwrap_or(0);
+            eprintln!(
+                "BLOOD RUNTIME ERROR: Stale reference detected on resume!\n\
+                 Address: 0x{:x}\n\
+                 Expected generation: {}, Actual: {}\n\
+                 This indicates use-after-free while continuation was suspended. Aborting.",
+                entry.address, entry.generation, actual_gen
+            );
+            std::process::abort();
+        }
+    }
+
+    eprintln!(
+        "BLOOD RUNTIME ERROR: Stale reference detected on resume!\n\
+         Snapshot validation failed at entry {}. Aborting.",
+        stale_index
     );
     std::process::abort();
 }
@@ -1878,5 +1963,95 @@ mod tests {
             let layout = std::alloc::Layout::from_size_align(32, 16).unwrap();
             std::alloc::dealloc(addr2 as *mut u8, layout);
         }
+    }
+
+    /// Test effect context snapshot get/set functions
+    #[test]
+    fn test_effect_context_snapshot_functions() {
+        // Begin effect context (non-tail-resumptive)
+        blood_effect_context_begin(false);
+
+        // Initially no snapshot
+        let initial = blood_effect_context_get_snapshot();
+        assert!(initial.is_null(), "Initial snapshot should be null");
+
+        // Create and set a snapshot
+        let snapshot = blood_snapshot_create();
+        assert!(!snapshot.is_null());
+
+        blood_effect_context_set_snapshot(snapshot);
+
+        // Get should return the snapshot
+        let retrieved = blood_effect_context_get_snapshot();
+        assert_eq!(retrieved, snapshot, "Get should return the set snapshot");
+
+        // Take should return and clear
+        let taken = blood_effect_context_take_snapshot();
+        assert_eq!(taken, snapshot, "Take should return the snapshot");
+
+        // After take, get should return null
+        let after_take = blood_effect_context_get_snapshot();
+        assert!(after_take.is_null(), "After take, get should return null");
+
+        // Clean up
+        unsafe { blood_snapshot_destroy(taken); }
+        blood_effect_context_end();
+    }
+
+    /// Test snapshot validation through effect context
+    #[test]
+    fn test_effect_context_snapshot_validation() {
+        // Set up: allocate, create snapshot, free, then validate
+        let addr = 0xABCD_1000u64;
+        let gen = blood_register_allocation(addr, 64);
+
+        blood_effect_context_begin(false);
+
+        // Create snapshot with the allocation
+        let snapshot = blood_snapshot_create();
+        unsafe { blood_snapshot_add_entry(snapshot, addr, gen); }
+        blood_effect_context_set_snapshot(snapshot);
+
+        // Free the allocation (making reference stale)
+        blood_unregister_allocation(addr);
+
+        // Get snapshot and validate - should detect stale
+        let snap = blood_effect_context_get_snapshot();
+        let result = unsafe { blood_snapshot_validate(snap) };
+        assert_eq!(result, 1, "Should detect stale reference at index 1");
+
+        // Clean up
+        let snap = blood_effect_context_take_snapshot();
+        unsafe { blood_snapshot_destroy(snap); }
+        blood_effect_context_end();
+    }
+
+    /// Test that blood_get_generation returns actual values (not placeholder)
+    #[test]
+    fn test_blood_get_generation_not_placeholder() {
+        // Allocate and register
+        let addr = 0x7777_0000u64;
+        let gen = blood_register_allocation(addr, 32);
+
+        // blood_get_generation should return the registered generation
+        let retrieved_gen = unsafe { blood_get_generation(addr) };
+        assert_eq!(retrieved_gen, gen, "blood_get_generation should return registered generation");
+
+        // After unregister, generation should be incremented
+        blood_unregister_allocation(addr);
+
+        let new_gen = unsafe { blood_get_generation(addr) };
+        // The address may or may not still be in registry depending on implementation
+        // But if it is, the generation should be incremented
+        // If not, it returns FIRST (1) which is different from gen (since gen was incremented on register)
+        assert_ne!(new_gen, gen, "Generation should change after unregister");
+
+        // Re-register should get different generation
+        let gen2 = blood_register_allocation(addr, 32);
+        let retrieved_gen2 = unsafe { blood_get_generation(addr) };
+        assert_eq!(retrieved_gen2, gen2, "Should get new generation after re-register");
+
+        // Clean up
+        blood_unregister_allocation(addr);
     }
 }
