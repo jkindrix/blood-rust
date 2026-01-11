@@ -34,6 +34,7 @@ use bloodc::codegen;
 use bloodc::mir;
 use bloodc::content::{ContentHash, BuildCache, hash_hir_item};
 use bloodc::content::hash::ContentHasher;
+use bloodc::content::namespace::{NameRegistry, NameBinding, BindingKind};
 
 /// The Blood Programming Language Compiler
 ///
@@ -536,6 +537,44 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             cache_hits,
             cache_misses
         );
+    }
+
+    // Populate namespace registry with content-addressed definitions
+    let mut name_registry = NameRegistry::new();
+    {
+        let main_ns = name_registry.get_or_create("main");
+        for (&def_id, item) in &hir_crate.items {
+            if let Some(&hash) = definition_hashes.get(&def_id) {
+                // Determine binding kind from item kind
+                let binding = match &item.kind {
+                    bloodc::hir::ItemKind::Fn(_) => NameBinding::value(hash),
+                    bloodc::hir::ItemKind::Struct(_) => NameBinding::ty(hash),
+                    bloodc::hir::ItemKind::Enum(_) => NameBinding::ty(hash),
+                    bloodc::hir::ItemKind::Effect { .. } => NameBinding::effect(hash),
+                    bloodc::hir::ItemKind::Trait { .. } => NameBinding::ty(hash),
+                    bloodc::hir::ItemKind::Impl { .. } => continue, // Impls don't have names
+                    bloodc::hir::ItemKind::Handler { .. } => NameBinding::value(hash),
+                    bloodc::hir::ItemKind::TypeAlias { .. } => {
+                        NameBinding {
+                            hash,
+                            kind: BindingKind::TypeAlias,
+                            is_public: true,
+                            doc: None,
+                        }
+                    }
+                    bloodc::hir::ItemKind::Const { .. } => NameBinding::value(hash),
+                    bloodc::hir::ItemKind::Static { .. } => NameBinding::value(hash),
+                };
+                main_ns.bind(&item.name, binding);
+            }
+        }
+    }
+
+    if verbosity > 1 {
+        let main_ns = name_registry.get("main");
+        if let Some(ns) = main_ns {
+            eprintln!("Namespace registry: {} bindings in 'main'", ns.len());
+        }
     }
 
     // Lower to MIR (Phase 3 integration point)
