@@ -53,11 +53,13 @@ pub mod io;
 pub mod memory;
 pub mod scheduler;
 pub mod stdlib;
+pub mod sync;
 
 // Re-exports
 pub use channel::{bounded, unbounded, Receiver, Sender};
 pub use fiber::{Fiber, FiberId, FiberHandle, FiberState};
 pub use scheduler::{Scheduler, Worker};
+pub use sync::{Mutex, RwLock, Once, Barrier, Semaphore, OnceLock};
 
 /// Runtime version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
