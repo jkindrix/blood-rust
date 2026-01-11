@@ -75,6 +75,8 @@ pub struct TypeContext<'a> {
     impl_blocks: Vec<ImplBlockInfo>,
     /// Mapping from method DefId to its Self type (for resolving `self` in methods).
     method_self_types: HashMap<DefId, Type>,
+    /// Trait definitions.
+    trait_defs: HashMap<DefId, TraitInfo>,
 }
 
 /// Information about a struct.
@@ -210,6 +212,58 @@ pub struct ImplAssocConstInfo {
     pub ty: Type,
 }
 
+/// Information about a trait declaration.
+#[derive(Debug, Clone)]
+pub struct TraitInfo {
+    /// The trait name.
+    pub name: String,
+    /// Generic type parameters.
+    pub generics: Vec<TyVarId>,
+    /// Supertrait bounds.
+    pub supertraits: Vec<DefId>,
+    /// Required methods.
+    pub methods: Vec<TraitMethodInfo>,
+    /// Associated types.
+    pub assoc_types: Vec<TraitAssocTypeInfo>,
+    /// Associated constants.
+    pub assoc_consts: Vec<TraitAssocConstInfo>,
+}
+
+/// Information about a trait method.
+#[derive(Debug, Clone)]
+pub struct TraitMethodInfo {
+    /// The method's DefId.
+    pub def_id: DefId,
+    /// The method name.
+    pub name: String,
+    /// The method signature.
+    pub sig: hir::FnSig,
+    /// Whether this method has a default implementation.
+    pub has_default: bool,
+}
+
+/// Information about a trait associated type.
+#[derive(Debug, Clone)]
+pub struct TraitAssocTypeInfo {
+    /// The associated type name.
+    pub name: String,
+    /// Default type, if any.
+    pub default: Option<Type>,
+}
+
+/// Information about a trait associated constant.
+#[derive(Debug, Clone)]
+pub struct TraitAssocConstInfo {
+    /// The constant's DefId.
+    pub def_id: DefId,
+    /// The constant name.
+    pub name: String,
+    /// The constant type.
+    pub ty: Type,
+    /// Whether this has a default value.
+    pub has_default: bool,
+}
+
 impl<'a> TypeContext<'a> {
     /// Create a new type context.
     pub fn new(source: &'a str, interner: DefaultStringInterner) -> Self {
@@ -240,6 +294,7 @@ impl<'a> TypeContext<'a> {
             pending_handlers: Vec::new(),
             impl_blocks: Vec::new(),
             method_self_types: HashMap::new(),
+            trait_defs: HashMap::new(),
         };
         ctx.register_builtins();
         ctx
@@ -387,15 +442,7 @@ impl<'a> TypeContext<'a> {
             ast::Declaration::Handler(h) => self.collect_handler(h),
             ast::Declaration::Type(t) => self.collect_type_alias(t),
             ast::Declaration::Impl(i) => self.collect_impl_block(i),
-            ast::Declaration::Trait(t) => {
-                // Trait declarations - Phase 2+
-                Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "trait declarations are not yet supported".to_string(),
-                    },
-                    t.span,
-                ))
-            }
+            ast::Declaration::Trait(t) => self.collect_trait(t),
         }
     }
 
@@ -1204,6 +1251,185 @@ impl<'a> TypeContext<'a> {
     /// Convert a Type to a string for display.
     fn type_to_string(&self, ty: &Type) -> String {
         format!("{}", ty)
+    }
+
+    /// Collect a trait declaration.
+    fn collect_trait(&mut self, trait_decl: &ast::TraitDecl) -> Result<(), TypeError> {
+        let name = self.symbol_to_string(trait_decl.name.node);
+
+        // Register the trait
+        let def_id = self.resolver.define_item(
+            name.clone(),
+            hir::DefKind::Trait,
+            trait_decl.span,
+        )?;
+
+        // Save current generic params
+        let saved_generic_params = std::mem::take(&mut self.generic_params);
+        let mut generics_vec = Vec::new();
+
+        // Register type parameters
+        if let Some(ref type_params) = trait_decl.type_params {
+            for param in &type_params.params {
+                let param_name = self.symbol_to_string(param.name.node);
+                let ty_var_id = TyVarId::new(self.next_type_param_id);
+                self.next_type_param_id += 1;
+                self.generic_params.insert(param_name, ty_var_id);
+                generics_vec.push(ty_var_id);
+            }
+        }
+
+        // Resolve supertraits
+        let mut supertraits = Vec::new();
+        for supertrait in &trait_decl.supertraits {
+            match &supertrait.kind {
+                ast::TypeKind::Path(path) => {
+                    if !path.segments.is_empty() {
+                        let supertrait_name = self.symbol_to_string(path.segments[0].name.node);
+                        match self.resolver.lookup(&supertrait_name) {
+                            Some(Binding::Def(supertrait_def_id)) => {
+                                if let Some(info) = self.resolver.def_info.get(&supertrait_def_id) {
+                                    if matches!(info.kind, hir::DefKind::Trait) {
+                                        supertraits.push(supertrait_def_id);
+                                    } else {
+                                        return Err(TypeError::new(
+                                            TypeErrorKind::TraitNotFound { name: supertrait_name },
+                                            supertrait.span,
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::TraitNotFound { name: supertrait_name },
+                                    supertrait.span,
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(TypeError::new(
+                        TypeErrorKind::UnsupportedFeature {
+                            feature: "complex supertrait bounds".to_string(),
+                        },
+                        supertrait.span,
+                    ));
+                }
+            }
+        }
+
+        // Process trait items
+        let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
+        let mut assoc_consts = Vec::new();
+
+        for item in &trait_decl.items {
+            match item {
+                ast::TraitItem::Function(func) => {
+                    let method_name = self.symbol_to_string(func.name.node);
+                    let qualified_name = format!("{}::{}", name, method_name);
+
+                    let method_def_id = self.resolver.define_item(
+                        qualified_name,
+                        hir::DefKind::AssocFn,
+                        func.span,
+                    )?;
+
+                    // Build parameter types
+                    let mut param_types = Vec::new();
+                    for param in &func.params {
+                        param_types.push(self.ast_type_to_hir_type(&param.ty)?);
+                    }
+
+                    let return_type = match &func.return_type {
+                        Some(ty) => self.ast_type_to_hir_type(ty)?,
+                        None => Type::unit(),
+                    };
+
+                    let sig = hir::FnSig {
+                        inputs: param_types,
+                        output: return_type,
+                        is_const: func.qualifiers.is_const,
+                        is_async: func.qualifiers.is_async,
+                        is_unsafe: func.qualifiers.is_unsafe,
+                        generics: Vec::new(),
+                    };
+
+                    self.fn_sigs.insert(method_def_id, sig.clone());
+
+                    // Check if this has a default implementation
+                    let has_default = func.body.is_some();
+                    if has_default {
+                        // Queue the default body for type-checking
+                        self.pending_bodies.push((method_def_id, func.clone()));
+                    }
+
+                    methods.push(TraitMethodInfo {
+                        def_id: method_def_id,
+                        name: method_name,
+                        sig,
+                        has_default,
+                    });
+                }
+                ast::TraitItem::Type(type_decl) => {
+                    let type_name = self.symbol_to_string(type_decl.name.node);
+                    // For associated types, the `ty` field in TypeDecl is the default
+                    // Check if it's meaningful (not just a placeholder)
+                    let default = if type_decl.type_params.is_none() {
+                        // Try to convert the type - if it's just a name binding, there's no default
+                        match self.ast_type_to_hir_type(&type_decl.ty) {
+                            Ok(ty) if !ty.is_error() => Some(ty),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    assoc_types.push(TraitAssocTypeInfo {
+                        name: type_name,
+                        default,
+                    });
+                }
+                ast::TraitItem::Const(const_decl) => {
+                    let const_name = self.symbol_to_string(const_decl.name.node);
+                    let qualified_name = format!("{}::{}", name, const_name);
+
+                    let const_def_id = self.resolver.define_item(
+                        qualified_name,
+                        hir::DefKind::AssocConst,
+                        const_decl.span,
+                    )?;
+
+                    let ty = self.ast_type_to_hir_type(&const_decl.ty)?;
+                    // In the AST, trait constants always have a value (the parser requires it)
+                    // The presence of a value means it has a default
+                    let has_default = true;
+
+                    assoc_consts.push(TraitAssocConstInfo {
+                        def_id: const_def_id,
+                        name: const_name,
+                        ty,
+                        has_default,
+                    });
+                }
+            }
+        }
+
+        // Restore generic params
+        self.generic_params = saved_generic_params;
+
+        // Store the trait info
+        self.trait_defs.insert(def_id, TraitInfo {
+            name,
+            generics: generics_vec,
+            supertraits,
+            methods,
+            assoc_types,
+            assoc_consts,
+        });
+
+        Ok(())
     }
 
     /// Type-check all queued bodies.
