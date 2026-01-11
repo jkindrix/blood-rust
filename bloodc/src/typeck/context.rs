@@ -14,7 +14,9 @@ use crate::span::Span;
 use crate::diagnostics::Diagnostic;
 use crate::ice;
 
+use super::const_eval;
 use super::error::{TypeError, TypeErrorKind};
+use super::exhaustiveness;
 use super::resolve::{Resolver, ScopeKind, Binding};
 use super::unify::Unifier;
 
@@ -1119,6 +1121,11 @@ impl<'a> TypeContext<'a> {
                 hir::DefKind::Variant,
                 variant.span,
             )?;
+
+            // Set the parent to the enum def_id for qualified path resolution
+            if let Some(def_info) = self.resolver.def_info.get_mut(&variant_def_id) {
+                def_info.parent = Some(def_id);
+            }
 
             let fields = match &variant.body {
                 ast::StructBody::Record(fields) => {
@@ -2598,16 +2605,22 @@ impl<'a> TypeContext<'a> {
             }
             ast::PatternKind::Struct { path, fields, rest } => {
                 // Struct pattern: let Point { x, y } = point;
-                // First verify the type is a struct matching the pattern's path
-                if path.segments.len() != 1 {
+                // Also supports qualified paths like Module::Point { x, y }
+                // For struct patterns, we use the expected type to guide matching,
+                // so we just need to extract the struct name for error messages
+                let struct_name = if path.segments.len() == 1 {
+                    self.symbol_to_string(path.segments[0].name.node)
+                } else if path.segments.len() == 2 {
+                    // Qualified path: use the last segment as the type name
+                    self.symbol_to_string(path.segments[1].name.node)
+                } else {
                     return Err(TypeError::new(
                         TypeErrorKind::UnsupportedFeature {
-                            feature: "qualified struct pattern paths".to_string(),
+                            feature: "struct pattern paths with more than 2 segments".to_string(),
                         },
                         pattern.span,
                     ));
-                }
-                let struct_name = self.symbol_to_string(path.segments[0].name.node);
+                };
 
                 // Get the struct definition from the type
                 let struct_def_id = match ty.kind() {
@@ -3663,20 +3676,17 @@ impl<'a> TypeContext<'a> {
                 // Verify count is an integer type
                 self.unifier.unify(&count_expr.ty, &Type::i32(), count.span)?;
 
-                // Count must be a constant integer (const eval required for non-literals)
-                let size = match &count.kind {
-                    ast::ExprKind::Literal(ast::Literal {
-                        kind: ast::LiteralKind::Int { value, .. },
-                        ..
-                    }) => *value as u64,
-                    _ => {
-                        return Err(TypeError::new(
-                            TypeErrorKind::UnsupportedFeature {
-                                feature: "array repeat count must be a literal integer (const evaluation not yet supported)".to_string(),
+                // Evaluate count as a compile-time constant
+                let size = match const_eval::eval_const_expr(count) {
+                    Ok(result) => result.as_u64().ok_or_else(|| {
+                        TypeError::new(
+                            TypeErrorKind::ConstEvalError {
+                                reason: "array size must be a non-negative integer that fits in u64".to_string(),
                             },
                             count.span,
-                        ));
-                    }
+                        )
+                    })?,
+                    Err(e) => return Err(e),
                 };
 
                 Ok(hir::Expr::new(
@@ -3785,10 +3795,88 @@ impl<'a> TypeContext<'a> {
                     ))
                 }
             }
-        } else {
-            // Multi-segment paths - Phase 2+
+        } else if path.segments.len() == 2 {
+            // Two-segment path: likely EnumName::VariantName
+            let first_name = self.symbol_to_string(path.segments[0].name.node);
+            let second_name = self.symbol_to_string(path.segments[1].name.node);
+
+            // Try to resolve first segment as a type (enum)
+            if let Some(type_def_id) = self.resolver.lookup_type(&first_name) {
+                // Check if this is an enum
+                if let Some(enum_info) = self.enum_defs.get(&type_def_id).cloned() {
+                    // Look for the variant by name
+                    if let Some(variant) = enum_info.variants.iter().find(|v| v.name == second_name) {
+                        let variant_idx = variant.index;
+                        let variant_def_id = variant.def_id;
+                        let variant_fields = variant.fields.clone();
+
+                        // Determine the type of this expression
+                        // If the variant has fields, this is a constructor function
+                        // If no fields, this is a unit variant value
+                        if variant_fields.is_empty() {
+                            // Unit variant - the expression evaluates to the enum type directly
+                            let type_args: Vec<Type> = enum_info.generics.iter()
+                                .map(|_| self.unifier.fresh_var())
+                                .collect();
+                            let enum_ty = Type::adt(type_def_id, type_args);
+
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Variant {
+                                    def_id: type_def_id,
+                                    variant_idx,
+                                    fields: vec![],
+                                },
+                                enum_ty,
+                                span,
+                            ));
+                        } else {
+                            // Variant with fields - this is a constructor function
+                            // The type is fn(field1, field2, ...) -> EnumType
+                            let field_types: Vec<Type> = variant_fields.iter()
+                                .map(|f| f.ty.clone())
+                                .collect();
+
+                            // Create fresh type variables for generic parameters
+                            let type_args: Vec<Type> = enum_info.generics.iter()
+                                .map(|_| self.unifier.fresh_var())
+                                .collect();
+                            let enum_ty = Type::adt(type_def_id, type_args);
+
+                            // Return a reference to the variant constructor
+                            // This will be handled specially during function call inference
+                            // For now, we return a Def expression with the function type
+                            let fn_ty = Type::function(field_types, enum_ty);
+
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Def(variant_def_id),
+                                fn_ty,
+                                span,
+                            ));
+                        }
+                    } else {
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
+                            span,
+                        ));
+                    }
+                }
+            }
+
+            // Not an enum variant path - check if it could be a module path or associated item
             Err(TypeError::new(
-                TypeErrorKind::NotFound { name: format!("{:?}", path) },
+                TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
+                span,
+            ))
+        } else {
+            // Paths with 3+ segments are not yet supported
+            let path_str = path.segments.iter()
+                .map(|s| self.symbol_to_string(s.name.node))
+                .collect::<Vec<_>>()
+                .join("::");
+            Err(TypeError::new(
+                TypeErrorKind::UnsupportedFeature {
+                    feature: format!("paths with more than 2 segments: {}", path_str),
+                },
                 span,
             ))
         }
@@ -4425,9 +4513,6 @@ impl<'a> TypeContext<'a> {
         for arm in arms {
             self.resolver.push_scope(ScopeKind::MatchArm, arm.span);
 
-            // Phase 2+: Implement exhaustiveness and usefulness checking for patterns.
-            // Currently we lower the pattern but don't verify that the pattern fully
-            // covers all variants of the scrutinee type or detect unreachable arms.
             let pattern = self.lower_pattern(&arm.pattern, &scrutinee_expr.ty)?;
 
             let guard = if let Some(ref guard) = arm.guard {
@@ -4445,6 +4530,33 @@ impl<'a> TypeContext<'a> {
                 guard,
                 body,
             });
+        }
+
+        // Check for exhaustiveness
+        let enum_info = self.get_enum_variant_info(&scrutinee_expr.ty);
+        let result = exhaustiveness::check_exhaustiveness(
+            &hir_arms,
+            &scrutinee_expr.ty,
+            enum_info.as_ref(),
+        );
+
+        if !result.is_exhaustive {
+            return Err(TypeError::new(
+                TypeErrorKind::NonExhaustivePatterns {
+                    missing: result.missing_patterns,
+                },
+                span,
+            ));
+        }
+
+        // Report unreachable patterns as warnings (stored but not fatal)
+        for idx in result.unreachable_arms {
+            if let Some(arm) = arms.get(idx) {
+                self.errors.push(TypeError::new(
+                    TypeErrorKind::UnreachablePattern,
+                    arm.span,
+                ));
+            }
         }
 
         let final_ty = self.unifier.resolve(&result_ty);
@@ -4493,28 +4605,65 @@ impl<'a> TypeContext<'a> {
                 // Check if the expected type is a tuple
                 match expected_ty.kind() {
                     TypeKind::Tuple(elem_types) => {
-                        if rest_pos.is_some() {
-                            return Err(TypeError::new(
-                                TypeErrorKind::UnsupportedFeature {
-                                    feature: "rest patterns in tuples are not yet supported".to_string(),
-                                },
-                                pattern.span,
-                            ));
+                        if let Some(pos) = rest_pos {
+                            // Rest pattern present: (a, .., b) or similar
+                            // Fields before rest_pos bind to start of tuple
+                            // Fields at/after rest_pos bind to end of tuple
+                            let prefix_count = *pos;
+                            let suffix_count = fields.len() - prefix_count;
+                            let min_elems = prefix_count + suffix_count;
+
+                            if elem_types.len() < min_elems {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::PatternMismatch {
+                                        expected: expected_ty.clone(),
+                                        pattern: format!(
+                                            "tuple pattern requires at least {} elements, found {}",
+                                            min_elems, elem_types.len()
+                                        ),
+                                    },
+                                    pattern.span,
+                                ));
+                            }
+
+                            let mut hir_fields = Vec::new();
+                            // Lower prefix patterns (bind to start)
+                            for (i, field) in fields.iter().take(prefix_count).enumerate() {
+                                hir_fields.push(self.lower_pattern(field, &elem_types[i])?);
+                            }
+                            // Add wildcards for skipped elements
+                            let skipped = elem_types.len() - min_elems;
+                            for i in 0..skipped {
+                                let wildcard_ty = elem_types[prefix_count + i].clone();
+                                hir_fields.push(hir::Pattern {
+                                    kind: hir::PatternKind::Wildcard,
+                                    ty: wildcard_ty,
+                                    span: pattern.span,
+                                });
+                            }
+                            // Lower suffix patterns (bind to end)
+                            for (i, field) in fields.iter().skip(prefix_count).enumerate() {
+                                let elem_idx = prefix_count + skipped + i;
+                                hir_fields.push(self.lower_pattern(field, &elem_types[elem_idx])?);
+                            }
+                            hir::PatternKind::Tuple(hir_fields)
+                        } else {
+                            // No rest pattern - exact match required
+                            if fields.len() != elem_types.len() {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::PatternMismatch {
+                                        expected: expected_ty.clone(),
+                                        pattern: format!("tuple pattern with {} elements", fields.len()),
+                                    },
+                                    pattern.span,
+                                ));
+                            }
+                            let mut hir_fields = Vec::new();
+                            for (field, elem_ty) in fields.iter().zip(elem_types.iter()) {
+                                hir_fields.push(self.lower_pattern(field, elem_ty)?);
+                            }
+                            hir::PatternKind::Tuple(hir_fields)
                         }
-                        if fields.len() != elem_types.len() {
-                            return Err(TypeError::new(
-                                TypeErrorKind::PatternMismatch {
-                                    expected: expected_ty.clone(),
-                                    pattern: format!("tuple pattern with {} elements", fields.len()),
-                                },
-                                pattern.span,
-                            ));
-                        }
-                        let mut hir_fields = Vec::new();
-                        for (field, elem_ty) in fields.iter().zip(elem_types.iter()) {
-                            hir_fields.push(self.lower_pattern(field, elem_ty)?);
-                        }
-                        hir::PatternKind::Tuple(hir_fields)
                     }
                     _ => {
                         return Err(TypeError::new(
@@ -4830,13 +4979,56 @@ impl<'a> TypeContext<'a> {
 
                 hir::PatternKind::Or(hir_alternatives)
             }
-            ast::PatternKind::Range { .. } => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "range patterns are not yet supported".to_string(),
-                    },
-                    pattern.span,
-                ));
+            ast::PatternKind::Range { start, end, inclusive } => {
+                // Range pattern: 0..10 or 'a'..='z'
+                // The expected type must be an integer or char type
+                match expected_ty.kind() {
+                    TypeKind::Primitive(prim) => {
+                        use crate::hir::ty::PrimitiveTy;
+                        match prim {
+                            PrimitiveTy::Int(_) | PrimitiveTy::Uint(_) | PrimitiveTy::Char => {
+                                // Valid types for range patterns
+                            }
+                            _ => {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::PatternMismatch {
+                                        expected: expected_ty.clone(),
+                                        pattern: "range pattern (requires integer or char type)".to_string(),
+                                    },
+                                    pattern.span,
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::PatternMismatch {
+                                expected: expected_ty.clone(),
+                                pattern: "range pattern (requires integer or char type)".to_string(),
+                            },
+                            pattern.span,
+                        ));
+                    }
+                }
+
+                // Lower start and end patterns
+                let hir_start = if let Some(s) = start {
+                    Some(Box::new(self.lower_pattern(s, expected_ty)?))
+                } else {
+                    None
+                };
+
+                let hir_end = if let Some(e) = end {
+                    Some(Box::new(self.lower_pattern(e, expected_ty)?))
+                } else {
+                    None
+                };
+
+                hir::PatternKind::Range {
+                    start: hir_start,
+                    end: hir_end,
+                    inclusive: *inclusive,
+                }
             }
             ast::PatternKind::Path(path) => {
                 // Unit variant pattern like `None`
@@ -5063,11 +5255,28 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Multi-segment path - Phase 2+
-                Err(TypeError::new(
-                    TypeErrorKind::TypeNotFound { name: format!("{path:?}") },
-                    ty.span,
-                ))
+                // Multi-segment type path
+                if path.segments.len() == 2 {
+                    // Two-segment path: could be Module::Type or EnumName (though types aren't usually used this way)
+                    let first_name = self.symbol_to_string(path.segments[0].name.node);
+                    let second_name = self.symbol_to_string(path.segments[1].name.node);
+                    Err(TypeError::new(
+                        TypeErrorKind::TypeNotFound { name: format!("{}::{}", first_name, second_name) },
+                        ty.span,
+                    ))
+                } else {
+                    // Paths with 3+ segments
+                    let path_str = path.segments.iter()
+                        .map(|s| self.symbol_to_string(s.name.node))
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    Err(TypeError::new(
+                        TypeErrorKind::UnsupportedFeature {
+                            feature: format!("type paths with more than 2 segments: {}", path_str),
+                        },
+                        ty.span,
+                    ))
+                }
             }
             ast::TypeKind::Reference { inner, mutable, .. } => {
                 let inner_ty = self.ast_type_to_hir_type(inner)?;
@@ -5089,19 +5298,17 @@ impl<'a> TypeContext<'a> {
             }
             ast::TypeKind::Array { element, size } => {
                 let elem_ty = self.ast_type_to_hir_type(element)?;
-                // Array size must be a constant integer (const eval required for non-literals)
-                let size_val = match &size.kind {
-                    ast::ExprKind::Literal(ast::Literal { kind: ast::LiteralKind::Int { value, .. }, .. }) => {
-                        *value as u64
-                    }
-                    _ => {
-                        return Err(TypeError::new(
-                            TypeErrorKind::UnsupportedFeature {
-                                feature: "array size must be a literal integer (const evaluation not yet supported)".to_string(),
+                // Evaluate array size as a compile-time constant
+                let size_val = match const_eval::eval_const_expr(size) {
+                    Ok(result) => result.as_u64().ok_or_else(|| {
+                        TypeError::new(
+                            TypeErrorKind::ConstEvalError {
+                                reason: "array size must be a non-negative integer that fits in u64".to_string(),
                             },
                             size.span,
-                        ));
-                    }
+                        )
+                    })?,
+                    Err(e) => return Err(e),
                 };
                 Ok(Type::array(elem_ty, size_val))
             }
@@ -5134,6 +5341,25 @@ impl<'a> TypeContext<'a> {
                     ty.span,
                 ))
             }
+        }
+    }
+
+    /// Get enum variant info for exhaustiveness checking.
+    fn get_enum_variant_info(&self, ty: &Type) -> Option<exhaustiveness::EnumVariantInfo> {
+        match &*ty.kind {
+            TypeKind::Adt { def_id, .. } => {
+                if let Some(enum_info) = self.enum_defs.get(def_id) {
+                    Some(exhaustiveness::EnumVariantInfo {
+                        variant_count: enum_info.variants.len() as u32,
+                        variant_names: enum_info.variants.iter()
+                            .map(|v| v.name.clone())
+                            .collect(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -5401,9 +5627,47 @@ impl<'a> TypeContext<'a> {
                         span,
                     ));
                 }
+            } else if path.segments.len() == 2 {
+                // Two-segment path: Module::StructName or similar
+                let first_name = self.symbol_to_string(path.segments[0].name.node);
+                let second_name = self.symbol_to_string(path.segments[1].name.node);
+
+                // Try to resolve as a type path
+                if let Some(type_def_id) = self.resolver.lookup_type(&first_name) {
+                    // Check if the first segment refers to an enum (for variant construction)
+                    if let Some(enum_info) = self.enum_defs.get(&type_def_id).cloned() {
+                        // This is EnumName::VariantName { fields }
+                        if let Some(variant) = enum_info.variants.iter().find(|v| v.name == second_name) {
+                            // For enum variant with named fields
+                            let struct_info = StructInfo {
+                                name: second_name.clone(),
+                                fields: variant.fields.clone(),
+                                generics: enum_info.generics.clone(),
+                            };
+                            // Store variant_idx for later use
+                            let result_ty = Type::adt(type_def_id, Vec::new());
+                            (variant.def_id, struct_info, result_ty)
+                        } else {
+                            return Err(TypeError::new(
+                                TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
+                                span,
+                            ));
+                        }
+                    } else {
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
+                            span,
+                        ));
+                    }
+                } else {
+                    return Err(TypeError::new(
+                        TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
+                        span,
+                    ));
+                }
             } else {
                 return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature { feature: "qualified struct paths".to_string() },
+                    TypeErrorKind::UnsupportedFeature { feature: "struct paths with more than 2 segments".to_string() },
                     span,
                 ));
             }
