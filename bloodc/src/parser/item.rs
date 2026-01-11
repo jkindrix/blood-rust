@@ -194,7 +194,7 @@ impl<'src> Parser<'src> {
         let mut params = Vec::new();
 
         while !self.check(TokenKind::Gt) && !self.is_at_end() {
-            params.push(self.parse_type_param());
+            params.push(self.parse_generic_param());
 
             if !self.try_consume(TokenKind::Comma) {
                 break;
@@ -209,9 +209,66 @@ impl<'src> Parser<'src> {
         })
     }
 
-    fn parse_type_param(&mut self) -> TypeParam {
+    fn parse_generic_param(&mut self) -> GenericParam {
         let start = self.current.span;
 
+        // Check for lifetime parameter: 'a
+        if self.check(TokenKind::Lifetime) {
+            self.advance();
+            let name = self.spanned_symbol();
+
+            // Parse optional lifetime bounds: 'a: 'b + 'c
+            let bounds = if self.try_consume(TokenKind::Colon) {
+                let mut bounds = Vec::new();
+                if self.check(TokenKind::Lifetime) {
+                    self.advance();
+                    bounds.push(self.spanned_symbol());
+
+                    while self.try_consume(TokenKind::Plus) {
+                        if self.check(TokenKind::Lifetime) {
+                            self.advance();
+                            bounds.push(self.spanned_symbol());
+                        } else {
+                            self.error_expected("lifetime");
+                            break;
+                        }
+                    }
+                }
+                bounds
+            } else {
+                Vec::new()
+            };
+
+            return GenericParam::Lifetime(LifetimeParam {
+                name,
+                bounds,
+                span: start.merge(self.previous.span),
+            });
+        }
+
+        // Check for const parameter: const N: usize
+        if self.check(TokenKind::Const) {
+            self.advance(); // consume 'const'
+
+            let name = if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
+                self.advance();
+                self.spanned_symbol()
+            } else {
+                self.error_expected("const parameter name");
+                Spanned::new(self.intern(""), self.current.span)
+            };
+
+            self.expect(TokenKind::Colon);
+            let ty = self.parse_type();
+
+            return GenericParam::Const(ConstParam {
+                name,
+                ty,
+                span: start.merge(self.previous.span),
+            });
+        }
+
+        // Default: type parameter
         let name = if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
             self.advance();
             self.spanned_symbol()
@@ -226,11 +283,11 @@ impl<'src> Parser<'src> {
             Vec::new()
         };
 
-        TypeParam {
+        GenericParam::Type(TypeParam {
             name,
             bounds,
             span: start.merge(self.previous.span),
-        }
+        })
     }
 
     fn parse_type_bounds(&mut self) -> Vec<Type> {

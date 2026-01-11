@@ -38,6 +38,85 @@ impl TyVarId {
     }
 }
 
+/// The unique identifier for a const parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstParamId(pub u32);
+
+impl ConstParamId {
+    /// Create a new const parameter ID.
+    pub const fn new(id: u32) -> Self {
+        ConstParamId(id)
+    }
+}
+
+/// The unique identifier for a lifetime parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LifetimeId(pub u32);
+
+impl LifetimeId {
+    /// Create a new lifetime ID.
+    pub const fn new(id: u32) -> Self {
+        LifetimeId(id)
+    }
+
+    /// The static lifetime.
+    pub const STATIC: Self = LifetimeId(0);
+}
+
+/// A const value that can appear in type positions (e.g., array sizes).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConstValue {
+    /// A concrete integer value.
+    Int(i128),
+    /// A concrete unsigned integer value.
+    Uint(u128),
+    /// A concrete boolean value.
+    Bool(bool),
+    /// A const parameter (not yet evaluated).
+    Param(ConstParamId),
+    /// An error value (for error recovery).
+    Error,
+}
+
+impl ConstValue {
+    /// Try to get a concrete u64 value (for array sizes).
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            ConstValue::Int(v) if *v >= 0 => Some(*v as u64),
+            ConstValue::Uint(v) if *v <= u64::MAX as u128 => Some(*v as u64),
+            _ => None,
+        }
+    }
+
+    /// Check if this is an unevaluated const parameter.
+    pub fn is_param(&self) -> bool {
+        matches!(self, ConstValue::Param(_))
+    }
+}
+
+impl fmt::Display for ConstValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConstValue::Int(v) => write!(f, "{}", v),
+            ConstValue::Uint(v) => write!(f, "{}", v),
+            ConstValue::Bool(v) => write!(f, "{}", v),
+            ConstValue::Param(id) => write!(f, "const_{}", id.0),
+            ConstValue::Error => write!(f, "{{const error}}"),
+        }
+    }
+}
+
+/// A generic argument that can be a type, const, or lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GenericArg {
+    /// A type argument.
+    Type(Type),
+    /// A const argument.
+    Const(ConstValue),
+    /// A lifetime argument.
+    Lifetime(LifetimeId),
+}
+
 /// A semantic type in Blood.
 ///
 /// Types are interned and compared by identity. The `Arc` wrapper allows

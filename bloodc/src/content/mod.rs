@@ -41,5 +41,5 @@ pub use build_cache::{BuildCache, CacheStats, CacheError, hash_hir_item, extract
 pub use canonical::{CanonicalAST, Canonicalizer, DeBruijnIndex};
 pub use hash::{ContentHash, HashDisplay, FORMAT_VERSION};
 pub use namespace::{Namespace, NameBinding};
-pub use storage::{Codebase, DefinitionRecord, StorageError};
+pub use storage::{Codebase, DefinitionRecord, StorageError, PersistentCodebase};
 pub use vft::{VFT, VFTEntry, CallingConvention};

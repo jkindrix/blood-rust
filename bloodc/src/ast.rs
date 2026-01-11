@@ -457,14 +457,45 @@ pub struct StaticDecl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParams {
-    pub params: Vec<TypeParam>,
+    pub params: Vec<GenericParam>,
     pub span: Span,
+}
+
+/// A generic parameter (type, lifetime, or const).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenericParam {
+    /// A type parameter: `T`, `T: Trait`, `T: Trait + Other`
+    Type(TypeParam),
+    /// A lifetime parameter: `'a`
+    Lifetime(LifetimeParam),
+    /// A const parameter: `const N: usize`
+    Const(ConstParam),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParam {
     pub name: Spanned<Symbol>,
     pub bounds: Vec<Type>,
+    pub span: Span,
+}
+
+/// A lifetime parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifetimeParam {
+    /// The lifetime name (including the leading `'`).
+    pub name: Spanned<Symbol>,
+    /// Lifetime bounds (e.g., `'a: 'b`).
+    pub bounds: Vec<Spanned<Symbol>>,
+    pub span: Span,
+}
+
+/// A const generic parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstParam {
+    /// The parameter name.
+    pub name: Spanned<Symbol>,
+    /// The type of the const (e.g., `usize`).
+    pub ty: Type,
     pub span: Span,
 }
 

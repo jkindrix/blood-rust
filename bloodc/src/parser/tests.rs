@@ -688,6 +688,40 @@ fn fizzbuzz(n: i32) -> String / pure {
 }
 
 // ============================================================
+// Const Generics and Lifetime Parameter Tests
+// ============================================================
+
+#[test]
+fn test_const_generic_array() {
+    let source = "struct Array<T, const N: usize> { data: T }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_const_generic_function() {
+    let source = "fn create_array<T, const N: usize>() -> Array<T, N> { Array { data: default() } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_lifetime_parameter() {
+    let source = "fn longest<'a>(x: &'a str, y: &'a str) -> &'a str { if x.len() > y.len() { x } else { y } }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_lifetime_bounds() {
+    let source = "struct Ref<'a, 'b: 'a, T> { r: &'a &'b T }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_mixed_generic_params() {
+    let source = "fn process<'a, T: Clone, const N: usize>(data: &'a [T; N]) -> T { data[0].clone() }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
 // Error Recovery Tests
 // ============================================================
 

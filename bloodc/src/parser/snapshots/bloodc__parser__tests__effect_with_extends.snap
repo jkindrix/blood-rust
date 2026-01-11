@@ -23,11 +23,20 @@ Program {
                 type_params: Some(
                     TypeParams {
                         params: [
-                            TypeParam {
-                                name: Spanned {
-                                    node: SymbolU32 {
-                                        value: 2,
+                            Type(
+                                TypeParam {
+                                    name: Spanned {
+                                        node: SymbolU32 {
+                                            value: 2,
+                                        },
+                                        span: Span {
+                                            start: 15,
+                                            end: 16,
+                                            start_line: 2,
+                                            start_col: 15,
+                                        },
                                     },
+                                    bounds: [],
                                     span: Span {
                                         start: 15,
                                         end: 16,
@@ -35,14 +44,7 @@ Program {
                                         start_col: 15,
                                     },
                                 },
-                                bounds: [],
-                                span: Span {
-                                    start: 15,
-                                    end: 16,
-                                    start_line: 2,
-                                    start_col: 15,
-                                },
-                            },
+                            ),
                         ],
                         span: Span {
                             start: 14,

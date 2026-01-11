@@ -64,6 +64,9 @@ walkdir = "2.5"
 dirs = "5.0"
 tempfile = "3.15"
 
+# Embedded database for persistent storage
+sled = "0.34"
+
 [profile.release]
 lto = true
 codegen-units = 1

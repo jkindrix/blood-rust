@@ -242,6 +242,16 @@ impl BuildCache {
         Ok(path)
     }
 
+    /// Get the path where an object file would be stored for a hash.
+    /// Returns None if caching is disabled.
+    pub fn get_object_path(&self, hash: &ContentHash) -> Option<PathBuf> {
+        if self.enabled {
+            Some(self.object_path(hash))
+        } else {
+            None
+        }
+    }
+
     /// Record dependencies for a hash.
     pub fn record_dependencies(&mut self, hash: ContentHash, deps: Vec<ContentHash>) {
         if self.enabled {

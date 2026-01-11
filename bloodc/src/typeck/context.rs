@@ -60,6 +60,14 @@ pub struct TypeContext<'a> {
     generic_params: HashMap<String, TyVarId>,
     /// Next type parameter ID for generating unique TyVarIds.
     next_type_param_id: u32,
+    /// Current const generic parameters in scope (name -> ConstParamId).
+    const_params: HashMap<String, hir::ConstParamId>,
+    /// Next const parameter ID for generating unique ConstParamIds.
+    next_const_param_id: u32,
+    /// Current lifetime parameters in scope (name -> LifetimeId).
+    lifetime_params: HashMap<String, hir::LifetimeId>,
+    /// Next lifetime ID for generating unique LifetimeIds.
+    next_lifetime_id: u32,
     /// Builtin function names (DefId -> function name).
     /// Used by codegen to resolve runtime function calls.
     builtin_fns: HashMap<DefId, String>,
@@ -287,6 +295,10 @@ impl<'a> TypeContext<'a> {
             locals: Vec::new(),
             generic_params: HashMap::new(),
             next_type_param_id: 0,
+            const_params: HashMap::new(),
+            next_const_param_id: 0,
+            lifetime_params: HashMap::new(),
+            next_lifetime_id: 1, // 0 is reserved for 'static
             builtin_fns: HashMap::new(),
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
@@ -640,15 +652,33 @@ impl<'a> TypeContext<'a> {
         // Register generic type parameters before processing parameter types
         // This allows type references like `T` to be resolved in the function signature
         let saved_generic_params = std::mem::take(&mut self.generic_params);
+        let saved_const_params = std::mem::take(&mut self.const_params);
+        let saved_lifetime_params = std::mem::take(&mut self.lifetime_params);
         let mut generics_vec = Vec::new();
 
         if let Some(ref type_params) = func.type_params {
-            for type_param in &type_params.params {
-                let param_name = self.symbol_to_string(type_param.name.node);
-                let ty_var_id = TyVarId(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var_id);
-                generics_vec.push(ty_var_id);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var_id = TyVarId(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var_id);
+                        generics_vec.push(ty_var_id);
+                    }
+                    ast::GenericParam::Lifetime(lifetime_param) => {
+                        let param_name = self.symbol_to_string(lifetime_param.name.node);
+                        let lifetime_id = hir::LifetimeId::new(self.next_lifetime_id);
+                        self.next_lifetime_id += 1;
+                        self.lifetime_params.insert(param_name, lifetime_id);
+                    }
+                    ast::GenericParam::Const(const_param) => {
+                        let param_name = self.symbol_to_string(const_param.name.node);
+                        let const_id = hir::ConstParamId::new(self.next_const_param_id);
+                        self.next_const_param_id += 1;
+                        self.const_params.insert(param_name, const_id);
+                    }
+                }
             }
         }
 
@@ -667,6 +697,8 @@ impl<'a> TypeContext<'a> {
 
         // Restore previous generic params scope
         self.generic_params = saved_generic_params;
+        self.const_params = saved_const_params;
+        self.lifetime_params = saved_lifetime_params;
 
         let mut sig = hir::FnSig::new(param_types, return_type);
         sig.generics = generics_vec;
@@ -835,15 +867,33 @@ impl<'a> TypeContext<'a> {
 
         // Register generic type parameters before processing field types
         let saved_generic_params = std::mem::take(&mut self.generic_params);
+        let saved_const_params = std::mem::take(&mut self.const_params);
+        let saved_lifetime_params = std::mem::take(&mut self.lifetime_params);
         let mut generics_vec = Vec::new();
 
         if let Some(ref type_params) = struct_decl.type_params {
-            for type_param in &type_params.params {
-                let param_name = self.symbol_to_string(type_param.name.node);
-                let ty_var_id = TyVarId(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var_id);
-                generics_vec.push(ty_var_id);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var_id = TyVarId(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var_id);
+                        generics_vec.push(ty_var_id);
+                    }
+                    ast::GenericParam::Lifetime(lifetime_param) => {
+                        let param_name = self.symbol_to_string(lifetime_param.name.node);
+                        let lifetime_id = hir::LifetimeId::new(self.next_lifetime_id);
+                        self.next_lifetime_id += 1;
+                        self.lifetime_params.insert(param_name, lifetime_id);
+                    }
+                    ast::GenericParam::Const(const_param) => {
+                        let param_name = self.symbol_to_string(const_param.name.node);
+                        let const_id = hir::ConstParamId::new(self.next_const_param_id);
+                        self.next_const_param_id += 1;
+                        self.const_params.insert(param_name, const_id);
+                    }
+                }
             }
         }
 
@@ -883,6 +933,8 @@ impl<'a> TypeContext<'a> {
 
         // Restore previous generic params scope
         self.generic_params = saved_generic_params;
+        self.const_params = saved_const_params;
+        self.lifetime_params = saved_lifetime_params;
 
         self.struct_defs.insert(def_id, StructInfo {
             name,
@@ -907,15 +959,33 @@ impl<'a> TypeContext<'a> {
 
         // Register generic type parameters before processing the aliased type
         let saved_generic_params = std::mem::take(&mut self.generic_params);
+        let saved_const_params = std::mem::take(&mut self.const_params);
+        let saved_lifetime_params = std::mem::take(&mut self.lifetime_params);
         let mut generics_vec = Vec::new();
 
         if let Some(ref type_params) = type_decl.type_params {
-            for type_param in &type_params.params {
-                let param_name = self.symbol_to_string(type_param.name.node);
-                let ty_var_id = TyVarId(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var_id);
-                generics_vec.push(ty_var_id);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var_id = TyVarId(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var_id);
+                        generics_vec.push(ty_var_id);
+                    }
+                    ast::GenericParam::Lifetime(lifetime_param) => {
+                        let param_name = self.symbol_to_string(lifetime_param.name.node);
+                        let lifetime_id = hir::LifetimeId::new(self.next_lifetime_id);
+                        self.next_lifetime_id += 1;
+                        self.lifetime_params.insert(param_name, lifetime_id);
+                    }
+                    ast::GenericParam::Const(const_param) => {
+                        let param_name = self.symbol_to_string(const_param.name.node);
+                        let const_id = hir::ConstParamId::new(self.next_const_param_id);
+                        self.next_const_param_id += 1;
+                        self.const_params.insert(param_name, const_id);
+                    }
+                }
             }
         }
 
@@ -924,6 +994,8 @@ impl<'a> TypeContext<'a> {
 
         // Restore previous generic params scope
         self.generic_params = saved_generic_params;
+        self.const_params = saved_const_params;
+        self.lifetime_params = saved_lifetime_params;
 
         self.type_aliases.insert(def_id, TypeAliasInfo {
             name,
@@ -948,15 +1020,33 @@ impl<'a> TypeContext<'a> {
 
         // Register generic type parameters before processing variant types
         let saved_generic_params = std::mem::take(&mut self.generic_params);
+        let saved_const_params = std::mem::take(&mut self.const_params);
+        let saved_lifetime_params = std::mem::take(&mut self.lifetime_params);
         let mut generics_vec = Vec::new();
 
         if let Some(ref type_params) = enum_decl.type_params {
-            for type_param in &type_params.params {
-                let param_name = self.symbol_to_string(type_param.name.node);
-                let ty_var_id = TyVarId(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var_id);
-                generics_vec.push(ty_var_id);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var_id = TyVarId(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var_id);
+                        generics_vec.push(ty_var_id);
+                    }
+                    ast::GenericParam::Lifetime(lifetime_param) => {
+                        let param_name = self.symbol_to_string(lifetime_param.name.node);
+                        let lifetime_id = hir::LifetimeId::new(self.next_lifetime_id);
+                        self.next_lifetime_id += 1;
+                        self.lifetime_params.insert(param_name, lifetime_id);
+                    }
+                    ast::GenericParam::Const(const_param) => {
+                        let param_name = self.symbol_to_string(const_param.name.node);
+                        let const_id = hir::ConstParamId::new(self.next_const_param_id);
+                        self.next_const_param_id += 1;
+                        self.const_params.insert(param_name, const_id);
+                    }
+                }
             }
         }
 
@@ -1015,6 +1105,8 @@ impl<'a> TypeContext<'a> {
 
         // Restore previous generic params scope
         self.generic_params = saved_generic_params;
+        self.const_params = saved_const_params;
+        self.lifetime_params = saved_lifetime_params;
 
         self.enum_defs.insert(def_id, EnumInfo {
             name,
@@ -1061,12 +1153,18 @@ impl<'a> TypeContext<'a> {
         let saved_generic_params = std::mem::take(&mut self.generic_params);
         let mut generics_vec = Vec::new();
         if let Some(ref type_params) = effect.type_params {
-            for param in &type_params.params {
-                let param_name = self.symbol_to_string(param.name.node);
-                let ty_var = TyVarId(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var);
-                generics_vec.push(ty_var);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var = TyVarId(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var);
+                        generics_vec.push(ty_var);
+                    }
+                    ast::GenericParam::Lifetime(_) => {}
+                    ast::GenericParam::Const(_) => {}
+                }
             }
         }
 
@@ -1145,12 +1243,18 @@ impl<'a> TypeContext<'a> {
         let saved_generic_params = std::mem::take(&mut self.generic_params);
         let mut generics_vec = Vec::new();
         if let Some(ref type_params) = handler.type_params {
-            for param in &type_params.params {
-                let param_name = self.symbol_to_string(param.name.node);
-                let ty_var = TyVarId(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var);
-                generics_vec.push(ty_var);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var = TyVarId(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var);
+                        generics_vec.push(ty_var);
+                    }
+                    ast::GenericParam::Lifetime(_) => {}
+                    ast::GenericParam::Const(_) => {}
+                }
             }
         }
 
@@ -1245,12 +1349,18 @@ impl<'a> TypeContext<'a> {
 
         // Register type parameters from the impl block
         if let Some(ref type_params) = impl_block.type_params {
-            for param in &type_params.params {
-                let param_name = self.symbol_to_string(param.name.node);
-                let ty_var_id = TyVarId::new(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var_id);
-                generics_vec.push(ty_var_id);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var_id = TyVarId::new(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var_id);
+                        generics_vec.push(ty_var_id);
+                    }
+                    ast::GenericParam::Lifetime(_) => {}
+                    ast::GenericParam::Const(_) => {}
+                }
             }
         }
 
@@ -1349,12 +1459,18 @@ impl<'a> TypeContext<'a> {
                     // Note: impl-level params are already in scope from earlier
                     let mut method_generics = Vec::new();
                     if let Some(ref type_params) = func.type_params {
-                        for type_param in &type_params.params {
-                            let param_name = self.symbol_to_string(type_param.name.node);
-                            let ty_var_id = TyVarId(self.next_type_param_id);
-                            self.next_type_param_id += 1;
-                            self.generic_params.insert(param_name, ty_var_id);
-                            method_generics.push(ty_var_id);
+                        for generic_param in &type_params.params {
+                            match generic_param {
+                                ast::GenericParam::Type(type_param) => {
+                                    let param_name = self.symbol_to_string(type_param.name.node);
+                                    let ty_var_id = TyVarId(self.next_type_param_id);
+                                    self.next_type_param_id += 1;
+                                    self.generic_params.insert(param_name, ty_var_id);
+                                    method_generics.push(ty_var_id);
+                                }
+                                ast::GenericParam::Lifetime(_) => {}
+                                ast::GenericParam::Const(_) => {}
+                            }
                         }
                     }
 
@@ -1529,12 +1645,18 @@ impl<'a> TypeContext<'a> {
 
         // Register type parameters
         if let Some(ref type_params) = trait_decl.type_params {
-            for param in &type_params.params {
-                let param_name = self.symbol_to_string(param.name.node);
-                let ty_var_id = TyVarId::new(self.next_type_param_id);
-                self.next_type_param_id += 1;
-                self.generic_params.insert(param_name, ty_var_id);
-                generics_vec.push(ty_var_id);
+            for generic_param in &type_params.params {
+                match generic_param {
+                    ast::GenericParam::Type(type_param) => {
+                        let param_name = self.symbol_to_string(type_param.name.node);
+                        let ty_var_id = TyVarId::new(self.next_type_param_id);
+                        self.next_type_param_id += 1;
+                        self.generic_params.insert(param_name, ty_var_id);
+                        generics_vec.push(ty_var_id);
+                    }
+                    ast::GenericParam::Lifetime(_) => {}
+                    ast::GenericParam::Const(_) => {}
+                }
             }
         }
 
@@ -1598,12 +1720,18 @@ impl<'a> TypeContext<'a> {
                     // Handle method-level type parameters
                     let mut method_generics = Vec::new();
                     if let Some(ref type_params) = func.type_params {
-                        for type_param in &type_params.params {
-                            let param_name = self.symbol_to_string(type_param.name.node);
-                            let ty_var_id = TyVarId(self.next_type_param_id);
-                            self.next_type_param_id += 1;
-                            self.generic_params.insert(param_name, ty_var_id);
-                            method_generics.push(ty_var_id);
+                        for generic_param in &type_params.params {
+                            match generic_param {
+                                ast::GenericParam::Type(type_param) => {
+                                    let param_name = self.symbol_to_string(type_param.name.node);
+                                    let ty_var_id = TyVarId(self.next_type_param_id);
+                                    self.next_type_param_id += 1;
+                                    self.generic_params.insert(param_name, ty_var_id);
+                                    method_generics.push(ty_var_id);
+                                }
+                                ast::GenericParam::Lifetime(_) => {}
+                                ast::GenericParam::Const(_) => {}
+                            }
                         }
                     }
 

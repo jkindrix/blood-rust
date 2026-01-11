@@ -27,6 +27,7 @@ bloodc/fuzz/artifacts/
 # Compiled examples
 examples/*.o
 examples/*.exe
+examples/*_objs/
 # Executables without extension (Linux)
 examples/minimal
 examples/fizzbuzz
@@ -40,3 +41,7 @@ examples/test*
 
 # Runtime build artifacts
 runtime/*.o
+
+# Incremental compilation cache
+*.blood_cache/
+*.blood_objs/

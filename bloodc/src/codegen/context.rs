@@ -434,6 +434,33 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(())
     }
 
+    /// Compile a single handler item (for per-definition compilation).
+    pub fn compile_handler_item(
+        &mut self,
+        def_id: DefId,
+        item: &hir::Item,
+        hir_crate: &hir::Crate,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if let hir::ItemKind::Handler { operations, return_clause, state, .. } = &item.kind {
+            // Compile each operation
+            for (op_idx, handler_op) in operations.iter().enumerate() {
+                if let Some(&fn_value) = self.handler_ops.get(&(def_id, op_idx)) {
+                    if let Some(body) = hir_crate.bodies.get(&handler_op.body_id) {
+                        self.compile_handler_op_body(fn_value, body, handler_op, state)?;
+                    }
+                }
+            }
+
+            // Compile return clause if present
+            if let Some(ret_clause) = return_clause {
+                if let Some(body) = hir_crate.bodies.get(&ret_clause.body_id) {
+                    self.compile_return_clause(def_id, &item.name, body, ret_clause)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Compile handler operation bodies (Phase 2: Effect Handlers).
     pub fn compile_handler_operations(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
         for (def_id, item) in &hir_crate.items {

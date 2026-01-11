@@ -399,6 +399,398 @@ impl Codebase {
 }
 
 // ============================================================================
+// Persistent Storage with Sled
+// ============================================================================
+
+/// Persistent codebase storage backed by sled embedded database.
+///
+/// This provides durable, crash-safe storage for the content-addressed codebase.
+/// Data is stored on disk and persists across compiler invocations.
+pub struct PersistentCodebase {
+    /// The sled database.
+    db: sled::Db,
+    /// Tree for definitions: hash bytes → serialized DefinitionRecord.
+    definitions: sled::Tree,
+    /// Tree for types.
+    types: sled::Tree,
+    /// Tree for effects.
+    effects: sled::Tree,
+    /// Tree for compiled artifacts: hash bytes → compiled code.
+    compiled: sled::Tree,
+    /// Tree for dependency graph: hash bytes → serialized Vec<ContentHash>.
+    dependents: sled::Tree,
+    /// Tree for name mappings: name string → hash bytes.
+    names: sled::Tree,
+}
+
+impl PersistentCodebase {
+    /// Open or create a persistent codebase at the given path.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StorageError> {
+        let db = sled::open(path.as_ref())
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+
+        let definitions = db.open_tree("definitions")
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let types = db.open_tree("types")
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let effects = db.open_tree("effects")
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let compiled = db.open_tree("compiled")
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let dependents = db.open_tree("dependents")
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        let names = db.open_tree("names")
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+
+        Ok(Self {
+            db,
+            definitions,
+            types,
+            effects,
+            compiled,
+            dependents,
+            names,
+        })
+    }
+
+    /// Open or create the default codebase in ~/.blood/codebase.
+    pub fn open_default() -> Result<Self, StorageError> {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("blood")
+            .join("codebase");
+
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+
+        Self::open(cache_dir)
+    }
+
+    /// Add a definition to persistent storage.
+    pub fn add(&self, record: &DefinitionRecord) -> Result<ContentHash, StorageError> {
+        let hash = record.hash;
+        let key = hash.as_bytes();
+
+        // Check for collision
+        if let Some(existing_data) = self.definitions.get(key)
+            .map_err(|e| StorageError::IoError(e.to_string()))?
+        {
+            if let Ok(existing) = Self::deserialize_record(&existing_data) {
+                if existing.ast != record.ast {
+                    return Err(StorageError::Collision {
+                        hash,
+                        existing: Box::new(existing),
+                        new: Box::new(record.clone()),
+                    });
+                }
+                // Same AST, return existing hash
+                return Ok(hash);
+            }
+        }
+
+        // Serialize and store
+        let data = Self::serialize_record(record);
+        self.definitions.insert(key, data)
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+
+        // Update dependency graph
+        for dep_hash in &record.references {
+            self.add_dependent(*dep_hash, hash)?;
+        }
+
+        Ok(hash)
+    }
+
+    /// Get a definition by hash.
+    pub fn get(&self, hash: ContentHash) -> Option<DefinitionRecord> {
+        self.definitions.get(hash.as_bytes())
+            .ok()?
+            .and_then(|data| Self::deserialize_record(&data).ok())
+    }
+
+    /// Check if a definition exists.
+    pub fn contains(&self, hash: ContentHash) -> bool {
+        self.definitions.contains_key(hash.as_bytes()).unwrap_or(false)
+    }
+
+    /// Store compiled code for a definition.
+    pub fn store_compiled(&self, hash: ContentHash, code: &[u8]) -> Result<(), StorageError> {
+        self.compiled.insert(hash.as_bytes(), code)
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Get compiled code for a definition.
+    pub fn get_compiled(&self, hash: ContentHash) -> Option<Vec<u8>> {
+        self.compiled.get(hash.as_bytes())
+            .ok()?
+            .map(|data| data.to_vec())
+    }
+
+    /// Check if compiled code exists.
+    pub fn has_compiled(&self, hash: ContentHash) -> bool {
+        self.compiled.contains_key(hash.as_bytes()).unwrap_or(false)
+    }
+
+    /// Map a name to a hash.
+    pub fn set_name(&self, name: &str, hash: ContentHash) -> Result<(), StorageError> {
+        self.names.insert(name.as_bytes(), hash.as_bytes())
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Get the hash for a name.
+    pub fn get_name(&self, name: &str) -> Option<ContentHash> {
+        self.names.get(name.as_bytes())
+            .ok()?
+            .and_then(|data| {
+                let bytes: [u8; 32] = data.as_ref().try_into().ok()?;
+                Some(ContentHash::from_bytes(bytes))
+            })
+    }
+
+    /// Add a dependent relationship.
+    fn add_dependent(&self, dependency: ContentHash, dependent: ContentHash) -> Result<(), StorageError> {
+        let key = dependency.as_bytes();
+
+        // Load existing dependents
+        let mut deps: Vec<ContentHash> = self.dependents.get(key)
+            .map_err(|e| StorageError::IoError(e.to_string()))?
+            .map(|data| Self::deserialize_hashes(&data))
+            .unwrap_or_default();
+
+        // Add new dependent if not already present
+        if !deps.contains(&dependent) {
+            deps.push(dependent);
+            let data = Self::serialize_hashes(&deps);
+            self.dependents.insert(key, data)
+                .map_err(|e| StorageError::IoError(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Get all definitions that depend on a given hash.
+    pub fn get_dependents(&self, hash: ContentHash) -> Vec<ContentHash> {
+        self.dependents.get(hash.as_bytes())
+            .ok()
+            .flatten()
+            .map(|data| Self::deserialize_hashes(&data))
+            .unwrap_or_default()
+    }
+
+    /// Get count of definitions.
+    pub fn len(&self) -> usize {
+        self.definitions.len()
+    }
+
+    /// Check if empty.
+    pub fn is_empty(&self) -> bool {
+        self.definitions.is_empty()
+    }
+
+    /// Flush all pending writes to disk.
+    pub fn flush(&self) -> Result<(), StorageError> {
+        self.db.flush()
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Get statistics about this codebase.
+    pub fn stats(&self) -> CodebaseStats {
+        CodebaseStats {
+            definition_count: self.definitions.len(),
+            type_count: self.types.len(),
+            effect_count: self.effects.len(),
+            compiled_count: self.compiled.len(),
+            total_ast_size: 0,
+            total_compiled_size: self.compiled.iter()
+                .filter_map(|r| r.ok())
+                .map(|(_, v)| v.len())
+                .sum(),
+        }
+    }
+
+    // Serialization helpers
+
+    fn serialize_record(record: &DefinitionRecord) -> Vec<u8> {
+        // Simple binary format:
+        // - 32 bytes: hash
+        // - 4 bytes: AST length
+        // - N bytes: AST (as debug string, simplified)
+        // - 4 bytes: reference count
+        // - 32*N bytes: references
+        // - 4 bytes: name count
+        // - names (length-prefixed strings)
+
+        let mut data = Vec::new();
+
+        // Hash
+        data.extend_from_slice(record.hash.as_bytes());
+
+        // AST (simplified - store as debug format)
+        let ast_str = format!("{:?}", record.ast);
+        let ast_bytes = ast_str.as_bytes();
+        data.extend_from_slice(&(ast_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(ast_bytes);
+
+        // Type hash (optional)
+        if let Some(th) = &record.type_hash {
+            data.push(1);
+            data.extend_from_slice(th.as_bytes());
+        } else {
+            data.push(0);
+        }
+
+        // Effect hash (optional)
+        if let Some(eh) = &record.effect_hash {
+            data.push(1);
+            data.extend_from_slice(eh.as_bytes());
+        } else {
+            data.push(0);
+        }
+
+        // References
+        data.extend_from_slice(&(record.references.len() as u32).to_le_bytes());
+        for r in &record.references {
+            data.extend_from_slice(r.as_bytes());
+        }
+
+        // Names (simplified metadata)
+        data.extend_from_slice(&(record.metadata.names.len() as u32).to_le_bytes());
+        for name in &record.metadata.names {
+            let name_bytes = name.as_bytes();
+            data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(name_bytes);
+        }
+
+        data
+    }
+
+    fn deserialize_record(data: &[u8]) -> Result<DefinitionRecord, StorageError> {
+        if data.len() < 36 {
+            return Err(StorageError::InvalidFormat("Data too short".to_string()));
+        }
+
+        let mut pos = 0;
+
+        // Hash
+        let hash_bytes: [u8; 32] = data[pos..pos + 32].try_into()
+            .map_err(|_| StorageError::InvalidFormat("Invalid hash bytes".to_string()))?;
+        let hash = ContentHash::from_bytes(hash_bytes);
+        pos += 32;
+
+        // AST
+        let ast_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let _ast_str = String::from_utf8_lossy(&data[pos..pos + ast_len]);
+        pos += ast_len;
+
+        // For now, we can't reconstruct the AST from debug format
+        // Use a placeholder - in a real implementation, we'd use proper serialization
+        let ast = CanonicalAST::IntLit(0);
+
+        // Type hash
+        let has_type = data.get(pos).copied().unwrap_or(0) == 1;
+        pos += 1;
+        let type_hash = if has_type && data.len() >= pos + 32 {
+            let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+            pos += 32;
+            Some(ContentHash::from_bytes(bytes))
+        } else {
+            None
+        };
+
+        // Effect hash
+        let has_effect = data.get(pos).copied().unwrap_or(0) == 1;
+        pos += 1;
+        let effect_hash = if has_effect && data.len() >= pos + 32 {
+            let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+            pos += 32;
+            Some(ContentHash::from_bytes(bytes))
+        } else {
+            None
+        };
+
+        // References
+        let ref_count = if data.len() >= pos + 4 {
+            u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize
+        } else {
+            0
+        };
+        pos += 4;
+
+        let mut references = Vec::with_capacity(ref_count);
+        for _ in 0..ref_count {
+            if data.len() >= pos + 32 {
+                let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+                references.push(ContentHash::from_bytes(bytes));
+                pos += 32;
+            }
+        }
+
+        // Names
+        let mut names = Vec::new();
+        if data.len() >= pos + 4 {
+            let name_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+
+            for _ in 0..name_count {
+                if data.len() >= pos + 4 {
+                    let name_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                    pos += 4;
+                    if data.len() >= pos + name_len {
+                        names.push(String::from_utf8_lossy(&data[pos..pos + name_len]).to_string());
+                        pos += name_len;
+                    }
+                }
+            }
+        }
+
+        Ok(DefinitionRecord {
+            hash,
+            ast,
+            type_hash,
+            effect_hash,
+            references,
+            metadata: DefinitionMetadata {
+                names,
+                ..Default::default()
+            },
+        })
+    }
+
+    fn serialize_hashes(hashes: &[ContentHash]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(4 + hashes.len() * 32);
+        data.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
+        for h in hashes {
+            data.extend_from_slice(h.as_bytes());
+        }
+        data
+    }
+
+    fn deserialize_hashes(data: &[u8]) -> Vec<ContentHash> {
+        if data.len() < 4 {
+            return Vec::new();
+        }
+
+        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let mut hashes = Vec::with_capacity(count);
+        let mut pos = 4;
+
+        for _ in 0..count {
+            if data.len() >= pos + 32 {
+                let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+                hashes.push(ContentHash::from_bytes(bytes));
+                pos += 32;
+            }
+        }
+
+        hashes
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -533,5 +925,85 @@ mod tests {
         let err = StorageError::NotFound(hash);
         let display = format!("{}", err);
         assert!(display.contains("not found"));
+    }
+
+    #[test]
+    fn test_persistent_codebase_basic() {
+        // Create a temp directory for the test database
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_codebase");
+
+        // Open persistent codebase
+        let codebase = PersistentCodebase::open(&db_path).unwrap();
+
+        // Add a definition
+        let ast = make_test_ast(42);
+        let record = DefinitionRecord::new(ast.clone()).with_name("answer");
+        let hash = record.hash;
+
+        let result = codebase.add(&record);
+        assert!(result.is_ok());
+
+        // Check it exists
+        assert!(codebase.contains(hash));
+
+        // Get it back
+        let retrieved = codebase.get(hash);
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.hash, hash);
+        assert!(retrieved.metadata.names.contains(&"answer".to_string()));
+
+        // Store and retrieve compiled code
+        let code = vec![0x90, 0xC3];
+        codebase.store_compiled(hash, &code).unwrap();
+        assert!(codebase.has_compiled(hash));
+        assert_eq!(codebase.get_compiled(hash), Some(code));
+
+        // Flush to disk
+        codebase.flush().unwrap();
+
+        // Stats
+        let stats = codebase.stats();
+        assert_eq!(stats.definition_count, 1);
+    }
+
+    #[test]
+    fn test_persistent_codebase_name_mapping() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_codebase_names");
+
+        let codebase = PersistentCodebase::open(&db_path).unwrap();
+
+        let hash = ContentHash::compute(b"test_value");
+        codebase.set_name("my_function", hash).unwrap();
+
+        let retrieved = codebase.get_name("my_function");
+        assert_eq!(retrieved, Some(hash));
+    }
+
+    #[test]
+    fn test_persistent_codebase_persistence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_codebase_persist");
+
+        let hash;
+        {
+            // First session: add data
+            let codebase = PersistentCodebase::open(&db_path).unwrap();
+            let ast = make_test_ast(123);
+            let record = DefinitionRecord::new(ast);
+            hash = record.hash;
+            codebase.add(&record).unwrap();
+            codebase.set_name("persistent_test", hash).unwrap();
+            codebase.flush().unwrap();
+        }
+
+        {
+            // Second session: verify data persisted
+            let codebase = PersistentCodebase::open(&db_path).unwrap();
+            assert!(codebase.contains(hash));
+            assert_eq!(codebase.get_name("persistent_test"), Some(hash));
+        }
     }
 }

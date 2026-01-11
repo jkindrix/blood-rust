@@ -256,6 +256,162 @@ pub fn compile_mir_to_object(
     Ok(())
 }
 
+/// Compile a single definition to an object file.
+///
+/// This enables per-definition incremental compilation:
+/// 1. Each definition gets its own LLVM module
+/// 2. Dependencies are declared as external symbols
+/// 3. The linker resolves symbols when combining object files
+///
+/// # Arguments
+/// * `def_id` - The definition to compile
+/// * `hir_crate` - The full crate (for type declarations)
+/// * `mir_body` - The MIR body for this definition (if it's a function)
+/// * `escape_results` - Escape analysis results for this function
+/// * `output_path` - Path to write the object file
+pub fn compile_definition_to_object(
+    def_id: DefId,
+    hir_crate: &hir::Crate,
+    mir_body: Option<&MirBody>,
+    escape_results: Option<&crate::mir::EscapeResults>,
+    output_path: &Path,
+) -> Result<(), Vec<Diagnostic>> {
+    let context = Context::create();
+    let module_name = format!("blood_def_{}", def_id.index());
+    let module = context.create_module(&module_name);
+    let builder = context.create_builder();
+
+    let mut codegen = CodegenContext::new(&context, &module, &builder);
+
+    // Set up escape analysis if provided
+    if let Some(results) = escape_results {
+        let mut escape_map = HashMap::new();
+        escape_map.insert(def_id, results.clone());
+        codegen.set_escape_analysis(escape_map);
+    }
+
+    // Declare all types and external functions from the crate
+    codegen.compile_crate_declarations(hir_crate)?;
+
+    // Compile the specific definition
+    if let Some(mir) = mir_body {
+        codegen.compile_mir_body(def_id, mir, escape_results)?;
+    } else if let Some(item) = hir_crate.items.get(&def_id) {
+        // Non-function items (structs, enums) - just declarations, no body to compile
+        match &item.kind {
+            hir::ItemKind::Handler { .. } => {
+                // Compile handler operations
+                codegen.compile_handler_item(def_id, item, hir_crate)?;
+            }
+            _ => {
+                // Type declarations are already handled in compile_crate_declarations
+            }
+        }
+    }
+
+    // Verify the module
+    if let Err(err) = module.verify() {
+        return Err(vec![Diagnostic::error(
+            format!("LLVM verification failed for def {:?}: {}", def_id, err.to_string()),
+            crate::span::Span::dummy(),
+        )]);
+    }
+
+    // Get target machine
+    let target_machine = get_native_target_machine()
+        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
+
+    // Write object file
+    target_machine
+        .write_to_file(&module, FileType::Object, output_path)
+        .map_err(|e| vec![Diagnostic::error(
+            format!("Failed to write object file: {}", e.to_string()),
+            crate::span::Span::dummy(),
+        )])?;
+
+    Ok(())
+}
+
+/// Compile multiple definitions to separate object files.
+///
+/// Returns a list of (DefId, object_path) pairs for successfully compiled definitions.
+pub fn compile_definitions_to_objects(
+    def_ids: &[DefId],
+    hir_crate: &hir::Crate,
+    mir_bodies: &MirBodiesMap,
+    escape_analysis: &EscapeAnalysisMap,
+    output_dir: &Path,
+) -> Result<Vec<(DefId, std::path::PathBuf)>, Vec<Diagnostic>> {
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+
+    for &def_id in def_ids {
+        let mir_body = mir_bodies.get(&def_id);
+        let escape_results = escape_analysis.get(&def_id);
+        let output_path = output_dir.join(format!("def_{}.o", def_id.index()));
+
+        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, &output_path) {
+            Ok(()) => {
+                results.push((def_id, output_path));
+            }
+            Err(errs) => {
+                errors.extend(errs);
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(results)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Link multiple object files into a single executable.
+///
+/// Uses the system linker (cc) to combine object files with the Blood runtime.
+pub fn link_objects(
+    object_files: &[std::path::PathBuf],
+    runtime_lib: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    use std::process::Command;
+
+    let mut cmd = Command::new("cc");
+
+    // Add all object files
+    for obj in object_files {
+        cmd.arg(obj);
+    }
+
+    // Link with runtime
+    cmd.arg(runtime_lib);
+
+    // Link with system libraries
+    cmd.arg("-lpthread");
+    cmd.arg("-ldl");
+    cmd.arg("-lm");
+
+    // Output path
+    cmd.arg("-o");
+    cmd.arg(output_path);
+
+    // PIE for ASLR
+    cmd.arg("-pie");
+
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to run linker: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Linking failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
 /// Compile MIR bodies to LLVM IR text.
 pub fn compile_mir_to_ir(
     hir_crate: &hir::Crate,
