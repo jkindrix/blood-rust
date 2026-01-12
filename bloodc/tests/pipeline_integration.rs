@@ -920,7 +920,7 @@ fn test_mir_basic_block_structure() {
     assert!(!mir_bodies.is_empty(), "Expected MIR bodies");
 
     // Each body should have basic blocks
-    for (_def_id, body) in &mir_bodies {
+    for body in mir_bodies.values() {
         assert!(!body.basic_blocks.is_empty(), "Function should have basic blocks");
     }
 }
@@ -939,7 +939,7 @@ fn test_mir_locals_and_temporaries() {
     assert!(result.is_ok(), "MIR lowering failed: {:?}", result.err());
 
     let mir_bodies = result.unwrap();
-    for (_def_id, body) in &mir_bodies {
+    for body in mir_bodies.values() {
         // Should have locals for parameters, let bindings, and temporaries
         assert!(body.locals.len() >= 3, "Expected at least 3 locals (return + 2 params)");
     }
@@ -1177,10 +1177,9 @@ fn test_e2e_closure_to_mir() {
 
     let result = compile_to_mir(source);
     // Closures may not be fully implemented yet - track status
-    if result.is_err() {
-        eprintln!("Closure MIR lowering not fully implemented: {:?}", result.err());
-    } else {
-        assert!(!result.unwrap().is_empty(), "Expected MIR bodies for closure code");
+    match result {
+        Err(e) => eprintln!("Closure MIR lowering not fully implemented: {:?}", e),
+        Ok(bodies) => assert!(!bodies.is_empty(), "Expected MIR bodies for closure code"),
     }
 }
 

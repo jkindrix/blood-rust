@@ -595,6 +595,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                     }
                     bloodc::hir::ItemKind::Const { .. } => NameBinding::value(hash),
                     bloodc::hir::ItemKind::Static { .. } => NameBinding::value(hash),
+                    bloodc::hir::ItemKind::ExternFn(_) => NameBinding::value(hash),
+                    bloodc::hir::ItemKind::Bridge(_) => continue, // Bridges are namespaces, not standalone bindings
                 };
                 main_ns.bind(&item.name, binding);
             }
