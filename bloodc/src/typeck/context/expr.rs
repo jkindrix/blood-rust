@@ -43,6 +43,9 @@ impl<'a> TypeContext<'a> {
             ast::ExprKind::If { condition, then_branch, else_branch } => {
                 self.infer_if(condition, then_branch, else_branch.as_ref(), expr.span)
             }
+            ast::ExprKind::IfLet { pattern, scrutinee, then_branch, else_branch } => {
+                self.infer_if_let(pattern, scrutinee, then_branch, else_branch.as_ref(), expr.span)
+            }
             ast::ExprKind::Block(block) => {
                 let expected = self.unifier.fresh_var();
                 self.check_block(block, &expected)
@@ -64,6 +67,9 @@ impl<'a> TypeContext<'a> {
             }
             ast::ExprKind::While { condition, body, .. } => {
                 self.infer_while(condition, body, expr.span)
+            }
+            ast::ExprKind::WhileLet { pattern, scrutinee, body, .. } => {
+                self.infer_while_let(pattern, scrutinee, body, expr.span)
             }
             ast::ExprKind::For { pattern, iter, body, .. } => {
                 self.infer_for(pattern, iter, body, expr.span)
@@ -231,13 +237,15 @@ impl<'a> TypeContext<'a> {
 
         // Wrap the body in a Handle expression
         let body_expr = result?;
+        // Resolve the expected type to get the concrete type (not an inference variable)
+        let resolved_ty = self.unifier.resolve(&expected);
         Ok(hir::Expr {
             kind: hir::ExprKind::Handle {
                 body: Box::new(body_expr),
                 handler_id,
                 handler_instance: Box::new(handler_expr),
             },
-            ty: expected.clone(),
+            ty: resolved_ty,
             span,
         })
     }
@@ -799,11 +807,15 @@ impl<'a> TypeContext<'a> {
                         "String" => return Ok(Type::string()),
                         "()" => return Ok(Type::unit()),
                         "Self" => {
-                            // Look up self type in method context
+                            // Look up self type in method context (type checking phase)
                             if let Some(fn_id) = self.current_fn {
                                 if let Some(self_ty) = self.method_self_types.get(&fn_id) {
                                     return Ok(self_ty.clone());
                                 }
+                            }
+                            // During collection phase, use current_impl_self_ty
+                            if let Some(ref self_ty) = self.current_impl_self_ty {
+                                return Ok(self_ty.clone());
                             }
                             return Err(TypeError::new(
                                 TypeErrorKind::TypeNotFound { name: "Self".to_string() },
@@ -1414,6 +1426,91 @@ impl<'a> TypeContext<'a> {
         ))
     }
 
+    /// Infer type of an if-let expression.
+    ///
+    /// Desugars `if let PATTERN = SCRUTINEE { THEN } else { ELSE }` into:
+    /// ```text
+    /// match SCRUTINEE {
+    ///     PATTERN => THEN,
+    ///     _ => ELSE,  // or unit if no else
+    /// }
+    /// ```
+    pub(crate) fn infer_if_let(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: &ast::Expr,
+        then_branch: &ast::Block,
+        else_branch: Option<&ast::ElseBranch>,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Infer the scrutinee type
+        let scrutinee_expr = self.infer_expr(scrutinee)?;
+        let scrutinee_ty = scrutinee_expr.ty.clone();
+
+        // Expected result type for both branches
+        let expected = self.unifier.fresh_var();
+
+        // Enter a scope for the pattern bindings in the then branch
+        self.resolver.push_scope(ScopeKind::Block, span);
+
+        // Lower the pattern with the scrutinee type
+        let hir_pattern = self.lower_pattern(pattern, &scrutinee_ty)?;
+
+        // Type check the then branch
+        let then_expr = self.check_block(then_branch, &expected)?;
+
+        self.resolver.pop_scope(); // pattern scope
+
+        // Create the matching arm
+        let match_arm = hir::MatchArm {
+            pattern: hir_pattern,
+            guard: None,
+            body: then_expr,
+        };
+
+        // Create the wildcard (else) arm
+        let else_body = if let Some(else_branch) = else_branch {
+            match else_branch {
+                ast::ElseBranch::Block(block) => {
+                    self.check_block(block, &expected)?
+                }
+                ast::ElseBranch::If(if_expr) => {
+                    self.check_expr(if_expr, &expected)?
+                }
+            }
+        } else {
+            // No else branch - result must be unit
+            self.unifier.unify(&expected, &Type::unit(), span)?;
+            hir::Expr::new(
+                hir::ExprKind::Tuple(vec![]),
+                Type::unit(),
+                span,
+            )
+        };
+
+        let wildcard_arm = hir::MatchArm {
+            pattern: hir::Pattern {
+                kind: hir::PatternKind::Wildcard,
+                ty: scrutinee_ty.clone(),
+                span,
+            },
+            guard: None,
+            body: else_body,
+        };
+
+        let result_ty = self.unifier.resolve(&expected);
+
+        // Build the match expression
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(scrutinee_expr),
+                arms: vec![match_arm, wildcard_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
     /// Infer type of a return expression.
     pub(crate) fn infer_return(&mut self, value: Option<&ast::Expr>, span: Span) -> Result<hir::Expr, TypeError> {
         let return_type = self.return_type.clone().ok_or_else(|| {
@@ -1496,6 +1593,89 @@ impl<'a> TypeContext<'a> {
             hir::ExprKind::While {
                 condition: Box::new(cond_expr),
                 body: Box::new(body_expr),
+                label: None,
+            },
+            Type::unit(),
+            span,
+        ))
+    }
+
+    /// Infer type of a while-let loop.
+    ///
+    /// Desugars `while let PATTERN = SCRUTINEE { BODY }` into:
+    /// ```text
+    /// loop {
+    ///     match SCRUTINEE {
+    ///         PATTERN => BODY,
+    ///         _ => break,
+    ///     }
+    /// }
+    /// ```
+    pub(crate) fn infer_while_let(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: &ast::Expr,
+        body: &ast::Block,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        self.resolver.push_scope(ScopeKind::Loop, span);
+
+        // Infer the scrutinee type
+        let scrutinee_expr = self.infer_expr(scrutinee)?;
+        let scrutinee_ty = scrutinee_expr.ty.clone();
+
+        // Enter a scope for the pattern bindings
+        self.resolver.push_scope(ScopeKind::Block, span);
+
+        // Lower the pattern with the scrutinee type
+        let hir_pattern = self.lower_pattern(pattern, &scrutinee_ty)?;
+
+        // Type check the body (unit type, side effects only)
+        let body_expr = self.check_block(body, &Type::unit())?;
+
+        self.resolver.pop_scope(); // pattern scope
+        self.resolver.pop_scope(); // loop scope
+
+        // Build the match arms:
+        // 1. PATTERN => BODY
+        // 2. _ => break
+        let match_arm = hir::MatchArm {
+            pattern: hir_pattern,
+            guard: None,
+            body: body_expr,
+        };
+
+        let wildcard_arm = hir::MatchArm {
+            pattern: hir::Pattern {
+                kind: hir::PatternKind::Wildcard,
+                ty: scrutinee_ty.clone(),
+                span,
+            },
+            guard: None,
+            body: hir::Expr::new(
+                hir::ExprKind::Break {
+                    label: None,
+                    value: None,
+                },
+                Type::never(),
+                span,
+            ),
+        };
+
+        // Build the match expression
+        let match_expr = hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(scrutinee_expr),
+                arms: vec![match_arm, wildcard_arm],
+            },
+            Type::unit(),
+            span,
+        );
+
+        // Wrap in a loop
+        Ok(hir::Expr::new(
+            hir::ExprKind::Loop {
+                body: Box::new(match_expr),
                 label: None,
             },
             Type::unit(),
