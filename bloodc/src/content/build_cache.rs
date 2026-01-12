@@ -545,6 +545,38 @@ fn hash_item_kind(kind: &hir::ItemKind, bodies: &HashMap<hir::BodyId, hir::Body>
             hasher.update_u32(operations.len() as u32);
             hasher.update_u8(if return_clause.is_some() { 1 } else { 0 });
         }
+        hir::ItemKind::ExternFn(extern_fn) => {
+            hasher.update_u8(0x0B);
+            hash_fn_sig(&extern_fn.sig, hasher);
+            hasher.update_str(&extern_fn.abi);
+            if let Some(ref link_name) = extern_fn.link_name {
+                hasher.update_u8(1);
+                hasher.update_str(link_name);
+            } else {
+                hasher.update_u8(0);
+            }
+            hasher.update_u8(if extern_fn.is_variadic { 1 } else { 0 });
+        }
+        hir::ItemKind::Bridge(bridge) => {
+            hasher.update_u8(0x0C);
+            hasher.update_str(&bridge.abi);
+            hasher.update_u32(bridge.link_specs.len() as u32);
+            for link_spec in &bridge.link_specs {
+                hasher.update_str(&link_spec.name);
+            }
+            hasher.update_u32(bridge.extern_fns.len() as u32);
+            for func in &bridge.extern_fns {
+                hasher.update_str(&func.name);
+                hash_fn_sig(&func.sig, hasher);
+            }
+            hasher.update_u32(bridge.opaque_types.len() as u32);
+            hasher.update_u32(bridge.type_aliases.len() as u32);
+            hasher.update_u32(bridge.structs.len() as u32);
+            hasher.update_u32(bridge.enums.len() as u32);
+            hasher.update_u32(bridge.unions.len() as u32);
+            hasher.update_u32(bridge.consts.len() as u32);
+            hasher.update_u32(bridge.callbacks.len() as u32);
+        }
     }
 }
 
@@ -1238,6 +1270,47 @@ fn extract_item_deps(
                 // body_id is BodyId, not Option<BodyId>
                 if let Some(body) = bodies.get(&op.body_id) {
                     extract_body_deps(body, deps);
+                }
+            }
+        }
+        hir::ItemKind::ExternFn(extern_fn) => {
+            // External functions only depend on their signature types
+            extract_type_deps(&extern_fn.sig.output, deps);
+            for input in &extern_fn.sig.inputs {
+                extract_type_deps(input, deps);
+            }
+        }
+        hir::ItemKind::Bridge(bridge) => {
+            // Bridge depends on all types used in its declarations
+            for func in &bridge.extern_fns {
+                extract_type_deps(&func.sig.output, deps);
+                for input in &func.sig.inputs {
+                    extract_type_deps(input, deps);
+                }
+            }
+            for ta in &bridge.type_aliases {
+                extract_type_deps(&ta.ty, deps);
+            }
+            for s in &bridge.structs {
+                for field in &s.fields {
+                    extract_type_deps(&field.ty, deps);
+                }
+            }
+            for e in &bridge.enums {
+                extract_type_deps(&e.repr, deps);
+            }
+            for u in &bridge.unions {
+                for field in &u.fields {
+                    extract_type_deps(&field.ty, deps);
+                }
+            }
+            for c in &bridge.consts {
+                extract_type_deps(&c.ty, deps);
+            }
+            for cb in &bridge.callbacks {
+                extract_type_deps(&cb.return_type, deps);
+                for param in &cb.params {
+                    extract_type_deps(param, deps);
                 }
             }
         }

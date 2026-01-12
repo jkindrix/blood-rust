@@ -32,6 +32,7 @@
 
 pub mod build_cache;
 pub mod canonical;
+pub mod distributed_cache;
 pub mod hash;
 pub mod namespace;
 pub mod storage;
@@ -39,6 +40,7 @@ pub mod vft;
 
 pub use build_cache::{BuildCache, CacheStats, CacheError, hash_hir_item, extract_dependencies};
 pub use canonical::{CanonicalAST, Canonicalizer, DeBruijnIndex};
+pub use distributed_cache::{DistributedCache, RemoteCacheConfig, FetchResult};
 pub use hash::{ContentHash, HashDisplay, FORMAT_VERSION};
 pub use namespace::{Namespace, NameBinding};
 pub use storage::{Codebase, DefinitionRecord, StorageError, PersistentCodebase};
