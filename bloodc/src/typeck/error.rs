@@ -248,6 +248,16 @@ impl TypeError {
                 "E0237",
                 "unreachable pattern".to_string(),
             ),
+
+            // FFI errors (E05xx)
+            TypeErrorKind::FfiUnsafeType { ty, reason, context } => (
+                "E0501",
+                format!("type `{ty}` in {context} is not FFI-safe: {reason}"),
+            ),
+            TypeErrorKind::FfiPortabilityWarning { ty, reason, context } => (
+                "E0502",
+                format!("type `{ty}` in {context} may have FFI portability issues: {reason}"),
+            ),
         };
 
         let mut diag = Diagnostic::error(message, self.span).with_code(code);
@@ -461,6 +471,20 @@ pub enum TypeErrorKind {
     },
     /// Unreachable pattern (dead code).
     UnreachablePattern,
+
+    // FFI errors (E05xx)
+    /// Type is not FFI-safe.
+    FfiUnsafeType {
+        ty: Type,
+        reason: String,
+        context: String,
+    },
+    /// FFI type has portability warning.
+    FfiPortabilityWarning {
+        ty: Type,
+        reason: String,
+        context: String,
+    },
 }
 
 impl fmt::Display for TypeError {

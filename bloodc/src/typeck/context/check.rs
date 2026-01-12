@@ -10,6 +10,7 @@ use crate::span::Span;
 
 use super::TypeContext;
 use super::super::error::{TypeError, TypeErrorKind};
+use super::super::ffi::{FfiValidator, FfiSafety};
 use super::super::resolve::ScopeKind;
 use super::EffectRef;
 
@@ -18,6 +19,9 @@ impl<'a> TypeContext<'a> {
     pub fn check_all_bodies(&mut self) -> Result<(), Vec<Diagnostic>> {
         // Phase 1: Check coherence (no overlapping impls)
         self.check_coherence();
+
+        // Phase 2: Validate FFI types in bridge blocks
+        self.validate_ffi_types();
 
         // Type-check function bodies
         let pending = std::mem::take(&mut self.pending_bodies);
@@ -645,5 +649,165 @@ impl<'a> TypeContext<'a> {
             ));
         }
         row
+    }
+
+    /// Validate FFI types in bridge blocks.
+    ///
+    /// This checks that all types used in FFI declarations are FFI-safe.
+    fn validate_ffi_types(&mut self) {
+        let mut validator = FfiValidator::new();
+        let mut ffi_errors = Vec::new();
+
+        // Register all FFI-safe types from bridge blocks
+        for bridge_info in &self.bridge_defs {
+            // Register opaque types
+            for opaque in &bridge_info.opaque_types {
+                validator.register_opaque_type(opaque.def_id);
+            }
+
+            // Register FFI structs
+            for s in &bridge_info.structs {
+                validator.register_bridge_type(s.def_id);
+            }
+
+            // Register FFI enums
+            for e in &bridge_info.enums {
+                validator.register_bridge_type(e.def_id);
+            }
+
+            // Register FFI unions
+            for u in &bridge_info.unions {
+                validator.register_bridge_type(u.def_id);
+            }
+        }
+
+        // Validate all types used in bridge blocks
+        for bridge_info in &self.bridge_defs {
+            let bridge_name = &bridge_info.name;
+
+            // Validate extern function signatures
+            for func in &bridge_info.extern_fns {
+                // Check parameter types
+                for (i, param_ty) in func.params.iter().enumerate() {
+                    let context = format!(
+                        "bridge `{}` function `{}` parameter {}",
+                        bridge_name, func.name, i + 1
+                    );
+                    if let Some(err) = check_ffi_type_inner(&validator, param_ty, func.span, &context) {
+                        ffi_errors.push(err);
+                    }
+                }
+
+                // Check return type
+                let context = format!(
+                    "bridge `{}` function `{}` return type",
+                    bridge_name, func.name
+                );
+                if let Some(err) = check_ffi_type_inner(&validator, &func.return_ty, func.span, &context) {
+                    ffi_errors.push(err);
+                }
+            }
+
+            // Validate struct field types
+            for s in &bridge_info.structs {
+                for field in &s.fields {
+                    let context = format!(
+                        "bridge `{}` struct `{}` field `{}`",
+                        bridge_name, s.name, field.name
+                    );
+                    if let Some(err) = check_ffi_type_inner(&validator, &field.ty, field.span, &context) {
+                        ffi_errors.push(err);
+                    }
+                }
+            }
+
+            // Validate union field types
+            for u in &bridge_info.unions {
+                for field in &u.fields {
+                    let context = format!(
+                        "bridge `{}` union `{}` field `{}`",
+                        bridge_name, u.name, field.name
+                    );
+                    if let Some(err) = check_ffi_type_inner(&validator, &field.ty, field.span, &context) {
+                        ffi_errors.push(err);
+                    }
+                }
+            }
+
+            // Validate callback types
+            for cb in &bridge_info.callbacks {
+                // Check parameter types
+                for (i, param_ty) in cb.params.iter().enumerate() {
+                    let context = format!(
+                        "bridge `{}` callback `{}` parameter {}",
+                        bridge_name, cb.name, i + 1
+                    );
+                    if let Some(err) = check_ffi_type_inner(&validator, param_ty, cb.span, &context) {
+                        ffi_errors.push(err);
+                    }
+                }
+
+                // Check return type
+                let context = format!(
+                    "bridge `{}` callback `{}` return type",
+                    bridge_name, cb.name
+                );
+                if let Some(err) = check_ffi_type_inner(&validator, &cb.return_ty, cb.span, &context) {
+                    ffi_errors.push(err);
+                }
+            }
+
+            // Validate type alias target types
+            for ta in &bridge_info.type_aliases {
+                let context = format!(
+                    "bridge `{}` type alias `{}`",
+                    bridge_name, ta.name
+                );
+                if let Some(err) = check_ffi_type_inner(&validator, &ta.ty, ta.span, &context) {
+                    ffi_errors.push(err);
+                }
+            }
+
+            // Validate constant types
+            for c in &bridge_info.consts {
+                let context = format!(
+                    "bridge `{}` constant `{}`",
+                    bridge_name, c.name
+                );
+                if let Some(err) = check_ffi_type_inner(&validator, &c.ty, c.span, &context) {
+                    ffi_errors.push(err);
+                }
+            }
+        }
+
+        // Add collected errors to self.errors
+        self.errors.extend(ffi_errors);
+    }
+}
+
+/// Check a single FFI type and return an error if invalid.
+fn check_ffi_type_inner(
+    validator: &FfiValidator,
+    ty: &Type,
+    span: Span,
+    context: &str,
+) -> Option<TypeError> {
+    match validator.validate_type(ty) {
+        FfiSafety::Safe => None,
+        FfiSafety::Warning(_reason) => {
+            // For now, we don't report warnings as errors
+            // They could be logged or stored for later reporting
+            None
+        }
+        FfiSafety::Unsafe(reason) => {
+            Some(TypeError::new(
+                TypeErrorKind::FfiUnsafeType {
+                    ty: ty.clone(),
+                    reason,
+                    context: context.to_string(),
+                },
+                span,
+            ))
+        }
     }
 }
