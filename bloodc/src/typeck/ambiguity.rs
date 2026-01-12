@@ -419,6 +419,7 @@ mod tests {
             return_type: Type::unit(),
             type_params: vec![],
             effects: None,
+            trait_id: None,
         }
     }
 
@@ -467,6 +468,7 @@ mod tests {
                 }],
             }],
             effects: None,
+            trait_id: None,
         };
 
         let m2 = MethodCandidate {
@@ -482,6 +484,7 @@ mod tests {
                 }],
             }],
             effects: None,
+            trait_id: None,
         };
 
         let mut family = super::super::methods::MethodFamily::new("process".to_string());

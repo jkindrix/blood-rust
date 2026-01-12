@@ -345,14 +345,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Then generate vtables for each trait impl
         for item in hir_crate.items.values() {
-            if let hir::ItemKind::Impl { trait_ref, self_ty, items, .. } = &item.kind {
-                if let Some(tref) = trait_ref {
-                    self.generate_vtable_for_impl(
-                        tref.def_id,
-                        self_ty,
-                        items,
-                    )?;
-                }
+            if let hir::ItemKind::Impl { trait_ref: Some(tref), self_ty, items, .. } = &item.kind {
+                self.generate_vtable_for_impl(
+                    tref.def_id,
+                    self_ty,
+                    items,
+                )?;
             }
         }
 

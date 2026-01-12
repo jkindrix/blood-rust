@@ -86,6 +86,19 @@ impl MethodRegistry {
         type_params: Vec<TypeParam>,
         effects: Option<EffectRow>,
     ) {
+        self.register_method_with_trait(def_id, name, sig, type_params, effects, None);
+    }
+
+    /// Register a method with an associated trait (for diamond resolution).
+    pub fn register_method_with_trait(
+        &mut self,
+        def_id: DefId,
+        name: String,
+        sig: &FnSig,
+        type_params: Vec<TypeParam>,
+        effects: Option<EffectRow>,
+        trait_id: Option<DefId>,
+    ) {
         let candidate = MethodCandidate {
             def_id,
             name: name.clone(),
@@ -93,6 +106,7 @@ impl MethodRegistry {
             return_type: sig.output.clone(),
             type_params,
             effects,
+            trait_id,
         };
 
         self.families
@@ -116,6 +130,7 @@ impl MethodRegistry {
             return_type,
             type_params: vec![],
             effects: None,
+            trait_id: None,
         };
 
         self.families
@@ -201,12 +216,25 @@ impl MethodBuilder {
 
     /// Build the method candidate.
     pub fn build(
+        self,
+        def_id: DefId,
+        name: String,
+        param_types: Vec<Type>,
+        return_type: Type,
+        effects: Option<EffectRow>,
+    ) -> MethodCandidate {
+        self.build_with_trait(def_id, name, param_types, return_type, effects, None)
+    }
+
+    /// Build the method candidate with an associated trait (for diamond resolution).
+    pub fn build_with_trait(
         mut self,
         def_id: DefId,
         name: String,
         param_types: Vec<Type>,
         return_type: Type,
         effects: Option<EffectRow>,
+        trait_id: Option<DefId>,
     ) -> MethodCandidate {
         // Apply collected constraints to type params
         for param in &mut self.type_params {
@@ -222,6 +250,7 @@ impl MethodBuilder {
             return_type,
             type_params: self.type_params,
             effects,
+            trait_id,
         }
     }
 }
@@ -309,6 +338,7 @@ mod tests {
             return_type: Type::i32(),
             type_params: vec![],
             effects: None,
+            trait_id: None,
         });
 
         assert_eq!(family.len(), 1);

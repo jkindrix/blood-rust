@@ -35,6 +35,9 @@ pub struct MethodCandidate {
     pub type_params: Vec<TypeParam>,
     /// The effect row (if any).
     pub effects: Option<EffectRow>,
+    /// The trait this method belongs to (for diamond resolution).
+    /// None for inherent methods or free functions.
+    pub trait_id: Option<DefId>,
 }
 
 /// A type parameter with optional constraints.
@@ -252,6 +255,61 @@ pub struct AmbiguityError {
     pub arg_types: Vec<Type>,
     /// The ambiguous candidates (all maximal).
     pub candidates: Vec<MethodCandidate>,
+}
+
+impl AmbiguityError {
+    /// Check if this is a diamond conflict (candidates from different traits).
+    pub fn is_diamond_conflict(&self) -> bool {
+        let trait_ids: Vec<_> = self.candidates
+            .iter()
+            .filter_map(|c| c.trait_id)
+            .collect();
+
+        // Diamond conflict if there are multiple distinct traits involved
+        if trait_ids.len() < 2 {
+            return false;
+        }
+
+        // Check if we have at least 2 different trait IDs
+        let first = trait_ids[0];
+        trait_ids.iter().any(|&id| id != first)
+    }
+
+    /// Get the conflicting trait IDs for diamond resolution.
+    pub fn conflicting_trait_ids(&self) -> Vec<DefId> {
+        let mut trait_ids: Vec<_> = self.candidates
+            .iter()
+            .filter_map(|c| c.trait_id)
+            .collect();
+        trait_ids.sort_by_key(|id| id.index);
+        trait_ids.dedup();
+        trait_ids
+    }
+
+    /// Generate a suggestion message for diamond resolution.
+    pub fn diamond_suggestion(&self, trait_names: &HashMap<DefId, String>) -> String {
+        let conflicting = self.conflicting_trait_ids();
+        let trait_names_str: Vec<_> = conflicting
+            .iter()
+            .filter_map(|id| trait_names.get(id))
+            .cloned()
+            .collect();
+
+        if trait_names_str.is_empty() {
+            format!(
+                "Use qualified syntax to resolve ambiguity: <Type as Trait>::{}()",
+                self.method_name
+            )
+        } else {
+            format!(
+                "Use qualified syntax: <Type as {}>::{}() or <Type as {}>::{}()",
+                trait_names_str.first().unwrap_or(&"Trait1".to_string()),
+                self.method_name,
+                trait_names_str.get(1).unwrap_or(&"Trait2".to_string()),
+                self.method_name
+            )
+        }
+    }
 }
 
 /// A function that checks if a type implements a trait.
@@ -534,6 +592,7 @@ impl<'a> DispatchResolver<'a> {
             return_type: instantiated_return,
             type_params: vec![], // No longer generic after instantiation
             effects: method.effects.clone(),
+            trait_id: method.trait_id, // Preserve trait association for diamond resolution
         };
 
         InstantiationResult::Success {
@@ -1916,6 +1975,7 @@ mod tests {
             return_type: ret,
             type_params: vec![],
             effects: None,
+            trait_id: None,
         }
     }
 
@@ -1978,6 +2038,80 @@ mod tests {
             }
             other => panic!("Expected Ambiguous, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_diamond_conflict_detection() {
+        // Simulate the diamond problem: two traits define the same method
+        let trait1_id = DefId::new(100);
+        let trait2_id = DefId::new(200);
+
+        let mut m1 = make_candidate("render", vec![Type::i32()], Type::i32());
+        m1.trait_id = Some(trait1_id);
+
+        let mut m2 = make_candidate("render", vec![Type::i32()], Type::string());
+        m2.trait_id = Some(trait2_id);
+
+        let err = AmbiguityError {
+            method_name: "render".to_string(),
+            arg_types: vec![Type::i32()],
+            candidates: vec![m1, m2],
+        };
+
+        // Should detect as diamond conflict
+        assert!(err.is_diamond_conflict());
+
+        // Should list both conflicting traits
+        let conflicting = err.conflicting_trait_ids();
+        assert_eq!(conflicting.len(), 2);
+        assert!(conflicting.contains(&trait1_id));
+        assert!(conflicting.contains(&trait2_id));
+
+        // Test suggestion generation
+        let mut trait_names = HashMap::new();
+        trait_names.insert(trait1_id, "Drawable".to_string());
+        trait_names.insert(trait2_id, "Printable".to_string());
+
+        let suggestion = err.diamond_suggestion(&trait_names);
+        assert!(suggestion.contains("Drawable"));
+        assert!(suggestion.contains("Printable"));
+    }
+
+    #[test]
+    fn test_not_diamond_conflict_same_trait() {
+        // Same trait, different overloads - not a diamond conflict
+        let trait_id = DefId::new(100);
+
+        let mut m1 = make_candidate("process", vec![Type::i32()], Type::i32());
+        m1.trait_id = Some(trait_id);
+
+        let mut m2 = make_candidate("process", vec![Type::i32()], Type::i64());
+        m2.trait_id = Some(trait_id);
+
+        let err = AmbiguityError {
+            method_name: "process".to_string(),
+            arg_types: vec![Type::i32()],
+            candidates: vec![m1, m2],
+        };
+
+        // Should NOT be a diamond conflict (same trait)
+        assert!(!err.is_diamond_conflict());
+    }
+
+    #[test]
+    fn test_not_diamond_conflict_no_traits() {
+        // Free functions, no traits - not a diamond conflict
+        let m1 = make_candidate("compute", vec![Type::i32()], Type::i32());
+        let m2 = make_candidate("compute", vec![Type::i32()], Type::i64());
+
+        let err = AmbiguityError {
+            method_name: "compute".to_string(),
+            arg_types: vec![Type::i32()],
+            candidates: vec![m1, m2],
+        };
+
+        // Should NOT be a diamond conflict (no traits)
+        assert!(!err.is_diamond_conflict());
     }
 
     #[test]
@@ -2395,6 +2529,7 @@ mod tests {
             return_type: ret,
             type_params: vec![],
             effects,
+            trait_id: None,
         }
     }
 
@@ -2654,6 +2789,7 @@ mod tests {
             return_type: ret,
             type_params,
             effects: None,
+            trait_id: None,
         }
     }
 
@@ -3061,6 +3197,7 @@ mod tests {
                 constraints: vec![],
             }],
             effects: None,
+            trait_id: None,
         };
 
         let u_id = TyVarId::new(1);
@@ -3077,6 +3214,7 @@ mod tests {
                 constraints: vec![],
             }],
             effects: None,
+            trait_id: None,
         };
 
         let candidates = vec![m1, m2];
@@ -3220,6 +3358,7 @@ mod tests {
             return_type: ret,
             type_params,
             effects: None,
+            trait_id: None,
         }
     }
 
