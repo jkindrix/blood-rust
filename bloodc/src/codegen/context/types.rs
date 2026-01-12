@@ -1,0 +1,172 @@
+//! Type lowering for LLVM codegen.
+//!
+//! This module handles conversion from Blood types to LLVM types.
+
+use inkwell::types::{BasicTypeEnum, BasicType, BasicMetadataTypeEnum};
+use inkwell::AddressSpace;
+
+use crate::hir::{Type, TypeKind, PrimitiveTy};
+use crate::hir::def::{IntTy, UintTy};
+
+use super::CodegenContext;
+
+impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
+    /// Lower a Blood type to an LLVM type.
+    pub fn lower_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
+        match ty.kind() {
+            TypeKind::Primitive(prim) => self.lower_primitive(prim),
+            TypeKind::Tuple(fields) if fields.is_empty() => {
+                // Unit type - use i8 as placeholder
+                self.context.i8_type().into()
+            }
+            TypeKind::Tuple(fields) => {
+                let field_types: Vec<BasicTypeEnum> = fields.iter()
+                    .map(|f| self.lower_type(f))
+                    .collect();
+                self.context.struct_type(&field_types, false).into()
+            }
+            TypeKind::Array { element, size } => {
+                let elem_type = self.lower_type(element);
+                elem_type.array_type(*size as u32).into()
+            }
+            TypeKind::Slice { element } => {
+                // Slices are { ptr, len }
+                let elem_type = self.lower_type(element);
+                let ptr_type = elem_type.ptr_type(AddressSpace::default());
+                let len_type = self.context.i64_type();
+                self.context.struct_type(&[ptr_type.into(), len_type.into()], false).into()
+            }
+            TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                let inner_type = self.lower_type(inner);
+                inner_type.ptr_type(AddressSpace::default()).into()
+            }
+            TypeKind::Adt { def_id, .. } => {
+                // Look up struct or enum definition
+                if let Some(fields) = self.struct_defs.get(def_id) {
+                    let field_types: Vec<BasicTypeEnum> = fields.iter()
+                        .map(|f| self.lower_type(f))
+                        .collect();
+                    if field_types.is_empty() {
+                        // Unit struct - use i8 placeholder
+                        self.context.i8_type().into()
+                    } else {
+                        self.context.struct_type(&field_types, false).into()
+                    }
+                } else if let Some(variants) = self.enum_defs.get(def_id) {
+                    // Enum: { i32 tag, max_payload_fields... }
+                    // Find max fields across variants
+                    let max_fields = variants.iter().map(|v| v.len()).max().unwrap_or(0);
+                    let mut enum_fields: Vec<BasicTypeEnum> = Vec::with_capacity(1 + max_fields);
+                    // Tag
+                    enum_fields.push(self.context.i32_type().into());
+                    // Payload fields (use i64 as universal field type for simplicity)
+                    for _ in 0..max_fields {
+                        enum_fields.push(self.context.i64_type().into());
+                    }
+                    self.context.struct_type(&enum_fields, false).into()
+                } else {
+                    // Unknown ADT - use pointer placeholder
+                    self.context.i8_type().ptr_type(AddressSpace::default()).into()
+                }
+            }
+            TypeKind::Fn { params, ret } => {
+                // Function types as pointers
+                let param_types: Vec<BasicMetadataTypeEnum> = params.iter()
+                    .map(|p| self.lower_type(p).into())
+                    .collect();
+                let fn_type = if ret.is_unit() {
+                    self.context.void_type().fn_type(&param_types, false)
+                } else {
+                    let ret_type = self.lower_type(ret);
+                    ret_type.fn_type(&param_types, false)
+                };
+                fn_type.ptr_type(AddressSpace::default()).into()
+            }
+            TypeKind::DynTrait { .. } => {
+                // Trait object: fat pointer { data_ptr, vtable_ptr }
+                let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                self.context.struct_type(&[ptr_type.into(), ptr_type.into()], false).into()
+            }
+            TypeKind::Never => {
+                // Never type - use i8 as placeholder (will never actually be used)
+                self.context.i8_type().into()
+            }
+            TypeKind::Infer(_) | TypeKind::Error => {
+                // Error/unresolved types - use i8 placeholder
+                self.context.i8_type().into()
+            }
+            TypeKind::Param(_) => {
+                // Generic parameters should be monomorphized before codegen
+                // Use pointer as placeholder for now
+                self.context.i8_type().ptr_type(AddressSpace::default()).into()
+            }
+            TypeKind::Closure { .. } => {
+                // Closure: fat pointer { fn_ptr, env_ptr }
+                let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                self.context.struct_type(&[ptr_type.into(), ptr_type.into()], false).into()
+            }
+            TypeKind::Range { element, .. } => {
+                // Range: { start, end } of the element type
+                // For simplicity, use { i64, i64 } for now
+                let elem_type = self.lower_type(element);
+                self.context.struct_type(&[elem_type.into(), elem_type.into()], false).into()
+            }
+        }
+    }
+
+    /// Lower a primitive type to LLVM.
+    pub(super) fn lower_primitive(&self, prim: &PrimitiveTy) -> BasicTypeEnum<'ctx> {
+        match prim {
+            PrimitiveTy::Bool => self.context.bool_type().into(),
+            PrimitiveTy::Char => self.context.i32_type().into(),
+            PrimitiveTy::Int(int_ty) => match int_ty {
+                IntTy::I8 => self.context.i8_type().into(),
+                IntTy::I16 => self.context.i16_type().into(),
+                IntTy::I32 => self.context.i32_type().into(),
+                IntTy::I64 => self.context.i64_type().into(),
+                IntTy::I128 => self.context.i128_type().into(),
+                IntTy::Isize => self.context.i64_type().into(),
+            },
+            PrimitiveTy::Uint(uint_ty) => match uint_ty {
+                UintTy::U8 => self.context.i8_type().into(),
+                UintTy::U16 => self.context.i16_type().into(),
+                UintTy::U32 => self.context.i32_type().into(),
+                UintTy::U64 => self.context.i64_type().into(),
+                UintTy::U128 => self.context.i128_type().into(),
+                UintTy::Usize => self.context.i64_type().into(),
+            },
+            PrimitiveTy::Float(crate::hir::def::FloatTy::F32) => self.context.f32_type().into(),
+            PrimitiveTy::Float(crate::hir::def::FloatTy::F64) => self.context.f64_type().into(),
+            PrimitiveTy::Str => {
+                // String slice: { ptr, len }
+                let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                let len_type = self.context.i64_type();
+                self.context.struct_type(&[ptr_type.into(), len_type.into()], false).into()
+            }
+            PrimitiveTy::String => {
+                // Heap-allocated string: { ptr, len, capacity }
+                let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                let len_type = self.context.i64_type();
+                self.context.struct_type(&[ptr_type.into(), len_type.into(), len_type.into()], false).into()
+            }
+            PrimitiveTy::Unit => {
+                // Unit type - use i8 as placeholder
+                self.context.i8_type().into()
+            }
+        }
+    }
+
+    /// Create an LLVM function type from a Blood function signature.
+    pub(super) fn fn_type_from_sig(&self, sig: &crate::hir::FnSig) -> inkwell::types::FunctionType<'ctx> {
+        let param_types: Vec<BasicMetadataTypeEnum> = sig.inputs.iter()
+            .map(|p| self.lower_type(p).into())
+            .collect();
+
+        if sig.output.is_unit() {
+            self.context.void_type().fn_type(&param_types, false)
+        } else {
+            let ret_type = self.lower_type(&sig.output);
+            ret_type.fn_type(&param_types, false)
+        }
+    }
+}
