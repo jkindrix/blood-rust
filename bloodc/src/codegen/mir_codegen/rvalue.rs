@@ -821,6 +821,36 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
 
+            ConstantKind::ConstDef(def_id) => {
+                // Const item reference - load from global constant
+                if let Some(global) = self.const_globals.get(def_id) {
+                    let val = self.builder.build_load(global.as_pointer_value(), "const_load")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), Span::dummy()
+                        )])?;
+                    Ok(val)
+                } else {
+                    Err(vec![Diagnostic::error(
+                        format!("Unknown const {:?}", def_id), Span::dummy()
+                    )])
+                }
+            }
+
+            ConstantKind::StaticDef(def_id) => {
+                // Static item reference - load from global variable
+                if let Some(global) = self.static_globals.get(def_id) {
+                    let val = self.builder.build_load(global.as_pointer_value(), "static_load")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), Span::dummy()
+                        )])?;
+                    Ok(val)
+                } else {
+                    Err(vec![Diagnostic::error(
+                        format!("Unknown static {:?}", def_id), Span::dummy()
+                    )])
+                }
+            }
+
             ConstantKind::ZeroSized => {
                 Ok(self.context.i8_type().const_int(0, false).into())
             }

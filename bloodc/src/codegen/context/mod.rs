@@ -10,11 +10,12 @@ use inkwell::module::Module;
 use inkwell::builder::Builder;
 use inkwell::basic_block::BasicBlock;
 use inkwell::values::{FunctionValue, PointerValue};
-use inkwell::types::BasicType;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::AddressSpace;
 
 use crate::hir::{self, DefId, LocalId, Type};
 use crate::mir::{EscapeResults, MirBody};
+use crate::codegen::mir_codegen::MirTypesCodegen;
 use crate::diagnostics::Diagnostic;
 use crate::span::Span;
 use crate::effects::{EffectLowering, EffectInfo, HandlerInfo};
@@ -107,6 +108,10 @@ pub struct CodegenContext<'ctx, 'a> {
     /// WASM imports: maps function link name to WASM import module.
     /// Used for setting WASM import attributes during post-processing.
     pub(super) wasm_imports: HashMap<String, String>,
+    /// Global constants: maps DefId to LLVM global value.
+    pub(super) const_globals: HashMap<DefId, inkwell::values::GlobalValue<'ctx>>,
+    /// Global statics: maps DefId to LLVM global value.
+    pub(super) static_globals: HashMap<DefId, inkwell::values::GlobalValue<'ctx>>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -142,6 +147,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             vtables: HashMap::new(),
             vtable_layouts: HashMap::new(),
             wasm_imports: HashMap::new(),
+            const_globals: HashMap::new(),
+            static_globals: HashMap::new(),
         }
     }
 
@@ -295,7 +302,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         }
     }
 
-    /// Declare FFI external functions from bridge blocks.
+    /// Declare FFI items from bridge blocks.
+    ///
+    /// This declares external functions, structs, enums, unions, constants, and callbacks
+    /// from FFI bridge blocks. The declarations are made in LLVM IR with C-compatible layouts.
     fn declare_ffi_functions(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
         for item in hir_crate.items.values() {
             match &item.kind {
@@ -306,6 +316,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     // Get the wasm import module from link specs if present
                     let wasm_import_module = bridge_def.link_specs.iter()
                         .find_map(|ls| ls.wasm_import_module.clone());
+
+                    // Declare FFI structs with C layout
+                    for ffi_struct in &bridge_def.structs {
+                        self.declare_ffi_struct(ffi_struct)?;
+                    }
+
+                    // Declare FFI enums (C enums are integer types with named constants)
+                    for ffi_enum in &bridge_def.enums {
+                        self.declare_ffi_enum(ffi_enum)?;
+                    }
+
+                    // Declare FFI unions
+                    for ffi_union in &bridge_def.unions {
+                        self.declare_ffi_union(ffi_union)?;
+                    }
+
+                    // Declare FFI constants
+                    for ffi_const in &bridge_def.consts {
+                        self.declare_ffi_constant(ffi_const)?;
+                    }
+
+                    // Declare FFI callbacks (function pointer types)
+                    for ffi_callback in &bridge_def.callbacks {
+                        self.declare_ffi_callback(ffi_callback)?;
+                    }
 
                     // Declare all external functions in the bridge
                     for extern_fn in &bridge_def.extern_fns {
@@ -332,6 +367,453 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
         }
         Ok(())
+    }
+
+    /// Declare an FFI struct type with C-compatible layout.
+    fn declare_ffi_struct(&mut self, ffi_struct: &hir::FfiStruct) -> Result<(), Vec<Diagnostic>> {
+        let field_types: Vec<_> = ffi_struct.fields.iter()
+            .map(|f| self.lower_type(&f.ty))
+            .collect();
+
+        let _struct_type = self.context.struct_type(&field_types, ffi_struct.is_packed);
+
+        // Register the struct type for later use
+        self.struct_defs.insert(ffi_struct.def_id, ffi_struct.fields.iter()
+            .map(|f| f.ty.clone())
+            .collect());
+
+        // Also create an opaque named struct for better LLVM IR readability
+        let _named_struct = self.context.opaque_struct_type(&ffi_struct.name);
+
+        // Store the LLVM type for later reference if needed
+        // The type is registered in struct_defs which lower_type will use
+
+        Ok(())
+    }
+
+    /// Declare an FFI enum type.
+    ///
+    /// C enums are represented as integer types with named constants.
+    fn declare_ffi_enum(&mut self, ffi_enum: &hir::FfiEnum) -> Result<(), Vec<Diagnostic>> {
+        // Lower the representation type (typically i32 for C enums)
+        let repr_type = self.lower_type(&ffi_enum.repr);
+
+        // Create global constants for each enum variant
+        for variant in &ffi_enum.variants {
+            let const_name = format!("{}_{}", ffi_enum.name, variant.name);
+            if let inkwell::types::BasicTypeEnum::IntType(int_type) = repr_type {
+                let const_val = int_type.const_int(variant.value as u64, variant.value < 0);
+                let global = self.module.add_global(int_type, Some(AddressSpace::default()), &const_name);
+                global.set_initializer(&const_val);
+                global.set_constant(true);
+                global.set_linkage(inkwell::module::Linkage::Private);
+            }
+        }
+
+        // Register the enum as a simple struct with just the discriminant
+        self.enum_defs.insert(ffi_enum.def_id, vec![Vec::new()]);
+
+        Ok(())
+    }
+
+    /// Declare an FFI union type.
+    ///
+    /// Unions have all fields at offset 0, so we create a struct with the size of the
+    /// largest field and interpret the memory differently based on use.
+    fn declare_ffi_union(&mut self, ffi_union: &hir::FfiUnion) -> Result<(), Vec<Diagnostic>> {
+        // Find the largest field to determine union size
+        let mut max_size: u64 = 0;
+        let mut max_align: u32 = 1;
+
+        for field in &ffi_union.fields {
+            let field_type = self.lower_type(&field.ty);
+            let size = self.get_type_size_in_bytes(field_type);
+            let align = self.get_type_alignment(field_type);
+            if size > max_size {
+                max_size = size;
+            }
+            if align > max_align {
+                max_align = align;
+            }
+        }
+
+        // Create a byte array of the union size for the storage
+        let storage_type = self.context.i8_type().array_type(max_size as u32);
+
+        // Create a named struct type for the union
+        let _union_struct = self.context.struct_type(&[storage_type.into()], false);
+
+        // Register the union type - we use the first field's type for simplicity
+        // In practice, users must cast to the appropriate field type
+        if let Some(first_field) = ffi_union.fields.first() {
+            self.struct_defs.insert(ffi_union.def_id, vec![first_field.ty.clone()]);
+        } else {
+            // Empty union - just use a zero-sized placeholder
+            self.struct_defs.insert(ffi_union.def_id, Vec::new());
+        }
+
+        Ok(())
+    }
+
+    /// Declare an FFI constant.
+    fn declare_ffi_constant(&mut self, ffi_const: &hir::FfiConst) -> Result<(), Vec<Diagnostic>> {
+        let llvm_type = self.lower_type(&ffi_const.ty);
+
+        let const_val: inkwell::values::BasicValueEnum = match llvm_type {
+            inkwell::types::BasicTypeEnum::IntType(int_type) => {
+                int_type.const_int(ffi_const.value as u64, ffi_const.value < 0).into()
+            }
+            inkwell::types::BasicTypeEnum::FloatType(float_type) => {
+                float_type.const_float(ffi_const.value as f64).into()
+            }
+            _ => {
+                // For non-numeric types, use i64 and let the user cast
+                self.context.i64_type().const_int(ffi_const.value as u64, ffi_const.value < 0).into()
+            }
+        };
+
+        let global = self.module.add_global(llvm_type, Some(AddressSpace::default()), &ffi_const.name);
+        global.set_initializer(&const_val);
+        global.set_constant(true);
+
+        // Store in const_globals for reference
+        self.const_globals.insert(ffi_const.def_id, global);
+
+        Ok(())
+    }
+
+    /// Declare an FFI callback type (function pointer).
+    fn declare_ffi_callback(&mut self, ffi_callback: &hir::FfiCallback) -> Result<(), Vec<Diagnostic>> {
+        // Lower parameter types
+        let param_types: Vec<_> = ffi_callback.params.iter()
+            .map(|p| self.lower_type(p).into())
+            .collect();
+
+        // Lower return type
+        let return_type = self.lower_type(&ffi_callback.return_type);
+
+        // Create the function type
+        let fn_type = return_type.fn_type(&param_types, false);
+
+        // Create a type alias (via a named struct that wraps a function pointer)
+        // This is primarily for documentation; function pointers in Blood work directly
+        let _ptr_type = fn_type.ptr_type(AddressSpace::default());
+
+        // For callback resolution during type checking, we don't need to store anything
+        // The callback is resolved through the type system
+
+        Ok(())
+    }
+
+    /// Get the alignment of an LLVM type in bytes.
+    fn get_type_alignment(&self, ty: BasicTypeEnum<'ctx>) -> u32 {
+        // Return conservative alignments based on type
+        match ty {
+            BasicTypeEnum::IntType(int_ty) => {
+                let bits = int_ty.get_bit_width();
+                std::cmp::min(bits / 8, 8).max(1)
+            }
+            BasicTypeEnum::FloatType(float_ty) => {
+                if float_ty == self.context.f32_type() {
+                    4
+                } else {
+                    8
+                }
+            }
+            BasicTypeEnum::PointerType(_) => 8,
+            BasicTypeEnum::StructType(_) => 8, // Conservative alignment for structs
+            BasicTypeEnum::ArrayType(_) => 8,
+            BasicTypeEnum::VectorType(_) => 16,
+        }
+    }
+
+    /// Compile const items from HIR.
+    ///
+    /// Creates LLVM global constants for each const item. For simple literals,
+    /// the value is directly embedded. For complex expressions, const evaluation
+    /// is performed.
+    pub fn compile_const_items(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+        for (def_id, item) in &hir_crate.items {
+            if let hir::ItemKind::Const { ty, body_id } = &item.kind {
+                // Lower the type
+                let llvm_type = self.lower_type(ty);
+
+                // Get the body to evaluate the initializer
+                let body = hir_crate.bodies.get(body_id).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        format!("Missing body for const `{}`", item.name),
+                        item.span,
+                    )]
+                })?;
+
+                // Evaluate the const expression to get the initializer
+                let init_value = self.evaluate_const_expr(&body.expr, ty)?;
+
+                // Create global constant
+                let global = self.module.add_global(
+                    llvm_type,
+                    Some(AddressSpace::default()),
+                    &item.name,
+                );
+                global.set_initializer(&init_value);
+                global.set_constant(true);
+
+                // Store for later reference
+                self.const_globals.insert(*def_id, global);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile static items from HIR.
+    ///
+    /// Creates LLVM global variables for each static item. Mutable statics
+    /// are marked as non-constant, allowing runtime mutation.
+    pub fn compile_static_items(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+        for (def_id, item) in &hir_crate.items {
+            if let hir::ItemKind::Static { ty, mutable, body_id } = &item.kind {
+                // Lower the type
+                let llvm_type = self.lower_type(ty);
+
+                // Get the body to evaluate the initializer
+                let body = hir_crate.bodies.get(body_id).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        format!("Missing body for static `{}`", item.name),
+                        item.span,
+                    )]
+                })?;
+
+                // Evaluate the static expression to get the initializer
+                let init_value = self.evaluate_const_expr(&body.expr, ty)?;
+
+                // Create global variable
+                let global = self.module.add_global(
+                    llvm_type,
+                    Some(AddressSpace::default()),
+                    &item.name,
+                );
+                global.set_initializer(&init_value);
+                global.set_constant(!*mutable); // Only constant if not mutable
+
+                // Store for later reference
+                self.static_globals.insert(*def_id, global);
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate a const expression at compile time.
+    ///
+    /// For now, this supports only literals and simple constant expressions.
+    /// More complex const evaluation (const fn calls, etc.) will be added later.
+    fn evaluate_const_expr(
+        &self,
+        expr: &hir::Expr,
+        ty: &Type,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use crate::hir::ExprKind;
+
+        match &expr.kind {
+            ExprKind::Literal(lit) => self.evaluate_literal(lit, ty),
+            ExprKind::Unary { op, operand } => {
+                let operand_val = self.evaluate_const_expr(operand, ty)?;
+                self.evaluate_const_unary_op(*op, operand_val, ty)
+            }
+            ExprKind::Binary { op, left, right } => {
+                let left_val = self.evaluate_const_expr(left, ty)?;
+                let right_val = self.evaluate_const_expr(right, ty)?;
+                self.evaluate_const_binary_op(*op, left_val, right_val, ty)
+            }
+            ExprKind::Block { stmts, expr: final_expr, .. } => {
+                // For const blocks, only the final expression matters
+                if stmts.is_empty() {
+                    if let Some(final_expr) = final_expr {
+                        return self.evaluate_const_expr(final_expr, ty);
+                    }
+                }
+                // Empty block or block with statements - not const evaluable yet
+                Err(vec![Diagnostic::error(
+                    "Complex block expressions in const context are not yet supported".to_string(),
+                    expr.span,
+                )])
+            }
+            _ => Err(vec![Diagnostic::error(
+                format!("Expression kind {:?} is not const-evaluable", std::mem::discriminant(&expr.kind)),
+                expr.span,
+            )]),
+        }
+    }
+
+    /// Evaluate a literal to an LLVM constant.
+    fn evaluate_literal(
+        &self,
+        lit: &hir::LiteralValue,
+        ty: &Type,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use hir::LiteralValue;
+        use hir::PrimitiveTy;
+
+        match lit {
+            LiteralValue::Int(value) => {
+                // Lower the type to get the LLVM integer type
+                let llvm_type = self.lower_type(ty);
+                if let inkwell::types::BasicTypeEnum::IntType(int_type) = llvm_type {
+                    Ok(int_type.const_int(*value as u64, true).into())
+                } else {
+                    // Fallback to i64
+                    Ok(self.context.i64_type().const_int(*value as u64, true).into())
+                }
+            }
+            LiteralValue::Uint(value) => {
+                // Lower the type to get the LLVM integer type
+                let llvm_type = self.lower_type(ty);
+                if let inkwell::types::BasicTypeEnum::IntType(int_type) = llvm_type {
+                    Ok(int_type.const_int(*value as u64, false).into())
+                } else {
+                    // Fallback to u64
+                    Ok(self.context.i64_type().const_int(*value as u64, false).into())
+                }
+            }
+            LiteralValue::Float(value) => {
+                // Check if it's f32 or f64 via PrimitiveTy
+                let is_f32 = matches!(
+                    ty.kind(),
+                    hir::TypeKind::Primitive(PrimitiveTy::Float(hir::FloatTy::F32))
+                );
+                if is_f32 {
+                    Ok(self.context.f32_type().const_float(*value).into())
+                } else {
+                    Ok(self.context.f64_type().const_float(*value).into())
+                }
+            }
+            LiteralValue::Bool(value) => {
+                Ok(self.context.bool_type().const_int(*value as u64, false).into())
+            }
+            LiteralValue::Char(c) => {
+                // Chars are u32 in Blood/Rust
+                Ok(self.context.i32_type().const_int(*c as u64, false).into())
+            }
+            LiteralValue::String(s) => {
+                // Create a global string constant
+                let bytes = s.as_bytes();
+                let string_type = self.context.i8_type().array_type((bytes.len() + 1) as u32);
+                let global = self.module.add_global(string_type, Some(AddressSpace::default()), "");
+                global.set_initializer(&self.context.const_string(bytes, true));
+                global.set_constant(true);
+
+                // Return pointer to the string
+                Ok(global.as_pointer_value().into())
+            }
+        }
+    }
+
+    /// Evaluate a const unary operation.
+    fn evaluate_const_unary_op(
+        &self,
+        op: crate::ast::UnaryOp,
+        operand: inkwell::values::BasicValueEnum<'ctx>,
+        _ty: &Type,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use crate::ast::UnaryOp;
+
+        match op {
+            UnaryOp::Neg => {
+                if operand.is_int_value() {
+                    let int_val = operand.into_int_value();
+                    let zero = int_val.get_type().const_zero();
+                    Ok(zero.const_sub(int_val).into())
+                } else if operand.is_float_value() {
+                    let float_val = operand.into_float_value();
+                    Ok(float_val.const_neg().into())
+                } else {
+                    Err(vec![Diagnostic::error(
+                        "Negation on unsupported type in const context".to_string(),
+                        crate::span::Span::dummy(),
+                    )])
+                }
+            }
+            UnaryOp::Not => {
+                if operand.is_int_value() {
+                    let int_val = operand.into_int_value();
+                    Ok(int_val.const_not().into())
+                } else {
+                    Err(vec![Diagnostic::error(
+                        "Not on unsupported type in const context".to_string(),
+                        crate::span::Span::dummy(),
+                    )])
+                }
+            }
+            _ => Err(vec![Diagnostic::error(
+                format!("Unary operator {:?} not supported in const context", op),
+                crate::span::Span::dummy(),
+            )]),
+        }
+    }
+
+    /// Evaluate a const binary operation.
+    fn evaluate_const_binary_op(
+        &self,
+        op: crate::ast::BinOp,
+        left: inkwell::values::BasicValueEnum<'ctx>,
+        right: inkwell::values::BasicValueEnum<'ctx>,
+        _ty: &Type,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use crate::ast::BinOp;
+
+        // Try integer operations
+        if left.is_int_value() && right.is_int_value() {
+            let left_int = left.into_int_value();
+            let right_int = right.into_int_value();
+            let result = match op {
+                BinOp::Add => left_int.const_add(right_int),
+                BinOp::Sub => left_int.const_sub(right_int),
+                BinOp::Mul => left_int.const_mul(right_int),
+                BinOp::Div => left_int.const_signed_div(right_int),
+                BinOp::Rem => left_int.const_signed_remainder(right_int),
+                BinOp::BitAnd => left_int.const_and(right_int),
+                BinOp::BitOr => left_int.const_or(right_int),
+                BinOp::BitXor => left_int.const_xor(right_int),
+                BinOp::Shl => left_int.const_shl(right_int),
+                BinOp::Shr => left_int.const_ashr(right_int),
+                BinOp::Eq => left_int.const_int_compare(inkwell::IntPredicate::EQ, right_int),
+                BinOp::Ne => left_int.const_int_compare(inkwell::IntPredicate::NE, right_int),
+                BinOp::Lt => left_int.const_int_compare(inkwell::IntPredicate::SLT, right_int),
+                BinOp::Le => left_int.const_int_compare(inkwell::IntPredicate::SLE, right_int),
+                BinOp::Gt => left_int.const_int_compare(inkwell::IntPredicate::SGT, right_int),
+                BinOp::Ge => left_int.const_int_compare(inkwell::IntPredicate::SGE, right_int),
+                _ => {
+                    return Err(vec![Diagnostic::error(
+                        format!("Binary operator {:?} not supported in const context", op),
+                        crate::span::Span::dummy(),
+                    )]);
+                }
+            };
+            return Ok(result.into());
+        }
+
+        // Try float operations
+        if left.is_float_value() && right.is_float_value() {
+            let left_float = left.into_float_value();
+            let right_float = right.into_float_value();
+            let result = match op {
+                BinOp::Add => left_float.const_add(right_float),
+                BinOp::Sub => left_float.const_sub(right_float),
+                BinOp::Mul => left_float.const_mul(right_float),
+                BinOp::Div => left_float.const_div(right_float),
+                _ => {
+                    return Err(vec![Diagnostic::error(
+                        format!("Float binary operator {:?} not supported in const context", op),
+                        crate::span::Span::dummy(),
+                    )]);
+                }
+            };
+            return Ok(result.into());
+        }
+
+        Err(vec![Diagnostic::error(
+            "Binary operation on unsupported types in const context".to_string(),
+            crate::span::Span::dummy(),
+        )])
     }
 
     /// Declare an external (FFI) function.
@@ -534,6 +1016,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // FFI pass: declare external functions from bridge blocks
         self.declare_ffi_functions(hir_crate)?;
+
+        // Const/Static pass: compile global constants and static variables
+        self.compile_const_items(hir_crate)?;
+        self.compile_static_items(hir_crate)?;
 
         // Fourth pass: compile function bodies
         for (def_id, item) in &hir_crate.items {

@@ -47,6 +47,12 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             )]
         })?;
 
+        // Track the current type as we process projections
+        let base_ty = body.locals.get(place.local.index as usize)
+            .map(|l| l.ty.clone())
+            .unwrap_or_else(Type::error);
+        let mut current_ty = base_ty;
+
         let mut current_ptr = base_ptr;
 
         for elem in &place.projection {
@@ -164,39 +170,109 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             format!("LLVM load error: {}", e), body.span
                         )])?;
 
+                    // For array/slice types, we need two GEP indices: [0, index]
+                    // The first 0 dereferences the pointer to array, the second indexes into the array
+                    let is_array_ty = matches!(current_ty.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. });
+
+                    // Update current_ty to element type
+                    current_ty = match current_ty.kind() {
+                        TypeKind::Array { element, .. } => element.clone(),
+                        TypeKind::Slice { element } => element.clone(),
+                        _ => current_ty.clone(),
+                    };
+
                     unsafe {
-                        self.builder.build_in_bounds_gep(
-                            current_ptr,
-                            &[idx_val.into_int_value()],
-                            "idx_gep"
-                        ).map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM GEP error: {}", e), body.span
-                        )])?
+                        if is_array_ty {
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(
+                                current_ptr,
+                                &[zero, idx_val.into_int_value()],
+                                "idx_gep"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM GEP error: {}", e), body.span
+                            )])?
+                        } else {
+                            self.builder.build_in_bounds_gep(
+                                current_ptr,
+                                &[idx_val.into_int_value()],
+                                "idx_gep"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM GEP error: {}", e), body.span
+                            )])?
+                        }
                     }
                 }
 
                 PlaceElem::ConstantIndex { offset, min_length: _, from_end } => {
+                    // Check if current type is array/slice BEFORE updating
+                    let is_array_ty = matches!(current_ty.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. });
+
                     let idx = if *from_end {
-                        self.context.i64_type().const_int((!*offset).wrapping_add(1), false)
+                        // For from_end, compute actual index as array_length - offset - 1
+                        let array_len = match current_ty.kind() {
+                            TypeKind::Array { size, .. } => size,
+                            _ => {
+                                return Err(vec![Diagnostic::error(
+                                    format!("ConstantIndex from_end requires array type, got {:?}", current_ty),
+                                    body.span,
+                                )]);
+                            }
+                        };
+                        // offset is the distance from the end, so index = array_len - 1 - offset
+                        let actual_idx = array_len - 1 - *offset;
+                        self.context.i64_type().const_int(actual_idx, false)
                     } else {
                         self.context.i64_type().const_int(*offset, false)
                     };
+
+                    // Update current_ty to element type
+                    current_ty = match current_ty.kind() {
+                        TypeKind::Array { element, .. } => element.clone(),
+                        TypeKind::Slice { element } => element.clone(),
+                        _ => current_ty.clone(),
+                    };
+
+                    // For array types, we need two GEP indices: [0, index]
+                    // The first 0 dereferences the pointer to array, the second indexes into the array
                     unsafe {
-                        self.builder.build_in_bounds_gep(current_ptr, &[idx], "const_idx")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM GEP error: {}", e), body.span
-                            )])?
+                        if is_array_ty {
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(current_ptr, &[zero, idx], "const_idx")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                        } else {
+                            self.builder.build_in_bounds_gep(current_ptr, &[idx], "const_idx")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                        }
                     }
                 }
 
                 PlaceElem::Subslice { from, to, from_end: _ } => {
+                    // Check if current type is array/slice BEFORE indexing
+                    let is_array_ty = matches!(current_ty.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. });
+
                     let idx = self.context.i64_type().const_int(*from, false);
                     let _ = to; // End index for slice length calculation
+
+                    // For subslice, the type remains array/slice (just a different view)
+                    // but the GEP behavior depends on whether we have an array pointer
+
                     unsafe {
-                        self.builder.build_in_bounds_gep(current_ptr, &[idx], "subslice")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM GEP error: {}", e), body.span
-                            )])?
+                        if is_array_ty {
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(current_ptr, &[zero, idx], "subslice")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                        } else {
+                            self.builder.build_in_bounds_gep(current_ptr, &[idx], "subslice")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                        }
                     }
                 }
 

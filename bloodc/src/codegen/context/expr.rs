@@ -77,11 +77,24 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
             Def(def_id) => {
-                // Reference to a function - return the function pointer or look up value
+                // Reference to a definition - could be function, const, or static
                 if let Some(fn_val) = self.functions.get(def_id) {
+                    // Function reference - return the function pointer
                     Ok(Some(fn_val.as_global_value().as_pointer_value().into()))
+                } else if let Some(global) = self.const_globals.get(def_id) {
+                    // Const reference - load the value
+                    let val = self.builder
+                        .build_load(global.as_pointer_value(), "const_load")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    Ok(Some(val))
+                } else if let Some(global) = self.static_globals.get(def_id) {
+                    // Static reference - load the value
+                    let val = self.builder
+                        .build_load(global.as_pointer_value(), "static_load")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    Ok(Some(val))
                 } else {
-                    // Might be a constant - for now return error
+                    // Unknown definition - might not be compiled yet, return None for now
                     Ok(None)
                 }
             }

@@ -265,13 +265,34 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
             hir::PatternKind::Slice { prefix, slice, suffix } => {
                 // Slice pattern matching - check length and elements
-                // Simplified: just check prefix patterns for now
                 let mut result = self.context.bool_type().const_int(1, false);
 
                 if let BasicValueEnum::ArrayValue(arr) = scrutinee {
+                    // Get array size from the pattern's type
+                    let array_size = match pattern.ty.kind() {
+                        hir::TypeKind::Array { size, .. } => *size,
+                        _ => {
+                            return Err(vec![Diagnostic::error(
+                                "Expected array type for slice pattern",
+                                pattern.span,
+                            )]);
+                        }
+                    };
+
+                    let prefix_len = prefix.len() as u64;
+                    let suffix_len = suffix.len() as u64;
+                    let min_required = prefix_len + suffix_len;
+
+                    // Length check: array must be at least prefix_len + suffix_len
+                    if array_size < min_required {
+                        // Pattern can never match - return false
+                        return Ok(self.context.bool_type().const_int(0, false));
+                    }
+
+                    // Test prefix patterns (indices 0, 1, ..., prefix_len-1)
                     for (i, pat) in prefix.iter().enumerate() {
                         let elem = self.builder
-                            .build_extract_value(*arr, i as u32, "slice.elem")
+                            .build_extract_value(*arr, i as u32, "slice.prefix")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
                         let sub_match = self.compile_pattern_test(pat, &elem)?;
@@ -280,14 +301,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
                     }
 
-                    // Handle suffix patterns from the end
-                    // This is simplified - real implementation needs length checking
-                    let _suffix_count = suffix.len();
-                    let _slice_present = slice.is_some();
-                    // Phase 2+: Full slice pattern matching requires:
-                    // - Runtime length checking for the array/slice
-                    // - Computing suffix offsets from the end
-                    // - Generating proper failure branches for length mismatches
+                    // Test suffix patterns (indices array_size-suffix_len, ..., array_size-1)
+                    for (i, pat) in suffix.iter().enumerate() {
+                        let suffix_offset = array_size - suffix_len + i as u64;
+                        let elem = self.builder
+                            .build_extract_value(*arr, suffix_offset as u32, "slice.suffix")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                        let sub_match = self.compile_pattern_test(pat, &elem)?;
+                        result = self.builder
+                            .build_and(result, sub_match, "and")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    }
+
+                    // If there's a rest pattern with a binding, we don't need to test it
+                    // (wildcards and bindings always match)
+                    let _ = slice; // Rest pattern doesn't affect the test
                 }
 
                 Ok(result)
@@ -449,24 +478,57 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
             hir::PatternKind::Slice { prefix, slice, suffix } => {
                 if let BasicValueEnum::ArrayValue(arr) = scrutinee {
-                    // Bind prefix patterns
+                    // Get array size from the pattern's type
+                    let array_size = match pattern.ty.kind() {
+                        hir::TypeKind::Array { size, .. } => *size,
+                        _ => {
+                            return Err(vec![Diagnostic::error(
+                                "Expected array type for slice pattern",
+                                pattern.span,
+                            )]);
+                        }
+                    };
+
+                    let suffix_len = suffix.len() as u64;
+
+                    // Bind prefix patterns (indices 0, 1, ..., prefix_len-1)
                     for (i, pat) in prefix.iter().enumerate() {
                         let elem = self.builder
-                            .build_extract_value(*arr, i as u32, "slice.elem")
+                            .build_extract_value(*arr, i as u32, "slice.prefix")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
                         self.compile_pattern_bindings(pat, &elem)?;
                     }
 
                     // Handle slice binding (rest pattern)
+                    // The rest pattern captures the middle portion of the array
+                    // For now, we don't support binding the rest to a variable (only wildcard)
                     if let Some(slice_pat) = slice {
-                        // For now, just bind as-is (simplified)
-                        self.compile_pattern_bindings(slice_pat, scrutinee)?;
+                        // If the rest pattern is a binding, we would need to create a subarray
+                        // This is complex - for now only support wildcard rest patterns
+                        match &slice_pat.kind {
+                            hir::PatternKind::Wildcard => {
+                                // Wildcard rest - nothing to bind
+                            }
+                            hir::PatternKind::Binding { .. } => {
+                                // Binding to rest pattern not yet supported
+                                // Would need to create a slice of the middle elements
+                                return Err(vec![Diagnostic::error(
+                                    "Binding rest patterns ([first, rest @ .., last]) not yet supported",
+                                    pattern.span,
+                                )]);
+                            }
+                            _ => {}
+                        }
                     }
 
-                    // Suffix patterns from end - simplified
-                    let _suffix_len = suffix.len();
-                    // Phase 2+: Full slice pattern bindings require computing
-                    // array length at runtime and indexing from the end
+                    // Bind suffix patterns (indices array_size-suffix_len, ..., array_size-1)
+                    for (i, pat) in suffix.iter().enumerate() {
+                        let suffix_offset = array_size - suffix_len + i as u64;
+                        let elem = self.builder
+                            .build_extract_value(*arr, suffix_offset as u32, "slice.suffix")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        self.compile_pattern_bindings(pat, &elem)?;
+                    }
                 }
                 Ok(())
             }
