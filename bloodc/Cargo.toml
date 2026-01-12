@@ -42,3 +42,7 @@ harness = false
 [[bench]]
 name = "lexer_bench"
 harness = false
+
+[[bench]]
+name = "content_bench"
+harness = false
