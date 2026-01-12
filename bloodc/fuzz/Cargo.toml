@@ -36,3 +36,17 @@ path = "fuzz_targets/fuzz_parser_expr.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_effects"
+path = "fuzz_targets/fuzz_effects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_handler"
+path = "fuzz_targets/fuzz_handler.rs"
+test = false
+doc = false
+bench = false
