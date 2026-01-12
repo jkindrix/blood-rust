@@ -1517,7 +1517,8 @@ fn test_e2e_nested_handle_blocks_parse() {
 #[ignore = "Parser hangs on generic effect parameters - needs investigation"]
 fn test_e2e_effect_polymorphism_parses() {
     // Polymorphic effect - just the effect definition
-    // TODO: Parser appears to hang when parsing generic effect parameters
+    // NOTE(Phase 2+): Parser hangs on generic effect parameters - see ROADMAP.md §6.5
+    // Effect polymorphism is Phase 2 work per ROADMAP.md
     let source = r#"
         effect Error<E> {
             op throw(err: E) -> unit;
