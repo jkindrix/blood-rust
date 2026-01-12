@@ -104,6 +104,10 @@ fn is_exhaustive(
             }
         }
         TypeKind::Never => (true, vec![]),
+        TypeKind::Array { element, size } => {
+            // For fixed-size arrays, check if patterns cover all elements
+            check_array_exhaustiveness(patterns, element, *size)
+        }
         _ => {
             // For other types (integers, strings, etc.), we can't check exhaustiveness
             // without literal patterns, so we require a wildcard
@@ -316,6 +320,91 @@ fn check_tuple_exhaustiveness(
     }
 
     (true, vec![])
+}
+
+/// Check array exhaustiveness.
+fn check_array_exhaustiveness(
+    patterns: &[&Pattern],
+    element_type: &Type,
+    size: u64,
+) -> (bool, Vec<String>) {
+    // For arrays, we check if the patterns cover all elements
+    // An array pattern [a, b, c] matching [T; 3] is exhaustive if all element
+    // patterns are irrefutable (wildcards or bindings)
+
+    // First check for wildcard/binding that covers the whole array
+    for pat in patterns {
+        if is_irrefutable(pat) {
+            return (true, vec![]);
+        }
+    }
+
+    // Extract slice patterns that could match this array
+    let slice_patterns: Vec<_> = patterns
+        .iter()
+        .filter_map(|p| {
+            if let PatternKind::Slice { prefix, slice, suffix } = &p.kind {
+                Some((prefix.as_slice(), slice.as_ref(), suffix.as_slice()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if slice_patterns.is_empty() {
+        // No slice patterns at all - not exhaustive unless there's a wildcard (checked above)
+        return (false, vec!["[_, _, ...]".to_string()]);
+    }
+
+    // For each slice pattern, check if it can cover the entire array
+    for (prefix, slice, suffix) in &slice_patterns {
+        // Pattern [p0, p1, .., sN-1, sN] matching [T; N]
+        let pattern_min_len = prefix.len() + suffix.len();
+
+        // Check if this pattern can match an array of size `size`
+        if slice.is_some() {
+            // Has a rest pattern (..) - can match any array with at least pattern_min_len elements
+            if pattern_min_len <= size as usize {
+                // Check if all subpatterns are irrefutable
+                let all_irrefutable = prefix.iter().all(is_irrefutable)
+                    && slice.as_ref().map_or(true, |p| is_irrefutable(p))
+                    && suffix.iter().all(is_irrefutable);
+                if all_irrefutable {
+                    return (true, vec![]);
+                }
+            }
+        } else {
+            // No rest pattern - must match exact size
+            if pattern_min_len == size as usize {
+                // Check if all element patterns are irrefutable
+                let all_irrefutable = prefix.iter().all(is_irrefutable);
+                if all_irrefutable {
+                    return (true, vec![]);
+                }
+            }
+        }
+    }
+
+    // Check element-wise exhaustiveness for patterns that match the exact size
+    for (prefix, slice, _suffix) in &slice_patterns {
+        if slice.is_none() && prefix.len() == size as usize {
+            // This pattern has exact size match - check each position
+            let mut all_positions_exhaustive = true;
+            for pat in prefix.iter() {
+                let (is_exhaustive, _) = is_exhaustive(&[pat], element_type, None);
+                if !is_exhaustive {
+                    all_positions_exhaustive = false;
+                    break;
+                }
+            }
+            if all_positions_exhaustive {
+                return (true, vec![]);
+            }
+        }
+    }
+
+    // Not exhaustive - suggest a wildcard pattern
+    (false, vec!["_".to_string()])
 }
 
 /// Find unreachable arms (arms that can never match).
