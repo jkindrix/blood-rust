@@ -418,10 +418,11 @@ fn find_rust_runtime() -> Option<PathBuf> {
                 }
             }
 
-            // Check in parent target directory
+            // Check in parent target directory - prefer release over debug
             if let Some(target_dir) = exe_dir.parent() {
                 for name in &rust_runtime_names {
-                    for profile in &["debug", "release"] {
+                    // Prefer release runtime for smaller binary size
+                    for profile in &["release", "debug"] {
                         let rust_runtime = target_dir.join(profile).join(name);
                         if rust_runtime.exists() {
                             return Some(rust_runtime);
@@ -837,6 +838,18 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     let (c_runtime, rust_runtime) = find_runtime_paths();
 
     let mut link_cmd = std::process::Command::new("cc");
+
+    // Strip debug symbols and enable dead code elimination for smaller binaries
+    #[cfg(target_os = "linux")]
+    {
+        link_cmd.arg("-s"); // Strip symbols
+        link_cmd.arg("-Wl,--gc-sections"); // Remove unused sections
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        link_cmd.arg("-Wl,-dead_strip"); // macOS equivalent of gc-sections
+    }
 
     // Add all per-definition object files
     for obj_file in &object_files {
