@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast;
+use crate::effects::{infer_effects, verify_effects_subset, EffectRow, EffectRef as EffectsEffectRef};
 use crate::hir::{self, DefId, LocalId, Type, TypeKind, TyVarId};
 use crate::diagnostics::Diagnostic;
 use crate::span::Span;
@@ -10,6 +11,7 @@ use crate::span::Span;
 use super::TypeContext;
 use super::super::error::{TypeError, TypeErrorKind};
 use super::super::resolve::ScopeKind;
+use super::EffectRef;
 
 impl<'a> TypeContext<'a> {
     /// Type-check all queued bodies.
@@ -195,8 +197,11 @@ impl<'a> TypeContext<'a> {
             span: body.span,
         };
 
-        self.bodies.insert(body_id, hir_body);
+        self.bodies.insert(body_id, hir_body.clone());
         self.fn_bodies.insert(def_id, body_id);
+
+        // Effect inference and verification
+        self.infer_and_verify_effects(def_id, &hir_body, body.span)?;
 
         // Clean up
         self.return_type = None;
@@ -542,5 +547,79 @@ impl<'a> TypeContext<'a> {
         }
 
         Ok(())
+    }
+
+    /// Infer effects from a function body and verify against declared effects.
+    ///
+    /// If the function has no explicit effect annotation, the inferred effects
+    /// are stored as the function's effect signature. If the function has an
+    /// explicit annotation, the inferred effects are verified to be a subset
+    /// of the declared effects.
+    pub(crate) fn infer_and_verify_effects(
+        &mut self,
+        def_id: DefId,
+        body: &hir::Body,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        // Infer effects from the function body
+        let inferred_row = infer_effects(body);
+
+        // Check if the function has declared effects
+        let has_declared_effects = self.fn_effects.contains_key(&def_id);
+
+        if has_declared_effects {
+            // Build declared effect row from fn_effects
+            let declared_effects = self.fn_effects.get(&def_id).cloned().unwrap_or_default();
+            let declared_row = self.build_effect_row_from_refs(&declared_effects);
+
+            // Verify inferred effects are a subset of declared effects
+            if let Err(undeclared) = verify_effects_subset(&inferred_row, &declared_row) {
+                // Convert the undeclared effects to a readable error
+                let effect_names: Vec<String> = undeclared
+                    .iter()
+                    .map(|e| {
+                        self.effect_defs
+                            .get(&e.def_id)
+                            .map(|info| info.name.clone())
+                            .unwrap_or_else(|| format!("effect#{}", e.def_id.index()))
+                    })
+                    .collect();
+
+                return Err(TypeError::new(
+                    TypeErrorKind::UndeclaredEffects {
+                        effects: effect_names,
+                    },
+                    span,
+                ));
+            }
+        } else {
+            // No declared effects - use inferred effects as the function's effect signature
+            // Convert EffectRow to Vec<EffectRef> for storage
+            let effect_refs: Vec<EffectRef> = inferred_row
+                .effects()
+                .map(|e| EffectRef {
+                    def_id: e.def_id,
+                    type_args: e.type_args.clone(),
+                })
+                .collect();
+
+            if !effect_refs.is_empty() {
+                self.fn_effects.insert(def_id, effect_refs);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Build an EffectRow from a list of EffectRef.
+    fn build_effect_row_from_refs(&self, refs: &[EffectRef]) -> EffectRow {
+        let mut row = EffectRow::pure();
+        for effect_ref in refs {
+            row.add_effect(EffectsEffectRef::with_args(
+                effect_ref.def_id,
+                effect_ref.type_args.clone(),
+            ));
+        }
+        row
     }
 }

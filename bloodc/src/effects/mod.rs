@@ -51,6 +51,7 @@
 //! - [`evidence`] - Evidence vectors and evidence passing
 //! - [`handler`] - Handler compilation and continuation capture
 //! - [`lowering`] - HIR to effect-free translation
+//! - [`infer`] - Effect inference for automatic effect signatures
 //! - [`std_effects`] - Standard effects (State, Error, IO)
 //!
 //! ## Implementation Status
@@ -66,6 +67,7 @@
 
 pub mod evidence;
 pub mod handler;
+pub mod infer;
 pub mod lowering;
 pub mod row;
 pub mod std_effects;
@@ -73,5 +75,6 @@ pub mod std_effects;
 pub use evidence::{Evidence, EvidenceVector, EvidenceEntry, EvidenceContext, TranslatedOp};
 pub use handler::{Handler, HandlerKind, Continuation, ResumeMode};
 pub use handler::{analyze_tail_resumptive, analyze_handler_tail_resumptive, analyze_resume_mode};
+pub use infer::{EffectInferencer, DetailedEffectInferencer, InferenceResult, infer_effects, verify_effects_subset};
 pub use lowering::{EffectLowering, EffectInfo, OperationInfo, EvidenceRequirement, HandlerInfo};
 pub use row::{EffectRow, RowVar, EffectRef};

@@ -203,6 +203,13 @@ impl TypeError {
                 "E0307",
                 format!("invalid effect type syntax: expected a named effect like `State<T>`, found {found}"),
             ),
+            TypeErrorKind::UndeclaredEffects { effects } => (
+                "E0308",
+                format!(
+                    "function performs undeclared effects: {}",
+                    effects.join(", ")
+                ),
+            ),
 
             // Ownership errors (E04xx)
             TypeErrorKind::MutableBorrow { reason } => (
@@ -407,6 +414,10 @@ pub enum TypeErrorKind {
     /// Invalid effect type syntax (expected a named effect like `State<T>`).
     InvalidEffectType {
         found: String,
+    },
+    /// Function performs effects that were not declared in its signature.
+    UndeclaredEffects {
+        effects: Vec<String>,
     },
     /// Trait not found.
     TraitNotFound {
