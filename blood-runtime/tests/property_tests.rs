@@ -7,7 +7,7 @@ use proptest::prelude::*;
 
 /// Strategy for generating valid generations (non-zero, non-reserved)
 fn valid_generation() -> impl Strategy<Value = Generation> {
-    (generation::FIRST..generation::OVERFLOW_GUARD)
+    generation::FIRST..generation::OVERFLOW_GUARD
 }
 
 /// Strategy for generating valid addresses (page-aligned, non-null)

@@ -898,8 +898,7 @@ pub mod linux {
             let mut completions = Vec::new();
             let mut pending = self.pending.lock();
 
-            for i in 0..nfds {
-                let event = &events[i];
+            for event in events.iter().take(nfds) {
                 let op_id = IoOpId(event.u64);
                 let revents = event.events;
 
@@ -1534,6 +1533,7 @@ pub mod windows {
 /// - macOS: kqueue, else blocking
 /// - Windows: IOCP, else blocking
 /// - Other: blocking
+#[allow(clippy::needless_return)]
 pub fn create_native_driver() -> Box<dyn IoDriver> {
     #[cfg(target_os = "linux")]
     {

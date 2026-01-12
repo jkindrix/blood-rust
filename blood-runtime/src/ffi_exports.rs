@@ -168,7 +168,7 @@ pub unsafe extern "C" fn blood_alloc_or_abort(
     out_generation: *mut u32,
 ) -> u64 {
     if out_generation.is_null() {
-        blood_panic(b"blood_alloc_or_abort: null out_generation pointer\0".as_ptr() as *const i8);
+        blood_panic(c"blood_alloc_or_abort: null out_generation pointer".as_ptr());
     }
 
     // Use 16-byte alignment for BloodPtr compatibility
@@ -176,13 +176,13 @@ pub unsafe extern "C" fn blood_alloc_or_abort(
     let layout = match std::alloc::Layout::from_size_align(size, align) {
         Ok(l) => l,
         Err(_) => {
-            blood_panic(b"blood_alloc_or_abort: invalid layout\0".as_ptr() as *const i8);
+            blood_panic(c"blood_alloc_or_abort: invalid layout".as_ptr());
         }
     };
 
     let ptr = std::alloc::alloc(layout);
     if ptr.is_null() {
-        blood_panic(b"blood_alloc_or_abort: out of memory\0".as_ptr() as *const i8);
+        blood_panic(c"blood_alloc_or_abort: out of memory".as_ptr());
     }
 
     let address = ptr as u64;
@@ -1752,6 +1752,12 @@ pub extern "C" fn blood_stale_reference_panic(expected: u32, actual: u32) -> ! {
 /// # Arguments
 /// * `snapshot` - The snapshot that was validated
 /// * `stale_index` - The 1-based index of the first stale entry (from blood_snapshot_validate)
+///
+/// # Safety
+/// - `snapshot` must be a valid pointer to a `GenerationSnapshot` created by
+///   `blood_snapshot_capture`, or null.
+/// - If not null, `snapshot` must not be concurrently modified or freed.
+/// - `stale_index` should be a positive value returned from `blood_snapshot_validate`.
 #[no_mangle]
 pub unsafe extern "C" fn blood_snapshot_stale_panic(snapshot: SnapshotHandle, stale_index: i64) -> ! {
     if !snapshot.is_null() && stale_index > 0 {

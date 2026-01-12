@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  LLVM_VERSION: "17"
+
+jobs:
+  # Fast checks that don't need LLVM
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (blood-runtime)
+        run: cargo clippy -p blood-runtime -- -D warnings
+
+      - name: Clippy (blood-std)
+        run: cargo clippy -p blood-std -- -D warnings
+
+  # Tests that need LLVM
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # Windows excluded for now - LLVM setup is complex
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.LLVM_VERSION }}
+          echo "LLVM_SYS_170_PREFIX=/usr/lib/llvm-${{ env.LLVM_VERSION }}" >> $GITHUB_ENV
+
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@${{ env.LLVM_VERSION }}
+          echo "LLVM_SYS_170_PREFIX=$(brew --prefix llvm@${{ env.LLVM_VERSION }})" >> $GITHUB_ENV
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Run tests (blood-runtime)
+        run: cargo test -p blood-runtime
+
+      - name: Run tests (blood-std)
+        run: cargo test -p blood-std
+
+      - name: Run tests (bloodc)
+        run: cargo test -p bloodc
+
+      - name: Run integration tests
+        run: cargo test --test example_files --test pipeline_integration
+
+  # Property-based tests (longer running)
+  property-tests:
+    name: Property Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run property tests
+        run: cargo test -p blood-runtime --test property_tests -- --test-threads=1
+        env:
+          PROPTEST_CASES: 256
+
+  # Benchmarks (compile only, don't run)
+  bench-check:
+    name: Benchmark Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check benchmarks compile
+        run: cargo build -p blood-runtime --benches
