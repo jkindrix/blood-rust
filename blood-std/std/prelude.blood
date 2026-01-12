@@ -34,7 +34,7 @@ pub use iter::{Iterator, IntoIterator};
 pub use iter::{FromIterator, Extend};
 
 // Re-export core effects
-pub use effects::{Error, State, IO, Async};
+pub use effects::{Error, State, IO, Async, Fiber};
 pub use effects::{Panic, StaleReference};
 
 // Re-export operator traits
