@@ -69,6 +69,9 @@ pub enum UcmError {
     #[error("Hash not found: {0}")]
     HashNotFound(String),
 
+    #[error("Ambiguous hash prefix '{prefix}' matches {count} definitions")]
+    AmbiguousHash { prefix: String, count: usize },
+
     #[error("Parse error: {0}")]
     ParseError(String),
 

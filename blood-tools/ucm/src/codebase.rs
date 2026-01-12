@@ -251,6 +251,69 @@ impl Codebase {
             DefRef::Hash(h) => Ok(h.clone()),
         }
     }
+
+    /// Finds definitions by hash prefix.
+    ///
+    /// Given a short hash prefix (e.g., "a7f2"), returns all definitions
+    /// whose full hash starts with that prefix. This allows users to reference
+    /// definitions without typing the full 64-character hash.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(vec![info])` if exactly one match is found
+    /// - `Ok(vec![info1, info2, ...])` if multiple matches are found
+    /// - `Ok(vec![])` if no matches are found
+    pub fn find_by_hash_prefix(&self, prefix: &str) -> UcmResult<Vec<DefInfo>> {
+        let hashes = self.storage.find_by_hash_prefix(prefix)?;
+
+        let mut results = Vec::new();
+        for hash in hashes {
+            if let Some((kind, source)) = self.storage.get_definition(&hash)? {
+                let names = self.storage.names_for_hash(&hash)?;
+                let dependencies = self.storage.get_dependencies(&hash)?;
+                let dependents = self.storage.get_dependents(&hash)?;
+
+                results.push(DefInfo {
+                    hash,
+                    kind,
+                    names,
+                    source,
+                    dependencies,
+                    dependents,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Resolves a hash prefix to a single hash.
+    ///
+    /// Returns `Ok(Some(hash))` if exactly one definition matches the prefix.
+    /// Returns `Err(UcmError::AmbiguousHash)` if multiple definitions match.
+    /// Returns `Ok(None)` if no definitions match.
+    pub fn resolve_hash_prefix(&self, prefix: &str) -> UcmResult<Option<Hash>> {
+        let hashes = self.storage.find_by_hash_prefix(prefix)?;
+
+        match hashes.len() {
+            0 => Ok(None),
+            1 => Ok(Some(hashes.into_iter().next().unwrap())),
+            n => Err(UcmError::AmbiguousHash {
+                prefix: prefix.to_string(),
+                count: n,
+            }),
+        }
+    }
+
+    /// Lists all definitions (without requiring names).
+    pub fn list_definitions(&self) -> UcmResult<Vec<(Hash, DefKind)>> {
+        Ok(self.storage.list_definitions()?)
+    }
+
+    /// Checks if a definition exists by hash.
+    pub fn has_definition(&self, hash: &Hash) -> UcmResult<bool> {
+        Ok(self.storage.has_definition(hash)?)
+    }
 }
 
 #[cfg(test)]
@@ -307,5 +370,124 @@ mod tests {
 
         assert!(codebase.resolve(&Name::new("old.name")).unwrap().is_none());
         assert_eq!(codebase.resolve(&Name::new("new.name")).unwrap(), Some(hash));
+    }
+
+    #[test]
+    fn test_find_by_hash_prefix() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let mut codebase = Codebase::create(&path, "test").unwrap();
+
+        // Add a definition
+        let source = "fn add(a: i32, b: i32) -> i32 { a + b }";
+        let hash = codebase.add_term(source).unwrap();
+        codebase.add_name(Name::new("math.add"), hash.clone()).unwrap();
+
+        // Get the first 4 characters of the hash
+        let full_hash = hash.to_hex();
+        let prefix = &full_hash[..4];
+
+        // Find by prefix
+        let results = codebase.find_by_hash_prefix(prefix).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].hash, hash);
+        assert_eq!(results[0].source, source);
+    }
+
+    #[test]
+    fn test_resolve_hash_prefix_unique() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let mut codebase = Codebase::create(&path, "test").unwrap();
+
+        let source = "fn sub(a: i32, b: i32) -> i32 { a - b }";
+        let hash = codebase.add_term(source).unwrap();
+
+        let prefix = &hash.to_hex()[..8];
+        let resolved = codebase.resolve_hash_prefix(prefix).unwrap();
+        assert_eq!(resolved, Some(hash));
+    }
+
+    #[test]
+    fn test_resolve_hash_prefix_not_found() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let codebase = Codebase::create(&path, "test").unwrap();
+
+        // This prefix should not exist
+        let resolved = codebase.resolve_hash_prefix("ffffffff").unwrap();
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_list_definitions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let mut codebase = Codebase::create(&path, "test").unwrap();
+
+        let source1 = "fn one() -> i32 { 1 }";
+        let source2 = "fn two() -> i32 { 2 }";
+        let hash1 = codebase.add_term(source1).unwrap();
+        let hash2 = codebase.add_term(source2).unwrap();
+
+        let defs = codebase.list_definitions().unwrap();
+        assert_eq!(defs.len(), 2);
+
+        let hashes: Vec<_> = defs.iter().map(|(h, _)| h.clone()).collect();
+        assert!(hashes.contains(&hash1));
+        assert!(hashes.contains(&hash2));
+    }
+
+    #[test]
+    fn test_has_definition() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let mut codebase = Codebase::create(&path, "test").unwrap();
+
+        let source = "fn exists() {}";
+        let hash = codebase.add_term(source).unwrap();
+
+        assert!(codebase.has_definition(&hash).unwrap());
+
+        // Non-existent hash
+        let fake_hash = crate::hash::Hash::of_str("nonexistent");
+        assert!(!codebase.has_definition(&fake_hash).unwrap());
+    }
+
+    #[test]
+    fn test_find_by_hash_direct() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let mut codebase = Codebase::create(&path, "test").unwrap();
+
+        let source = "fn direct() -> bool { true }";
+        let hash = codebase.add_term(source).unwrap();
+
+        // Find by full hash (no name assigned)
+        let info = codebase.find(&DefRef::Hash(hash.clone())).unwrap().unwrap();
+        assert_eq!(info.hash, hash);
+        assert_eq!(info.source, source);
+        assert!(info.names.is_empty()); // No name assigned
+    }
+
+    #[test]
+    fn test_content_hash_determinism() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test-codebase");
+
+        let mut codebase = Codebase::create(&path, "test").unwrap();
+
+        // Adding the same source twice should produce the same hash
+        let source = "fn deterministic() -> i32 { 42 }";
+        let hash1 = codebase.add_term(source).unwrap();
+        let hash2 = codebase.add_term(source).unwrap();
+
+        assert_eq!(hash1, hash2, "Same source should produce same hash");
     }
 }

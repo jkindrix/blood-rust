@@ -180,25 +180,59 @@ fn cmd_add(path: &PathBuf, name: &str, file: &PathBuf) -> Result<()> {
 fn cmd_find(path: &PathBuf, query: &str) -> Result<()> {
     let codebase = Codebase::open(path)?;
 
-    let def_ref = if query.starts_with('#') {
-        DefRef::hash(query[1..].parse().context("Invalid hash")?)
-    } else {
-        DefRef::name(query)
-    };
+    if query.starts_with('#') {
+        // Hash query - try prefix lookup first
+        let hash_str = &query[1..];
 
-    match codebase.find(&def_ref)? {
-        Some(info) => {
-            println!("Hash: {}", info.hash);
-            println!("Kind: {}", info.kind.as_str());
-            println!("Names: {}", info.names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
-            println!("Dependencies: {}", info.dependencies.len());
-            println!("Dependents: {}", info.dependents.len());
+        // Try to find by prefix (allows short hashes like #a7f2)
+        let matches = codebase.find_by_hash_prefix(hash_str)?;
+
+        match matches.len() {
+            0 => {
+                println!("Not found: {}", query);
+            }
+            1 => {
+                let info = &matches[0];
+                print_def_info(info);
+            }
+            n => {
+                println!("Ambiguous hash prefix '{}' matches {} definitions:", hash_str, n);
+                for info in &matches {
+                    let names_str = if info.names.is_empty() {
+                        "(unnamed)".to_string()
+                    } else {
+                        info.names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+                    };
+                    println!("  {} ({}) - {}", info.hash, info.kind.as_str(), names_str);
+                }
+                println!("\nUse a longer prefix to disambiguate.");
+            }
         }
-        None => {
-            println!("Not found: {}", query);
+    } else {
+        // Name query
+        match codebase.find(&DefRef::name(query))? {
+            Some(info) => {
+                print_def_info(&info);
+            }
+            None => {
+                println!("Not found: {}", query);
+            }
         }
     }
     Ok(())
+}
+
+fn print_def_info(info: &blood_ucm::DefInfo) {
+    println!("Hash: {}", info.hash);
+    println!("Kind: {}", info.kind.as_str());
+    let names_str = if info.names.is_empty() {
+        "(unnamed)".to_string()
+    } else {
+        info.names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")
+    };
+    println!("Names: {}", names_str);
+    println!("Dependencies: {}", info.dependencies.len());
+    println!("Dependents: {}", info.dependents.len());
 }
 
 fn cmd_list(path: &PathBuf, prefix: Option<&str>) -> Result<()> {

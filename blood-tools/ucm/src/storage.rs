@@ -363,4 +363,79 @@ impl Storage {
             .query_row("SELECT COUNT(*) FROM names", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    /// Finds definitions by hash prefix.
+    ///
+    /// The prefix is a hex string (without the '#' prefix). Returns all hashes
+    /// that start with the given prefix.
+    pub fn find_by_hash_prefix(&self, prefix: &str) -> StorageResult<Vec<Hash>> {
+        // Validate the prefix is valid hex
+        if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(Vec::new());
+        }
+
+        // Query all hashes and filter by prefix
+        // Note: For a production system with many entries, we would use a more
+        // efficient index. For now, we scan all hashes.
+        let mut stmt = self.conn.prepare("SELECT hash FROM definitions")?;
+
+        let mut results = Vec::new();
+        let prefix_lower = prefix.to_lowercase();
+
+        let rows = stmt.query_map([], |row| {
+            let bytes: Vec<u8> = row.get(0)?;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(Hash::from_bytes(arr))
+        })?;
+
+        for row in rows {
+            let hash = row?;
+            let hash_hex = hash.to_hex();
+            if hash_hex.starts_with(&prefix_lower) {
+                results.push(hash);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Checks if a hash exists in the definitions table.
+    pub fn has_definition(&self, hash: &Hash) -> StorageResult<bool> {
+        let result: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM definitions WHERE hash = ?1",
+            params![hash.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        Ok(result > 0)
+    }
+
+    /// Lists all definitions with their kind.
+    pub fn list_definitions(&self) -> StorageResult<Vec<(Hash, DefKind)>> {
+        let mut stmt = self.conn.prepare("SELECT hash, kind FROM definitions ORDER BY created_at DESC")?;
+
+        let mut results = Vec::new();
+        let rows = stmt.query_map([], |row| {
+            let bytes: Vec<u8> = row.get(0)?;
+            let kind_str: String = row.get(1)?;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            let kind = match kind_str.as_str() {
+                "term" => DefKind::Term,
+                "type" => DefKind::Type,
+                "effect" => DefKind::Effect,
+                "handler" => DefKind::Handler,
+                "test" => DefKind::Test,
+                "doc" => DefKind::Doc,
+                _ => DefKind::Term,
+            };
+            Ok((Hash::from_bytes(arr), kind))
+        })?;
+
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
+    }
 }
