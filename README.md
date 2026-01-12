@@ -14,7 +14,7 @@ Blood synthesizes five cutting-edge programming language innovations:
 
 > **Version: 0.5.0**
 
-Core compiler is complete and tested. Programs compile and run with full type checking, effect tracking, and generational memory safety. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for detailed component status.
+Core compiler is complete and tested. Programs compile and run with full type checking, effect tracking, and generational memory safety. See [IMPLEMENTATION_STATUS.md](docs/spec/IMPLEMENTATION_STATUS.md) for detailed component status.
 
 | Component | Status | Details |
 |-----------|--------|---------|
@@ -29,7 +29,7 @@ Core compiler is complete and tested. Programs compile and run with full type ch
 
 **Legend**: ✅ = Implemented and integrated
 
-**[Getting Started](GETTING_STARTED.md)** | [Specification](SPECIFICATION.md) | [Implementation Status](IMPLEMENTATION_STATUS.md)
+**[Getting Started](docs/spec/GETTING_STARTED.md)** | [Specification](docs/spec/SPECIFICATION.md) | [Implementation Status](docs/spec/IMPLEMENTATION_STATUS.md)
 
 ## The Name
 
@@ -79,7 +79,7 @@ cargo build --release
 cargo run -- run examples/fizzbuzz.blood
 ```
 
-See **[GETTING_STARTED.md](GETTING_STARTED.md)** for the full tutorial.
+See **[GETTING_STARTED.md](docs/spec/GETTING_STARTED.md)** for the full tutorial.
 
 ## Documentation
 
@@ -87,31 +87,31 @@ See **[GETTING_STARTED.md](GETTING_STARTED.md)** for the full tutorial.
 
 | Document | Description |
 |----------|-------------|
-| [SPECIFICATION.md](./SPECIFICATION.md) | Core language specification |
-| [MEMORY_MODEL.md](./MEMORY_MODEL.md) | Synthetic Safety Model (generational references) |
-| [DISPATCH.md](./DISPATCH.md) | Multiple dispatch and type stability |
-| [GRAMMAR.md](./GRAMMAR.md) | Complete surface syntax grammar |
-| [FORMAL_SEMANTICS.md](./FORMAL_SEMANTICS.md) | Operational semantics and type rules |
+| [SPECIFICATION.md](docs/spec/SPECIFICATION.md) | Core language specification |
+| [MEMORY_MODEL.md](docs/spec/MEMORY_MODEL.md) | Synthetic Safety Model (generational references) |
+| [DISPATCH.md](docs/spec/DISPATCH.md) | Multiple dispatch and type stability |
+| [GRAMMAR.md](docs/spec/GRAMMAR.md) | Complete surface syntax grammar |
+| [FORMAL_SEMANTICS.md](docs/spec/FORMAL_SEMANTICS.md) | Operational semantics and type rules |
 
 ### System Specifications
 
 | Document | Description |
 |----------|-------------|
-| [CONTENT_ADDRESSED.md](./CONTENT_ADDRESSED.md) | Content-addressed storage and VFT |
-| [CONCURRENCY.md](./CONCURRENCY.md) | Fiber model and scheduler |
-| [FFI.md](./FFI.md) | Foreign function interface |
-| [STDLIB.md](./STDLIB.md) | Standard library design |
-| [DIAGNOSTICS.md](./DIAGNOSTICS.md) | Error messages and diagnostics |
-| [UCM.md](./UCM.md) | Codebase Manager (tooling) |
+| [CONTENT_ADDRESSED.md](docs/spec/CONTENT_ADDRESSED.md) | Content-addressed storage and VFT |
+| [CONCURRENCY.md](docs/spec/CONCURRENCY.md) | Fiber model and scheduler |
+| [FFI.md](docs/spec/FFI.md) | Foreign function interface |
+| [STDLIB.md](docs/spec/STDLIB.md) | Standard library design |
+| [DIAGNOSTICS.md](docs/spec/DIAGNOSTICS.md) | Error messages and diagnostics |
+| [UCM.md](docs/spec/UCM.md) | Codebase Manager (tooling) |
 
 ### Planning & Status
 
 | Document | Description |
 |----------|-------------|
-| [GETTING_STARTED.md](./GETTING_STARTED.md) | Tutorial and quick start guide |
-| [ROADMAP.md](./ROADMAP.md) | Implementation plan and milestones |
-| [DECISIONS.md](./DECISIONS.md) | Architecture decision records |
-| [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md) | Detailed implementation audit |
+| [GETTING_STARTED.md](docs/spec/GETTING_STARTED.md) | Tutorial and quick start guide |
+| [ROADMAP.md](docs/spec/ROADMAP.md) | Implementation plan and milestones |
+| [DECISIONS.md](docs/spec/DECISIONS.md) | Architecture decision records |
+| [IMPLEMENTATION_STATUS.md](docs/spec/IMPLEMENTATION_STATUS.md) | Detailed implementation audit |
 
 ## License
 
@@ -119,7 +119,7 @@ MIT License
 
 ## Contributing
 
-We welcome contributions! See the [implementation status](IMPLEMENTATION_STATUS.md) for areas that need work.
+We welcome contributions! See the [implementation status](docs/spec/IMPLEMENTATION_STATUS.md) for areas that need work.
 
 - **Bug reports**: Open an issue with reproduction steps
 - **Feature requests**: Open a discussion first
