@@ -694,30 +694,73 @@ impl<'a> TypeContext<'a> {
 
     /// Collect a const declaration.
     ///
-    /// Currently, const items are parsed but not yet fully implemented in codegen.
-    /// This function reports an explicit error rather than silently ignoring the declaration.
+    /// This registers the const item and queues its value expression for type checking.
     pub(crate) fn collect_const(&mut self, const_decl: &ast::ConstDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(const_decl.name.node);
-        Err(TypeError::new(
-            TypeErrorKind::UnsupportedFeature {
-                feature: format!("const item `{}` - const declarations are not yet implemented", name),
-            },
+        let def_id = self.resolver.define_item(
+            name.clone(),
+            hir::DefKind::Const,
             const_decl.span,
-        ))
+        )?;
+
+        // Convert the declared type
+        let ty = self.ast_type_to_hir_type(&const_decl.ty)?;
+
+        // Set the type in def_info so it can be looked up during expression type inference
+        if let Some(def_info) = self.resolver.def_info.get_mut(&def_id) {
+            def_info.ty = Some(ty.clone());
+        }
+
+        // Queue for body type-checking (the value expression)
+        self.pending_consts.push((def_id, const_decl.clone()));
+
+        // Store a placeholder - body_id will be assigned during check_const_body
+        // We use a dummy body_id here that will be replaced
+        let placeholder_body_id = hir::BodyId::new(u32::MAX);
+        self.const_defs.insert(def_id, super::ConstInfo {
+            name,
+            ty,
+            body_id: placeholder_body_id,
+            span: const_decl.span,
+        });
+
+        Ok(())
     }
 
     /// Collect a static declaration.
     ///
-    /// Currently, static items are parsed but not yet fully implemented in codegen.
-    /// This function reports an explicit error rather than silently ignoring the declaration.
+    /// This registers the static item and queues its value expression for type checking.
     pub(crate) fn collect_static(&mut self, static_decl: &ast::StaticDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(static_decl.name.node);
-        Err(TypeError::new(
-            TypeErrorKind::UnsupportedFeature {
-                feature: format!("static item `{}` - static declarations are not yet implemented", name),
-            },
+        let def_id = self.resolver.define_item(
+            name.clone(),
+            hir::DefKind::Static,
             static_decl.span,
-        ))
+        )?;
+
+        // Convert the declared type
+        let ty = self.ast_type_to_hir_type(&static_decl.ty)?;
+
+        // Set the type in def_info so it can be looked up during expression type inference
+        if let Some(def_info) = self.resolver.def_info.get_mut(&def_id) {
+            def_info.ty = Some(ty.clone());
+        }
+
+        // Queue for body type-checking (the value expression)
+        self.pending_statics.push((def_id, static_decl.clone()));
+
+        // Store a placeholder - body_id will be assigned during check_static_body
+        // We use a dummy body_id here that will be replaced
+        let placeholder_body_id = hir::BodyId::new(u32::MAX);
+        self.static_defs.insert(def_id, super::StaticInfo {
+            name,
+            ty,
+            is_mut: static_decl.is_mut,
+            body_id: placeholder_body_id,
+            span: static_decl.span,
+        });
+
+        Ok(())
     }
 
     /// Collect an effect declaration.
@@ -950,6 +993,9 @@ impl<'a> TypeContext<'a> {
         // Convert self type to HIR type
         let self_ty = self.ast_type_to_hir_type(&impl_block.self_ty)?;
 
+        // Set current_impl_self_ty so that `Self` can be resolved in method signatures
+        self.current_impl_self_ty = Some(self_ty.clone());
+
         // Check if this is a trait impl and resolve the trait (if any)
         let trait_ref = if let Some(ref trait_ty) = impl_block.trait_ty {
             // For now, only support simple trait paths
@@ -1149,6 +1195,9 @@ impl<'a> TypeContext<'a> {
             assoc_consts,
             span: impl_block.span,
         });
+
+        // Clear current_impl_self_ty now that we're done with this impl block
+        self.current_impl_self_ty = None;
 
         Ok(())
     }

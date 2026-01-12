@@ -23,7 +23,23 @@ impl<'a> TypeContext<'a> {
         // Phase 2: Validate FFI types in bridge blocks
         self.validate_ffi_types();
 
-        // Type-check function bodies
+        // Phase 3: Type-check const item initializers
+        let pending_consts = std::mem::take(&mut self.pending_consts);
+        for (def_id, const_decl) in pending_consts {
+            if let Err(e) = self.check_const_body(def_id, &const_decl) {
+                self.errors.push(e);
+            }
+        }
+
+        // Phase 4: Type-check static item initializers
+        let pending_statics = std::mem::take(&mut self.pending_statics);
+        for (def_id, static_decl) in pending_statics {
+            if let Err(e) = self.check_static_body(def_id, &static_decl) {
+                self.errors.push(e);
+            }
+        }
+
+        // Phase 5: Type-check function bodies
         let pending = std::mem::take(&mut self.pending_bodies);
         for (def_id, func) in pending {
             if let Err(e) = self.check_function_body(def_id, &func) {
@@ -31,7 +47,7 @@ impl<'a> TypeContext<'a> {
             }
         }
 
-        // Phase 3: Type-check handler operation bodies
+        // Phase 6: Type-check handler operation bodies
         let pending_handlers = std::mem::take(&mut self.pending_handlers);
         for (def_id, handler) in pending_handlers {
             if let Err(e) = self.check_handler_body(def_id, &handler) {
@@ -42,6 +58,140 @@ impl<'a> TypeContext<'a> {
         if !self.errors.is_empty() {
             return Err(self.errors.iter().map(|e| e.to_diagnostic()).collect());
         }
+
+        Ok(())
+    }
+
+    /// Type-check a const item's initializer expression.
+    ///
+    /// Const items must have a value that can be evaluated at compile time.
+    /// For now, we type-check the expression and store it as a body.
+    pub(crate) fn check_const_body(&mut self, def_id: DefId, const_decl: &ast::ConstDecl) -> Result<(), TypeError> {
+        // Get the declared type from const_defs
+        let const_info = self.const_defs.get(&def_id).cloned()
+            .ok_or_else(|| TypeError::new(
+                TypeErrorKind::NotFound { name: format!("const info for {def_id}") },
+                const_decl.span,
+            ))?;
+
+        let expected_ty = const_info.ty.clone();
+
+        // Set up a minimal scope for the initializer expression
+        self.resolver.push_scope(ScopeKind::Block, const_decl.span);
+        self.resolver.reset_local_ids();
+        let _ = self.resolver.next_local_id(); // Skip LocalId(0) for return place
+        self.locals.clear();
+
+        // Add return place for the const value
+        self.locals.push(hir::Local {
+            id: LocalId::RETURN_PLACE,
+            ty: expected_ty.clone(),
+            mutable: false,
+            name: None,
+            span: const_decl.span,
+        });
+
+        // Type-check the value expression with the expected type
+        let value_expr = self.check_expr(&const_decl.value, &expected_ty)?;
+        let value_ty = value_expr.ty.clone();
+
+        // Unify with the declared type
+        self.unifier.unify(&expected_ty, &value_ty, const_decl.value.span)
+            .map_err(|_| TypeError::new(
+                TypeErrorKind::Mismatch {
+                    expected: expected_ty.clone(),
+                    found: value_ty.clone(),
+                },
+                const_decl.value.span,
+            ))?;
+
+        // Create body for the const initializer
+        let body_id = hir::BodyId::new(self.next_body_id);
+        self.next_body_id += 1;
+
+        let hir_body = hir::Body {
+            locals: std::mem::take(&mut self.locals),
+            param_count: 0, // Consts have no parameters
+            expr: value_expr,
+            span: const_decl.span,
+        };
+
+        self.bodies.insert(body_id, hir_body);
+
+        // Update the const_defs entry with the actual body_id
+        if let Some(const_info) = self.const_defs.get_mut(&def_id) {
+            const_info.body_id = body_id;
+        }
+
+        // Clean up
+        self.resolver.pop_scope();
+
+        Ok(())
+    }
+
+    /// Type-check a static item's initializer expression.
+    ///
+    /// Static items have an initializer that runs at program startup.
+    /// The value does not need to be const-evaluable (unlike const items).
+    pub(crate) fn check_static_body(&mut self, def_id: DefId, static_decl: &ast::StaticDecl) -> Result<(), TypeError> {
+        // Get the declared type from static_defs
+        let static_info = self.static_defs.get(&def_id).cloned()
+            .ok_or_else(|| TypeError::new(
+                TypeErrorKind::NotFound { name: format!("static info for {def_id}") },
+                static_decl.span,
+            ))?;
+
+        let expected_ty = static_info.ty.clone();
+
+        // Set up a minimal scope for the initializer expression
+        self.resolver.push_scope(ScopeKind::Block, static_decl.span);
+        self.resolver.reset_local_ids();
+        let _ = self.resolver.next_local_id(); // Skip LocalId(0) for return place
+        self.locals.clear();
+
+        // Add return place for the static value
+        self.locals.push(hir::Local {
+            id: LocalId::RETURN_PLACE,
+            ty: expected_ty.clone(),
+            mutable: static_info.is_mut,
+            name: None,
+            span: static_decl.span,
+        });
+
+        // Type-check the value expression with the expected type
+        let value_expr = self.check_expr(&static_decl.value, &expected_ty)?;
+        let value_ty = value_expr.ty.clone();
+
+        // Unify with the declared type
+        self.unifier.unify(&expected_ty, &value_ty, static_decl.value.span)
+            .map_err(|_| TypeError::new(
+                TypeErrorKind::Mismatch {
+                    expected: expected_ty.clone(),
+                    found: value_ty.clone(),
+                },
+                static_decl.value.span,
+            ))?;
+
+        // Create body for the static initializer
+        let body_id = hir::BodyId::new(self.next_body_id);
+        self.next_body_id += 1;
+
+        let hir_body = hir::Body {
+            locals: std::mem::take(&mut self.locals),
+            param_count: 0, // Statics have no parameters
+            expr: value_expr,
+            span: static_decl.span,
+        };
+
+        self.bodies.insert(body_id, hir_body);
+
+        // Update the static_defs entry with the actual body_id
+        if let Some(static_info) = self.static_defs.get_mut(&def_id) {
+            static_info.body_id = body_id;
+        }
+
+        // Clean up
+        self.resolver.pop_scope();
 
         Ok(())
     }

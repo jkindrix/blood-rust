@@ -44,6 +44,14 @@ pub struct TypeContext<'a> {
     pub(crate) enum_defs: HashMap<DefId, EnumInfo>,
     /// Type alias definitions.
     pub(crate) type_aliases: HashMap<DefId, TypeAliasInfo>,
+    /// Const definitions.
+    pub(crate) const_defs: HashMap<DefId, ConstInfo>,
+    /// Static definitions.
+    pub(crate) static_defs: HashMap<DefId, StaticInfo>,
+    /// Const items to type-check (includes full declaration for the value expression).
+    pub(crate) pending_consts: Vec<(DefId, ast::ConstDecl)>,
+    /// Static items to type-check (includes full declaration for the value expression).
+    pub(crate) pending_statics: Vec<(DefId, ast::StaticDecl)>,
     /// Functions to type-check (includes full declaration for parameter names).
     pub(crate) pending_bodies: Vec<(DefId, ast::FnDecl)>,
     /// The current function's return type.
@@ -102,6 +110,9 @@ pub struct TypeContext<'a> {
     pub(crate) current_resume_type: Option<Type>,
     /// FFI bridge block definitions.
     pub(crate) bridge_defs: Vec<BridgeInfo>,
+    /// Current impl block's Self type during collection phase.
+    /// Set when collecting impl block method signatures so `Self` can be resolved.
+    pub(crate) current_impl_self_ty: Option<Type>,
 }
 
 /// Information about a struct.
@@ -134,6 +145,34 @@ pub struct TypeAliasInfo {
     pub name: String,
     pub ty: Type,
     pub generics: Vec<TyVarId>,
+}
+
+/// Information about a const item.
+#[derive(Debug, Clone)]
+pub struct ConstInfo {
+    /// The name of the constant.
+    pub name: String,
+    /// The type of the constant.
+    pub ty: Type,
+    /// The body ID containing the initializer expression.
+    pub body_id: hir::BodyId,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Information about a static item.
+#[derive(Debug, Clone)]
+pub struct StaticInfo {
+    /// The name of the static.
+    pub name: String,
+    /// The type of the static.
+    pub ty: Type,
+    /// Whether this is a mutable static.
+    pub is_mut: bool,
+    /// The body ID containing the initializer expression.
+    pub body_id: hir::BodyId,
+    /// Source span.
+    pub span: Span,
 }
 
 /// Information about a variant.
@@ -495,6 +534,10 @@ impl<'a> TypeContext<'a> {
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             type_aliases: HashMap::new(),
+            const_defs: HashMap::new(),
+            static_defs: HashMap::new(),
+            pending_consts: Vec::new(),
+            pending_statics: Vec::new(),
             pending_bodies: Vec::new(),
             return_type: None,
             current_fn: None,
@@ -521,6 +564,7 @@ impl<'a> TypeContext<'a> {
             type_param_bounds: HashMap::new(),
             current_resume_type: None,
             bridge_defs: Vec::new(),
+            current_impl_self_ty: None,
         };
         ctx.register_builtins();
         ctx
@@ -682,27 +726,27 @@ impl<'a> TypeContext<'a> {
                     }
                 }
                 hir::DefKind::Const => {
-                    // Constants - get type and body from collected info
-                    if let (Some(ty), Some(body_id)) = (&info.ty, self.fn_bodies.get(&def_id).copied()) {
+                    // Constants - get type and body from const_defs
+                    if let Some(const_info) = self.const_defs.get(&def_id) {
                         hir::ItemKind::Const {
-                            ty: ty.clone(),
-                            body_id,
+                            ty: const_info.ty.clone(),
+                            body_id: const_info.body_id,
                         }
                     } else {
-                        // Constants must have both type and body - skip if missing
+                        // Constants must have info - skip if missing
                         continue;
                     }
                 }
                 hir::DefKind::Static => {
-                    // Statics - get type and body from collected info
-                    if let (Some(ty), Some(body_id)) = (&info.ty, self.fn_bodies.get(&def_id).copied()) {
+                    // Statics - get type and body from static_defs
+                    if let Some(static_info) = self.static_defs.get(&def_id) {
                         hir::ItemKind::Static {
-                            ty: ty.clone(),
-                            mutable: false, // Would need to track this
-                            body_id,
+                            ty: static_info.ty.clone(),
+                            mutable: static_info.is_mut,
+                            body_id: static_info.body_id,
                         }
                     } else {
-                        // Statics must have both type and body - skip if missing
+                        // Statics must have info - skip if missing
                         continue;
                     }
                 }
