@@ -801,6 +801,54 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
     }
 
+    // Compile handler definitions (they don't have MIR bodies, so not in the loop above)
+    for (&def_id, item) in &hir_crate.items {
+        if !matches!(item.kind, bloodc::hir::ItemKind::Handler { .. }) {
+            continue;
+        }
+
+        // Hash the handler item
+        let def_hash = hash_hir_item(item, &hir_crate.bodies);
+
+        // Check cache
+        if let Some(cached_path) = build_cache.get_object_path(&def_hash) {
+            if cached_path.exists() {
+                object_files.push(cached_path);
+                cached_count += 1;
+                if verbosity > 2 {
+                    eprintln!("  Cache hit (handler): {:?} ({})", def_id, def_hash.short_display());
+                }
+                continue;
+            }
+        }
+
+        // Cache miss - compile this handler
+        let obj_path = obj_dir.join(format!("handler_{}.o", def_id.index()));
+
+        match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, &obj_path) {
+            Ok(()) => {
+                compiled_count += 1;
+                if verbosity > 2 {
+                    eprintln!("  Compiled (handler): {:?} ({})", def_id, def_hash.short_display());
+                }
+
+                // Cache the compiled object
+                if let Ok(obj_data) = std::fs::read(&obj_path) {
+                    if let Err(e) = build_cache.store_object(def_hash, &obj_data) {
+                        if verbosity > 1 {
+                            eprintln!("  Warning: Failed to cache {:?}: {}", def_id, e);
+                        }
+                    }
+                }
+
+                object_files.push(obj_path);
+            }
+            Err(errors) => {
+                compile_errors.extend(errors);
+            }
+        }
+    }
+
     // Report compilation results
     if verbosity > 0 {
         eprintln!(
@@ -833,6 +881,18 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             println!("{}", ir);
         }
     }
+
+    // Generate handler registration object (needed for effect handlers)
+    // This creates the global constructor that registers all handlers with the runtime
+    let handler_reg_path = obj_dir.join("handler_registration.o");
+    if let Err(errors) = codegen::compile_handler_registration_to_object(&hir_crate, &handler_reg_path) {
+        for error in &errors {
+            emitter.emit(error);
+        }
+        eprintln!("Build failed: handler registration codegen error.");
+        return ExitCode::from(1);
+    }
+    object_files.push(handler_reg_path);
 
     // Link with runtimes (for both cached and freshly compiled objects)
     // C runtime is required (provides main entry point and string utilities)

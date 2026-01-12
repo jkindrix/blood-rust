@@ -103,6 +103,10 @@ pub fn compile_mir_to_object(
     // This sets up struct_defs, enum_defs, and function declarations
     codegen.compile_crate_declarations(hir_crate)?;
 
+    // Compile const and static items (global variables)
+    codegen.compile_const_items(hir_crate)?;
+    codegen.compile_static_items(hir_crate)?;
+
     // Second pass: declare closure functions from MIR
     // Closures have synthetic DefIds (>= 0xFFFF_0000) that aren't in HIR items
     for (&def_id, mir_body) in mir_bodies {
@@ -184,6 +188,10 @@ pub fn compile_definition_to_object(
     // Declare all types and external functions from the crate
     codegen.compile_crate_declarations(hir_crate)?;
 
+    // Compile const and static items (if this is a const/static definition)
+    codegen.compile_const_items(hir_crate)?;
+    codegen.compile_static_items(hir_crate)?;
+
     // Compile the specific definition
     if let Some(mir) = mir_body {
         codegen.compile_mir_body(def_id, mir, escape_results)?;
@@ -193,6 +201,9 @@ pub fn compile_definition_to_object(
             hir::ItemKind::Handler { .. } => {
                 // Compile handler operations
                 codegen.compile_handler_item(def_id, item, hir_crate)?;
+            }
+            hir::ItemKind::Const { .. } | hir::ItemKind::Static { .. } => {
+                // Already compiled above
             }
             _ => {
                 // Type declarations are already handled in compile_crate_declarations
@@ -217,6 +228,58 @@ pub fn compile_definition_to_object(
         .write_to_file(&module, FileType::Object, output_path)
         .map_err(|e| vec![Diagnostic::error(
             format!("Failed to write object file: {}", e.to_string()),
+            crate::span::Span::dummy(),
+        )])?;
+
+    Ok(())
+}
+
+/// Compile handler registration code to a separate object file.
+///
+/// This function generates a global constructor that registers all handlers with
+/// the runtime's effect registry. It must be called after all handler definitions
+/// have been compiled, and the resulting object file must be linked with the other
+/// definition object files.
+///
+/// # Arguments
+/// * `hir_crate` - The full crate (needed to find handler definitions)
+/// * `output_path` - Path to write the handler registration object file
+pub fn compile_handler_registration_to_object(
+    hir_crate: &hir::Crate,
+    output_path: &Path,
+) -> Result<(), Vec<Diagnostic>> {
+    let context = Context::create();
+    let module = context.create_module("blood_handler_registration");
+    let builder = context.create_builder();
+
+    let mut codegen = CodegenContext::new(&context, &module, &builder);
+
+    // Declare all types and functions needed for handler registration
+    // This already calls declare_handler_operations internally
+    codegen.compile_crate_declarations(hir_crate)?;
+
+    // Generate the handler registration global constructor
+    // Note: declare_handler_operations is called by compile_crate_declarations,
+    // so handler_ops is already populated with function declarations
+    codegen.register_handlers_with_runtime()?;
+
+    // Verify the module
+    if let Err(err) = module.verify() {
+        return Err(vec![Diagnostic::error(
+            format!("LLVM verification failed for handler registration: {}", err.to_string()),
+            crate::span::Span::dummy(),
+        )]);
+    }
+
+    // Get target machine
+    let target_machine = get_native_target_machine()
+        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
+
+    // Write object file
+    target_machine
+        .write_to_file(&module, FileType::Object, output_path)
+        .map_err(|e| vec![Diagnostic::error(
+            format!("Failed to write handler registration object: {}", e.to_string()),
             crate::span::Span::dummy(),
         )])?;
 

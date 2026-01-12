@@ -18,7 +18,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     ///
     /// Each handler operation is compiled to a function with signature:
     /// `fn(state: *mut void, args: *const i64, arg_count: i64) -> i64`
-    pub(super) fn declare_handler_operations(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+    pub fn declare_handler_operations(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
         let i64_type = self.context.i64_type();
         let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
@@ -35,6 +35,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 for (op_idx, handler_op) in operations.iter().enumerate() {
                     let fn_name = format!("{}_{}", item.name, handler_op.name);
                     let fn_value = self.module.add_function(&fn_name, handler_op_type, None);
+                    // Set external linkage so linker resolves from other object files
+                    fn_value.set_linkage(inkwell::module::Linkage::External);
                     self.handler_ops.insert((*def_id, op_idx), fn_value);
                 }
             }
