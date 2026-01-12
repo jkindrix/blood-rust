@@ -52,6 +52,7 @@ pub mod ffi_exports;
 pub mod io;
 pub mod memory;
 pub mod scheduler;
+pub mod simd;
 pub mod stdlib;
 pub mod sync;
 
