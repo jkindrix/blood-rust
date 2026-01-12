@@ -779,8 +779,11 @@ deep handler FiberRuntime for Fiber {
 }
 
 // Handler for channel simulation
+// This mock handler stores the last sent value and returns it on recv.
+// In a real implementation, channels would have proper buffers.
 deep handler ChannelRuntime<T> for Channel<T> {
     let mut next_channel: i32
+    let mut last_sent: T
 
     return(x) { x }
 
@@ -790,21 +793,23 @@ deep handler ChannelRuntime<T> for Channel<T> {
     }
 
     op send(channel_id, value) {
-        // In real implementation: add to buffer or block
+        // Store the value for later recv
+        last_sent = value;
         resume(())
     }
 
     op recv(channel_id) {
-        // In real implementation: remove from buffer or block
-        resume(channel_id)
+        // Return the last sent value (mock loopback behavior)
+        resume(last_sent)
     }
 
     op try_send(channel_id, value) {
+        last_sent = value;
         resume(true)
     }
 
     op try_recv(channel_id) {
-        resume(channel_id)
+        resume(last_sent)
     }
 }
 

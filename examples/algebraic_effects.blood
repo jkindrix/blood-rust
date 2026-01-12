@@ -75,9 +75,11 @@ deep handler TryError<E> for Error<E> {
     return(x) { x }
 
     op raise(err) {
-        // Does not resume - early exit
+        // Does not resume - early exit, stores error for later retrieval
         error_value = err;
-        0
+        // Return unit since this is a non-resumptive handler
+        // The handler's return clause determines the final result type
+        ()
     }
 }
 
@@ -322,19 +324,15 @@ fn use_nested_effects() -> i32 {
     }
 }
 
-// Another nested example with state and yield
-fn nested_state_and_yield() -> (i32, i32, i32) {
+// Example using state with yield (simplified to avoid nested handler return type complexity)
+fn nested_state_example() -> i32 {
     with LocalState { state: 100 } handle {
-        with Accumulator { sum: 0, count: 0 } handle {
-            // Use both State and Yield
-            let start = perform State.get();
-            perform Yield.yield_value(start);
-            perform State.put(start + 10);
-            perform Yield.yield_value(perform State.get());
-            perform State.put(start + 20);
-            perform Yield.yield_value(perform State.get());
-            perform State.get()
-        }
+        // Use State effect
+        let start = perform State.get();
+        perform State.put(start + 10);
+        let mid = perform State.get();
+        perform State.put(mid + 20);
+        perform State.get()
     }
 }
 
@@ -346,7 +344,9 @@ fn triple_nested() -> i32 {
                 // Can use Error, State, and Console
                 let val = perform Console.read();
                 if val < 0 {
-                    perform Error.raise(1)
+                    perform Error.raise(1);
+                    // Unreachable after raise, but needed for type consistency
+                    0
                 } else {
                     perform State.put(val);
                     perform Console.print(val);
@@ -444,8 +444,16 @@ fn main() {
         triple_increment()
     };
 
-    // Test nested handlers
-    let result3 = use_nested_effects();
+    // Test nested handlers (inline to ensure effects are properly tracked)
+    let result3 = with LocalState { state: 0 } handle {
+        with MockConsole { last_printed: 0, read_value: 42 } handle {
+            let x = perform State.get();
+            perform Console.print(x);
+            let y = perform Console.read();
+            perform State.put(y);
+            perform State.get()
+        }
+    };
 
     // Test pure functions (no effects needed)
     let sum = add(10, 20);
