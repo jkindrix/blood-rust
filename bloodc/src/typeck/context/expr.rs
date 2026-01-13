@@ -1290,6 +1290,42 @@ impl<'a> TypeContext<'a> {
                 }
             }
 
+            // Check for FFI bridge namespace paths (bridge_name::function_name)
+            for bridge_info in &self.bridge_defs {
+                if bridge_info.name == first_name {
+                    // Look for a function with this name in the bridge
+                    for fn_info in &bridge_info.extern_fns {
+                        if fn_info.name == second_name {
+                            // Found the FFI function - return it as a function expression
+                            let fn_ty = Type::function(
+                                fn_info.params.clone(),
+                                fn_info.return_ty.clone(),
+                            );
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Def(fn_info.def_id),
+                                fn_ty,
+                                span,
+                            ));
+                        }
+                    }
+                    // Look for constants in the bridge
+                    for const_info in &bridge_info.consts {
+                        if const_info.name == second_name {
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Def(const_info.def_id),
+                                const_info.ty.clone(),
+                                span,
+                            ));
+                        }
+                    }
+                    // Bridge found but item not found
+                    return Err(TypeError::new(
+                        TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
+                        span,
+                    ));
+                }
+            }
+
             Err(TypeError::new(
                 TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
                 span,

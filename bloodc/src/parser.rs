@@ -608,11 +608,16 @@ impl<'src> Parser<'src> {
                     break;
                 }
 
-                let arg = if self.check(TokenKind::Ident) {
+                let arg = if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
                     self.advance();
                     let name = self.spanned_symbol();
                     if self.try_consume(TokenKind::Eq) {
                         AttributeArg::KeyValue(name, self.parse_literal())
+                    } else if self.try_consume(TokenKind::LParen) {
+                        // Nested attribute like #[repr(align(N))]
+                        let inner = self.parse_literal();
+                        self.expect(TokenKind::RParen);
+                        AttributeArg::Call(name, inner)
                     } else {
                         AttributeArg::Ident(name)
                     }

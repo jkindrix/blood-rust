@@ -1594,7 +1594,19 @@ impl<'src> Parser<'src> {
         };
 
         let discriminant = if self.try_consume(TokenKind::Eq) {
-            Some(self.parse_literal())
+            // Handle negative discriminants (-1, -42, etc.)
+            let is_negative = self.try_consume(TokenKind::Minus);
+            let mut lit = self.parse_literal();
+            if is_negative {
+                // Negate the literal value
+                if let crate::ast::LiteralKind::Int { value, suffix } = &lit.kind {
+                    lit.kind = crate::ast::LiteralKind::Int {
+                        value: -(*value as i64) as u128,
+                        suffix: suffix.clone(),
+                    };
+                }
+            }
+            Some(lit)
         } else {
             None
         };

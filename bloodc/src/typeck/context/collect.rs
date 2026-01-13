@@ -111,7 +111,7 @@ impl<'a> TypeContext<'a> {
                     self.fn_sigs.insert(def_id, hir::FnSig::new(params.clone(), return_ty.clone()));
 
                     // Extract link_name from attributes if present
-                    let link_name = Self::extract_link_name_from_attrs(&func.attrs);
+                    let link_name = self.extract_link_name_from_attrs(&func.attrs);
 
                     extern_fns.push(BridgeFnInfo {
                         def_id,
@@ -171,7 +171,7 @@ impl<'a> TypeContext<'a> {
                         .collect::<Result<_, TypeError>>()?;
 
                     // Extract packed and align from attributes
-                    let (is_packed, align) = Self::extract_struct_attrs(&s.attrs);
+                    let (is_packed, align) = self.extract_struct_attrs(&s.attrs);
 
                     structs.push(BridgeStructInfo {
                         def_id,
@@ -191,7 +191,7 @@ impl<'a> TypeContext<'a> {
                     )?;
 
                     // Extract repr type from attributes, default to i32
-                    let repr = Self::extract_repr_from_attrs(&e.attrs)
+                    let repr = self.extract_repr_from_attrs(&e.attrs)
                         .unwrap_or_else(hir::Type::i32);
 
                     let variants: Vec<_> = e.variants.iter()
@@ -304,25 +304,108 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Extract link_name attribute from a list of attributes.
-    fn extract_link_name_from_attrs(_attrs: &[ast::Attribute]) -> Option<String> {
-        // For now, return None. Full implementation would parse:
-        // #[link_name = "..."]
+    ///
+    /// Parses: `#[link_name = "actual_name"]`
+    fn extract_link_name_from_attrs(&self, attrs: &[ast::Attribute]) -> Option<String> {
+        for attr in attrs {
+            // Check if this is a link_name attribute
+            if attr.path.len() == 1 {
+                let name = self.symbol_to_string(attr.path[0].node);
+                if name == "link_name" {
+                    if let Some(ast::AttributeArgs::Eq(lit)) = &attr.args {
+                        if let ast::LiteralKind::String(s) = &lit.kind {
+                            return Some(s.clone());
+                        }
+                    }
+                }
+            }
+        }
         None
     }
 
     /// Extract is_packed and align from struct attributes.
-    fn extract_struct_attrs(_attrs: &[ast::Attribute]) -> (bool, Option<u32>) {
-        // For now, return defaults. Full implementation would parse:
-        // #[repr(packed)] -> is_packed = true
-        // #[repr(align(N))] -> align = Some(N)
-        (false, None)
+    ///
+    /// Parses:
+    /// - `#[repr(packed)]` -> is_packed = true
+    /// - `#[repr(align(N))]` -> align = Some(N)
+    /// - `#[repr(C, packed)]` -> is_packed = true
+    fn extract_struct_attrs(&self, attrs: &[ast::Attribute]) -> (bool, Option<u32>) {
+        let mut is_packed = false;
+        let mut align = None;
+
+        for attr in attrs {
+            if attr.path.len() == 1 {
+                let name = self.symbol_to_string(attr.path[0].node);
+                if name == "repr" {
+                    if let Some(ast::AttributeArgs::List(args)) = &attr.args {
+                        for arg in args {
+                            match arg {
+                                ast::AttributeArg::Ident(ident) => {
+                                    let ident_name = self.symbol_to_string(ident.node);
+                                    if ident_name == "packed" {
+                                        is_packed = true;
+                                    }
+                                }
+                                ast::AttributeArg::KeyValue(key, value) => {
+                                    let key_name = self.symbol_to_string(key.node);
+                                    if key_name == "align" {
+                                        if let ast::LiteralKind::Int { value: n, .. } = &value.kind {
+                                            align = Some(*n as u32);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (is_packed, align)
     }
 
     /// Extract repr type from enum attributes.
-    fn extract_repr_from_attrs(_attrs: &[ast::Attribute]) -> Option<hir::Type> {
-        // For now, return None. Full implementation would parse:
-        // #[repr(i32)] -> Some(Type::int(32))
-        // #[repr(u8)] -> Some(Type::uint(8))
+    ///
+    /// Parses:
+    /// - `#[repr(i8)]`, `#[repr(i16)]`, `#[repr(i32)]`, `#[repr(i64)]`
+    /// - `#[repr(u8)]`, `#[repr(u16)]`, `#[repr(u32)]`, `#[repr(u64)]`
+    /// - `#[repr(isize)]`, `#[repr(usize)]`
+    fn extract_repr_from_attrs(&self, attrs: &[ast::Attribute]) -> Option<hir::Type> {
+        use crate::hir::ty::{TypeKind, PrimitiveTy};
+        use crate::hir::def::{IntTy, UintTy};
+
+        for attr in attrs {
+            if attr.path.len() == 1 {
+                let name = self.symbol_to_string(attr.path[0].node);
+                if name == "repr" {
+                    if let Some(ast::AttributeArgs::List(args)) = &attr.args {
+                        for arg in args {
+                            if let ast::AttributeArg::Ident(ident) = arg {
+                                let ident_name = self.symbol_to_string(ident.node);
+                                return match ident_name.as_str() {
+                                    "i8" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I8)))),
+                                    "i16" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I16)))),
+                                    "i32" => Some(Type::i32()),
+                                    "i64" => Some(Type::i64()),
+                                    "i128" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I128)))),
+                                    "isize" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::Isize)))),
+                                    "u8" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U8)))),
+                                    "u16" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U16)))),
+                                    "u32" => Some(Type::u32()),
+                                    "u64" => Some(Type::u64()),
+                                    "u128" => Some(Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U128)))),
+                                    "usize" => Some(Type::usize()),
+                                    // Skip C and other non-type specifiers
+                                    "C" | "packed" | "transparent" => continue,
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
         None
     }
 

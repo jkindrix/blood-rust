@@ -216,6 +216,8 @@ pub enum AttributeArg {
     KeyValue(Spanned<Symbol>, Literal),
     /// Literal: `#[attr("value")]`
     Literal(Literal),
+    /// Call-style nested attribute: `#[repr(align(N))]`
+    Call(Spanned<Symbol>, Literal),
 }
 
 // ============================================================
