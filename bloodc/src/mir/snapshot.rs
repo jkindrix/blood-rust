@@ -192,6 +192,199 @@ impl std::fmt::Display for SnapshotValidationError {
 impl std::error::Error for SnapshotValidationError {}
 
 // ============================================================================
+// Lazy Validation
+// ============================================================================
+
+/// A lazily-validated generation snapshot.
+///
+/// This optimization defers validation until a reference is actually used,
+/// avoiding unnecessary validation of entries that are never accessed.
+///
+/// # Use Case
+///
+/// In many cases, only a subset of captured references are accessed after
+/// resumption. Lazy validation skips validation for unused references,
+/// reducing overhead in common cases.
+///
+/// # Thread Safety
+///
+/// This type uses interior mutability for validation state tracking.
+/// It is NOT thread-safe and should only be used from a single thread.
+///
+/// # Example
+///
+/// ```ignore
+/// let lazy = LazySnapshot::new(snapshot, get_gen);
+///
+/// // Only validates entry 0
+/// lazy.validate_entry(0)?;
+///
+/// // Validates all remaining entries
+/// lazy.validate_all()?;
+/// ```
+#[derive(Debug)]
+pub struct LazySnapshot<F>
+where
+    F: Fn(u64) -> Option<u32>,
+{
+    /// The underlying snapshot.
+    snapshot: GenerationSnapshot,
+    /// Validation state for each entry (true = validated).
+    validated: std::cell::RefCell<Vec<bool>>,
+    /// Function to get current generation for an address.
+    get_gen: F,
+    /// Cached first validation error (if any).
+    cached_error: std::cell::RefCell<Option<SnapshotValidationError>>,
+}
+
+impl<F> LazySnapshot<F>
+where
+    F: Fn(u64) -> Option<u32>,
+{
+    /// Create a new lazy snapshot wrapper.
+    pub fn new(snapshot: GenerationSnapshot, get_gen: F) -> Self {
+        let len = snapshot.entries.len();
+        Self {
+            snapshot,
+            validated: std::cell::RefCell::new(vec![false; len]),
+            get_gen,
+            cached_error: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Validate a single entry by index.
+    ///
+    /// Returns `Ok(())` if the entry is valid or was already validated.
+    /// Returns `Err` if validation fails.
+    pub fn validate_entry(&self, index: usize) -> Result<(), SnapshotValidationError> {
+        // Check if already validated
+        {
+            let validated = self.validated.borrow();
+            if index >= validated.len() {
+                return Ok(()); // Index out of bounds - nothing to validate
+            }
+            if validated[index] {
+                return Ok(()); // Already validated
+            }
+        }
+
+        // Check for cached error
+        if let Some(err) = self.cached_error.borrow().as_ref() {
+            return Err(err.clone());
+        }
+
+        // Perform validation
+        let entry = &self.snapshot.entries[index];
+        if let Some(current_gen) = (self.get_gen)(entry.address) {
+            if entry.generation != current_gen {
+                let err = SnapshotValidationError {
+                    entry: entry.clone(),
+                    actual_generation: current_gen,
+                };
+                *self.cached_error.borrow_mut() = Some(err.clone());
+                return Err(err);
+            }
+        } else {
+            // Address not found - slot was freed
+            let err = SnapshotValidationError {
+                entry: entry.clone(),
+                actual_generation: 0,
+            };
+            *self.cached_error.borrow_mut() = Some(err.clone());
+            return Err(err);
+        }
+
+        // Mark as validated
+        self.validated.borrow_mut()[index] = true;
+        Ok(())
+    }
+
+    /// Validate entry for a specific local.
+    ///
+    /// Returns `Ok(())` if no entries exist for this local or all are valid.
+    pub fn validate_local(&self, local: LocalId) -> Result<(), SnapshotValidationError> {
+        for (idx, entry) in self.snapshot.entries.iter().enumerate() {
+            if entry.local == local {
+                self.validate_entry(idx)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate all entries that haven't been validated yet.
+    ///
+    /// This is equivalent to calling `validate_entry` for each entry.
+    pub fn validate_all(&self) -> Result<(), SnapshotValidationError> {
+        // Check for cached error first
+        if let Some(err) = self.cached_error.borrow().as_ref() {
+            return Err(err.clone());
+        }
+
+        for idx in 0..self.snapshot.entries.len() {
+            self.validate_entry(idx)?;
+        }
+        Ok(())
+    }
+
+    /// Check if all entries have been validated.
+    pub fn is_fully_validated(&self) -> bool {
+        self.validated.borrow().iter().all(|&v| v)
+    }
+
+    /// Get the number of validated entries.
+    pub fn validated_count(&self) -> usize {
+        self.validated.borrow().iter().filter(|&&v| v).count()
+    }
+
+    /// Get the total number of entries.
+    pub fn total_count(&self) -> usize {
+        self.snapshot.entries.len()
+    }
+
+    /// Get validation statistics.
+    pub fn stats(&self) -> LazyValidationStats {
+        let validated = self.validated.borrow();
+        LazyValidationStats {
+            total: validated.len(),
+            validated: validated.iter().filter(|&&v| v).count(),
+            skipped: validated.iter().filter(|&&v| !v).count(),
+        }
+    }
+
+    /// Get the underlying snapshot (consumes the lazy wrapper).
+    pub fn into_snapshot(self) -> GenerationSnapshot {
+        self.snapshot
+    }
+
+    /// Get a reference to the underlying snapshot.
+    pub fn snapshot(&self) -> &GenerationSnapshot {
+        &self.snapshot
+    }
+}
+
+/// Statistics about lazy validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LazyValidationStats {
+    /// Total number of entries.
+    pub total: usize,
+    /// Number of entries that were validated.
+    pub validated: usize,
+    /// Number of entries that were skipped (never accessed).
+    pub skipped: usize,
+}
+
+impl LazyValidationStats {
+    /// Calculate the percentage of entries that were skipped.
+    pub fn skip_percentage(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.skipped as f64 / self.total as f64) * 100.0
+        }
+    }
+}
+
+// ============================================================================
 // Snapshot Capture Analysis
 // ============================================================================
 
@@ -262,6 +455,8 @@ impl SnapshotAnalyzer {
             TypeKind::Record { fields, .. } => fields.iter().any(|f| self.type_contains_genref(&f.ty)),
             // Forall types may contain refs if body does
             TypeKind::Forall { body, .. } => self.type_contains_genref(body),
+            // Ownership-qualified types delegate to the inner type
+            TypeKind::Ownership { inner, .. } => self.type_contains_genref(inner),
         }
     }
 
@@ -785,5 +980,237 @@ mod tests {
 
         assert_eq!(stmts.len(), 1);
         assert!(matches!(stmts[0], StatementKind::ValidateGeneration { .. }));
+    }
+
+    // ========================================================================
+    // Lazy Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_lazy_snapshot_new() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 43, LocalId::new(2)));
+
+        let lazy = LazySnapshot::new(snapshot, |_| Some(42));
+
+        assert_eq!(lazy.total_count(), 2);
+        assert_eq!(lazy.validated_count(), 0);
+        assert!(!lazy.is_fully_validated());
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_entry_success() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 43, LocalId::new(2)));
+
+        let lazy = LazySnapshot::new(snapshot, |addr| match addr {
+            0x1000 => Some(42),
+            0x2000 => Some(43),
+            _ => None,
+        });
+
+        // Validate only the first entry
+        assert!(lazy.validate_entry(0).is_ok());
+        assert_eq!(lazy.validated_count(), 1);
+
+        // Second entry not yet validated
+        assert!(!lazy.is_fully_validated());
+
+        // Validate second entry
+        assert!(lazy.validate_entry(1).is_ok());
+        assert!(lazy.is_fully_validated());
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_entry_failure() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+
+        let lazy = LazySnapshot::new(snapshot, |_| Some(99)); // Wrong generation
+
+        let result = lazy.validate_entry(0);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.entry.generation, 42);
+        assert_eq!(err.actual_generation, 99);
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_entry_freed() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+
+        let lazy = LazySnapshot::new(snapshot, |_| None); // Address not found
+
+        let result = lazy.validate_entry(0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().actual_generation, 0);
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_entry_already_validated() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+
+        let call_count = std::cell::Cell::new(0);
+        let lazy = LazySnapshot::new(snapshot, |_| {
+            call_count.set(call_count.get() + 1);
+            Some(42)
+        });
+
+        // First validation
+        assert!(lazy.validate_entry(0).is_ok());
+        assert_eq!(call_count.get(), 1);
+
+        // Second validation should not call get_gen again
+        assert!(lazy.validate_entry(0).is_ok());
+        assert_eq!(call_count.get(), 1); // Still 1
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_entry_out_of_bounds() {
+        let snapshot = GenerationSnapshot::new();
+        let lazy = LazySnapshot::new(snapshot, |_| Some(42));
+
+        // Out of bounds should succeed (nothing to validate)
+        assert!(lazy.validate_entry(100).is_ok());
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_local() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x1008, 43, LocalId::new(1))); // Same local
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 44, LocalId::new(2)));
+
+        let lazy = LazySnapshot::new(snapshot, |addr| match addr {
+            0x1000 => Some(42),
+            0x1008 => Some(43),
+            0x2000 => Some(44),
+            _ => None,
+        });
+
+        // Validate only local 1 (has 2 entries)
+        assert!(lazy.validate_local(LocalId::new(1)).is_ok());
+        assert_eq!(lazy.validated_count(), 2);
+
+        // Local 2 not yet validated
+        assert!(!lazy.is_fully_validated());
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_all() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 43, LocalId::new(2)));
+
+        let lazy = LazySnapshot::new(snapshot, |addr| match addr {
+            0x1000 => Some(42),
+            0x2000 => Some(43),
+            _ => None,
+        });
+
+        assert!(lazy.validate_all().is_ok());
+        assert!(lazy.is_fully_validated());
+        assert_eq!(lazy.validated_count(), 2);
+    }
+
+    #[test]
+    fn test_lazy_snapshot_validate_all_with_error() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 43, LocalId::new(2)));
+
+        let lazy = LazySnapshot::new(snapshot, |addr| match addr {
+            0x1000 => Some(42),
+            0x2000 => Some(99), // Wrong generation
+            _ => None,
+        });
+
+        let result = lazy.validate_all();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lazy_snapshot_cached_error() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 43, LocalId::new(2)));
+
+        let lazy = LazySnapshot::new(snapshot, |addr| match addr {
+            0x1000 => Some(99), // Wrong generation
+            0x2000 => Some(43),
+            _ => None,
+        });
+
+        // First entry fails
+        assert!(lazy.validate_entry(0).is_err());
+
+        // Even valid entry 1 should return cached error
+        let result = lazy.validate_entry(1);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().entry.address, 0x1000); // Same error
+    }
+
+    #[test]
+    fn test_lazy_snapshot_stats() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+        snapshot.add_entry(SnapshotEntry::new(0x2000, 43, LocalId::new(2)));
+        snapshot.add_entry(SnapshotEntry::new(0x3000, 44, LocalId::new(3)));
+
+        let lazy = LazySnapshot::new(snapshot, |addr| match addr {
+            0x1000 => Some(42),
+            0x2000 => Some(43),
+            0x3000 => Some(44),
+            _ => None,
+        });
+
+        // Validate only one entry
+        let _ = lazy.validate_entry(0);
+
+        let stats = lazy.stats();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.validated, 1);
+        assert_eq!(stats.skipped, 2);
+
+        // ~66.7% skip rate
+        let skip_pct = stats.skip_percentage();
+        assert!(skip_pct > 66.0 && skip_pct < 67.0);
+    }
+
+    #[test]
+    fn test_lazy_validation_stats_empty() {
+        let stats = LazyValidationStats {
+            total: 0,
+            validated: 0,
+            skipped: 0,
+        };
+        assert_eq!(stats.skip_percentage(), 0.0);
+    }
+
+    #[test]
+    fn test_lazy_snapshot_into_snapshot() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+
+        let lazy = LazySnapshot::new(snapshot, |_| Some(42));
+        let recovered = lazy.into_snapshot();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered.entries[0].address, 0x1000);
+    }
+
+    #[test]
+    fn test_lazy_snapshot_snapshot_ref() {
+        let mut snapshot = GenerationSnapshot::new();
+        snapshot.add_entry(SnapshotEntry::new(0x1000, 42, LocalId::new(1)));
+
+        let lazy = LazySnapshot::new(snapshot, |_| Some(42));
+
+        assert_eq!(lazy.snapshot().len(), 1);
     }
 }
