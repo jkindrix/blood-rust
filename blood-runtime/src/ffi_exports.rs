@@ -134,6 +134,42 @@ pub unsafe extern "C" fn str_eq(a: BloodStr, b: BloodStr) -> bool {
     slice_a == slice_b
 }
 
+/// Concatenate two strings, returning a newly allocated string.
+///
+/// # Safety
+/// Both pointers must be valid for their respective lengths.
+#[no_mangle]
+pub unsafe extern "C" fn blood_str_concat(a: BloodStr, b: BloodStr) -> BloodStr {
+    let len_a = if a.ptr.is_null() { 0 } else { a.len as usize };
+    let len_b = if b.ptr.is_null() { 0 } else { b.len as usize };
+    let total_len = len_a + len_b;
+
+    if total_len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    // Allocate buffer for concatenated string
+    let layout = std::alloc::Layout::from_size_align(total_len, 1).unwrap();
+    let ptr = std::alloc::alloc(layout);
+    if ptr.is_null() {
+        eprintln!("blood: out of memory in str_concat");
+        std::process::exit(1);
+    }
+
+    // Copy both strings into the buffer
+    if len_a > 0 && !a.ptr.is_null() {
+        std::ptr::copy_nonoverlapping(a.ptr, ptr, len_a);
+    }
+    if len_b > 0 && !b.ptr.is_null() {
+        std::ptr::copy_nonoverlapping(b.ptr, ptr.add(len_a), len_b);
+    }
+
+    BloodStr {
+        ptr: ptr as *const u8,
+        len: total_len as u64,
+    }
+}
+
 // ============================================================================
 // Input Functions
 // ============================================================================
