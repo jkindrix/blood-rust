@@ -5,7 +5,7 @@ expression: parse_to_debug(source)
 Program {
     module: None,
     imports: [
-        Simple {
+        Group {
             path: ModulePath {
                 segments: [
                     Spanned {
@@ -24,35 +24,53 @@ Program {
                             value: 2,
                         },
                         span: Span {
-                            start: 8,
-                            end: 10,
+                            start: 9,
+                            end: 20,
                             start_line: 1,
-                            start_col: 9,
-                        },
-                    },
-                    Spanned {
-                        node: SymbolU32 {
-                            value: 3,
-                        },
-                        span: Span {
-                            start: 12,
-                            end: 19,
-                            start_line: 1,
-                            start_col: 13,
+                            start_col: 10,
                         },
                     },
                 ],
                 span: Span {
                     start: 4,
-                    end: 19,
+                    end: 20,
                     start_line: 1,
                     start_col: 5,
                 },
             },
-            alias: None,
+            items: [
+                ImportItem {
+                    name: Spanned {
+                        node: SymbolU32 {
+                            value: 3,
+                        },
+                        span: Span {
+                            start: 23,
+                            end: 30,
+                            start_line: 1,
+                            start_col: 24,
+                        },
+                    },
+                    alias: None,
+                },
+                ImportItem {
+                    name: Spanned {
+                        node: SymbolU32 {
+                            value: 4,
+                        },
+                        span: Span {
+                            start: 32,
+                            end: 39,
+                            start_line: 1,
+                            start_col: 33,
+                        },
+                    },
+                    alias: None,
+                },
+            ],
             span: Span {
                 start: 0,
-                end: 20,
+                end: 41,
                 start_line: 1,
                 start_col: 1,
             },
@@ -61,7 +79,7 @@ Program {
     declarations: [],
     span: Span {
         start: 0,
-        end: 20,
+        end: 41,
         start_line: 1,
         start_col: 1,
     },

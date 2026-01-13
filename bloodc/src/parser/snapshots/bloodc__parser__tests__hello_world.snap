@@ -46,7 +46,7 @@ Program {
         },
     ),
     imports: [
-        Group {
+        Simple {
             path: ModulePath {
                 segments: [
                     Spanned {
@@ -71,17 +71,7 @@ Program {
                             start_col: 9,
                         },
                     },
-                ],
-                span: Span {
-                    start: 29,
-                    end: 35,
-                    start_line: 4,
-                    start_col: 5,
-                },
-            },
-            items: [
-                ImportItem {
-                    name: Spanned {
+                    Spanned {
                         node: SymbolU32 {
                             value: 5,
                         },
@@ -92,9 +82,15 @@ Program {
                             start_col: 13,
                         },
                     },
-                    alias: None,
+                ],
+                span: Span {
+                    start: 29,
+                    end: 44,
+                    start_line: 4,
+                    start_col: 5,
                 },
-            ],
+            },
+            alias: None,
             span: Span {
                 start: 25,
                 end: 45,

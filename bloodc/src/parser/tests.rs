@@ -405,6 +405,34 @@ fn test_wildcard_pattern() {
     insta::assert_snapshot!(parse_to_debug(source));
 }
 
+// ============================================================
+// Escape Sequence Tests
+// ============================================================
+
+#[test]
+fn test_hex_escape_in_string() {
+    let source = r#"fn f() { let s = "\x00\x7F\xFF"; }"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_hex_escape_in_char() {
+    let source = r"fn f() { let c = '\x41'; }"; // ASCII 'A'
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_unicode_escape_in_string() {
+    let source = r#"fn f() { let s = "\u{1F600}"; }"#; // 😀
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_unicode_escape_in_char() {
+    let source = r"fn f() { let c = '\u{03B1}'; }"; // Greek alpha α
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
 #[test]
 fn test_literal_pattern() {
     let source = "fn f() { match x { 42 => true, _ => false } }";
@@ -544,6 +572,27 @@ fn test_glob_import() {
 #[test]
 fn test_aliased_import() {
     let source = "use std.collections::HashMap as Map;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_import_with_colons_separator() {
+    // Both `.` and `::` can be used as module path separators
+    let source = "use std::collections::{HashMap, HashSet};";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_import_with_mixed_separators() {
+    // Mix of `.` and `::` in module path
+    let source = "use std.collections::map::HashMap;";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_import_single_item_rust_style() {
+    // Rust-style single item import with all `::` separators
+    let source = "use std::io::println;";
     insta::assert_snapshot!(parse_to_debug(source));
 }
 
@@ -742,6 +791,82 @@ fn test_mixed_generic_params() {
 }
 
 // ============================================================
+// >> Disambiguation Tests (nested generics)
+// ============================================================
+
+#[test]
+fn test_nested_generic_type_args() {
+    // Tests that `>>` is correctly split into two `>` in type argument context
+    let source = "fn process(data: Vec<Vec<i32>>) {}";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_deeply_nested_generics() {
+    // Tests deeply nested generics like `Option<Result<Vec<T>, E>>`
+    let source = "fn foo() -> Option<Result<Vec<String>, Error>> { None }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_nested_generics_in_let() {
+    // Tests `>>` disambiguation in let bindings
+    let source = "fn foo() { let x: HashMap<String, Vec<i32>> = HashMap::new(); }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_nested_generics_triple() {
+    // Tests `>>>` (three nested generics)
+    let source = "fn foo() -> Vec<Vec<Vec<i32>>> { [] }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
+// Extern Block Tests
+// ============================================================
+
+#[test]
+fn test_extern_block_c() {
+    let source = r#"
+extern "C" {
+    fn malloc(size: usize) -> *mut u8;
+    fn free(ptr: *mut u8);
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_extern_block_without_abi() {
+    // Should default to "C"
+    let source = r#"
+extern {
+    fn puts(s: *const i8) -> i32;
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_extern_block_with_multiple_functions() {
+    let source = r#"
+extern "C" {
+    fn sqlite3_open(filename: *const i8, ppDb: *mut *mut c_void) -> i32;
+    fn sqlite3_close(db: *mut c_void) -> i32;
+    fn sqlite3_exec(
+        db: *mut c_void,
+        sql: *const i8,
+        callback: *const c_void,
+        arg: *mut c_void,
+        errmsg: *mut *mut i8
+    ) -> i32;
+}
+"#;
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+// ============================================================
 // Error Recovery Tests
 // ============================================================
 
@@ -760,5 +885,33 @@ fn test_unclosed_brace() {
 #[test]
 fn test_unexpected_token() {
     let source = "fn f() { + }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_macro_call_error() {
+    // Should produce a clear error message about macros not being supported
+    let source = "fn f() { println!(\"hello\"); }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_macro_call_vec() {
+    // vec![] style macros should also produce clear error
+    let source = "fn f() { let x = vec![1, 2, 3]; }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_unsafe_block_error() {
+    // Rust-style `unsafe { }` should produce clear error suggesting @unsafe
+    let source = "fn f() { let x = unsafe { foo() }; }";
+    insta::assert_snapshot!(parse_to_debug(source));
+}
+
+#[test]
+fn test_at_unsafe_block() {
+    // Blood-style @unsafe { } should work correctly
+    let source = "fn f() { let x = @unsafe { foo() }; }";
     insta::assert_snapshot!(parse_to_debug(source));
 }
