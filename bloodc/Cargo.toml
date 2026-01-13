@@ -48,3 +48,11 @@ harness = false
 [[bench]]
 name = "content_bench"
 harness = false
+
+[[bench]]
+name = "runtime_bench"
+harness = false
+
+[[bench]]
+name = "escape_bench"
+harness = false

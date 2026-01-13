@@ -324,6 +324,181 @@ fn bench_blood_ptr(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark snapshot overhead in effect-heavy program patterns (SNAP-003)
+///
+/// This simulates realistic effect-heavy workloads where snapshots are
+/// captured and validated frequently. Measures total overhead from:
+/// - Effect operation setup
+/// - Snapshot capture
+/// - Handler execution
+/// - Snapshot validation on resume
+fn bench_effect_heavy_snapshot_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("effect_heavy_snapshot");
+
+    // Simulate simple State effect pattern (get/put operations)
+    // Most common pattern: tail-resumptive handler, single captured ref
+    group.bench_function("state_pattern_single_ref", |b| {
+        let ptr = BloodPtr::new(0x1000, 42, PointerMetadata::HEAP);
+        b.iter(|| {
+            // Capture snapshot before effect
+            let snapshot = GenerationSnapshot::capture(&[ptr]);
+
+            // Simulate effect operation (read state)
+            let state_value = black_box(42i64);
+
+            // Validate on resume (generation still valid)
+            let valid = snapshot.validate(|addr| {
+                if addr == 0x1000 { Some(42) } else { None }
+            });
+
+            black_box((state_value, valid))
+        });
+    });
+
+    // Multiple captured references (common in real programs)
+    for ref_count in [3, 5, 10, 20] {
+        group.throughput(Throughput::Elements(ref_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("capture_validate_cycle", ref_count),
+            &ref_count,
+            |b, &count| {
+                let ptrs: Vec<BloodPtr> = (0..count)
+                    .map(|i| BloodPtr::new(0x1000 * (i + 1), i as u32 + 1, PointerMetadata::HEAP))
+                    .collect();
+
+                b.iter(|| {
+                    // Capture snapshot
+                    let snapshot = GenerationSnapshot::capture(&ptrs);
+
+                    // Simulate handler work
+                    let work = black_box(42 + count);
+
+                    // Validate on resume
+                    let valid = snapshot.validate(|addr| {
+                        let index = (addr / 0x1000) - 1;
+                        Some(index as u32 + 1)
+                    });
+
+                    black_box((work, valid))
+                });
+            },
+        );
+    }
+
+    // Nested effect handlers (each captures and validates)
+    for depth in [2, 3, 5] {
+        group.bench_with_input(
+            BenchmarkId::new("nested_handlers", depth),
+            &depth,
+            |b, &depth| {
+                // Each nesting level has its own reference
+                let ptrs: Vec<BloodPtr> = (0..depth)
+                    .map(|i| BloodPtr::new(0x1000 * (i + 1), i as u32 + 1, PointerMetadata::HEAP))
+                    .collect();
+
+                b.iter(|| {
+                    // Simulate nested handler capture/validate cycle
+                    let mut snapshots = Vec::with_capacity(depth);
+
+                    // Capture phase (handlers installed inner-to-outer)
+                    for i in 0..depth {
+                        snapshots.push(GenerationSnapshot::capture(&ptrs[0..=i]));
+                    }
+
+                    // Handler execution
+                    let work = black_box(depth * 10);
+
+                    // Validate phase (handlers resumed outer-to-inner)
+                    let mut valid = true;
+                    for snapshot in snapshots.iter().rev() {
+                        valid = valid && snapshot.validate(|addr| {
+                            let index = (addr / 0x1000) - 1;
+                            Some(index as u32 + 1)
+                        }).is_ok();
+                    }
+
+                    black_box((work, valid))
+                });
+            },
+        );
+    }
+
+    // Sequential effect operations (common in imperative code)
+    for op_count in [10, 50, 100] {
+        group.throughput(Throughput::Elements(op_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("sequential_ops", op_count),
+            &op_count,
+            |b, &count| {
+                // Single reference captured across all operations
+                let ptr = BloodPtr::new(0x1000, 42, PointerMetadata::HEAP);
+
+                b.iter(|| {
+                    let mut total = 0i64;
+                    for i in 0..count {
+                        // Each operation: capture, execute, validate
+                        let snapshot = GenerationSnapshot::capture(&[ptr]);
+                        total = total.wrapping_add(i as i64);
+                        let _ = snapshot.validate(|addr| {
+                            if addr == 0x1000 { Some(42) } else { None }
+                        });
+                    }
+                    black_box(total)
+                });
+            },
+        );
+    }
+
+    // Effect with closure capture (closure environment in snapshot)
+    group.bench_function("closure_capture_pattern", |b| {
+        // Simulate closure environment with multiple captures
+        let env_ptrs: Vec<BloodPtr> = (0..5)
+            .map(|i| BloodPtr::new(0x2000 * (i + 1), i as u32 + 10, PointerMetadata::HEAP))
+            .collect();
+
+        b.iter(|| {
+            // Effect operation with closure that captures environment
+            let snapshot = GenerationSnapshot::capture(&env_ptrs);
+
+            // Simulate closure execution
+            let closure_result = black_box(env_ptrs.len() * 42);
+
+            // Validate closure captures are still valid
+            let valid = snapshot.validate(|addr| {
+                let index = (addr / 0x2000) - 1;
+                Some(index as u32 + 10)
+            });
+
+            black_box((closure_result, valid))
+        });
+    });
+
+    // Effect with stale detection (validation finds invalid ref)
+    group.bench_function("stale_detection", |b| {
+        let ptrs: Vec<BloodPtr> = (0..5)
+            .map(|i| BloodPtr::new(0x1000 * (i + 1), i as u32 + 1, PointerMetadata::HEAP))
+            .collect();
+
+        b.iter(|| {
+            let snapshot = GenerationSnapshot::capture(&ptrs);
+
+            // Validation detects stale reference (middle pointer invalidated)
+            let result = snapshot.validate(|addr| {
+                let index = (addr / 0x1000) - 1;
+                if index == 2 {
+                    Some(999) // Changed generation = stale
+                } else {
+                    Some(index as u32 + 1)
+                }
+            });
+
+            black_box(result.is_err())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_continuation_creation,
@@ -333,5 +508,6 @@ criterion_group!(
     bench_generation_snapshot,
     bench_snapshot_validation,
     bench_blood_ptr,
+    bench_effect_heavy_snapshot_overhead,
 );
 criterion_main!(benches);
