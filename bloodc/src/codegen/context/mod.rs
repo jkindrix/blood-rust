@@ -1007,7 +1007,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Evaluate the const expression to get the initializer
                 let init_value = self.evaluate_const_expr(&body.expr, ty)?;
 
-                // Create global constant
+                // Create global constant with private linkage to avoid
+                // multiple definition errors when the same const is used
+                // across multiple compilation units
                 let global = self.module.add_global(
                     llvm_type,
                     Some(AddressSpace::default()),
@@ -1015,6 +1017,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 );
                 global.set_initializer(&init_value);
                 global.set_constant(true);
+                global.set_linkage(inkwell::module::Linkage::Private);
 
                 // Store for later reference
                 self.const_globals.insert(*def_id, global);
@@ -1986,6 +1989,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             TypeKind::Range { .. } => "range".to_string(),
             TypeKind::Closure { .. } => "closure".to_string(),
             TypeKind::DynTrait { .. } => "dyn".to_string(),
+            TypeKind::Ownership { qualifier, inner } => {
+                use crate::hir::ty::OwnershipQualifier;
+                let prefix = match qualifier {
+                    OwnershipQualifier::Linear => "L",
+                    OwnershipQualifier::Affine => "A",
+                };
+                format!("{}{}", prefix, Self::mangle_type(inner))
+            }
         }
     }
 
@@ -2198,6 +2209,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let str_eq_type = bool_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
         self.module.add_function("str_eq", str_eq_type, None);
 
+        // blood_str_concat({*i8, i64}, {*i8, i64}) -> {*i8, i64} - concatenate strings
+        let str_concat_type = str_slice_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
+        self.module.add_function("blood_str_concat", str_concat_type, None);
+
+        // int_to_string(i32) -> {*i8, i64} - convert integer to string
+        let int_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false);
+        self.module.add_function("int_to_string", int_to_string_type, None);
+
+        // bool_to_string(i32) -> {*i8, i64} - convert boolean to string (bool passed as i32)
+        self.module.add_function("bool_to_string", int_to_string_type, None);
+
         // read_line() -> {*i8, i64} - read a line from stdin
         let read_line_type = str_slice_type.fn_type(&[], false);
         self.module.add_function("read_line", read_line_type, None);
@@ -2208,6 +2230,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // panic({*i8, i64}) -> void (divergent, but declared as void)
         self.module.add_function("panic", print_str_type, None);
+
+        // === Assertions ===
+
+        // blood_assert(i32) -> void - assert condition is true
+        let assert_type = void_type.fn_type(&[i32_type.into()], false);
+        self.module.add_function("blood_assert", assert_type, None);
+
+        // blood_assert_eq_int(i32, i32) -> void - assert two ints are equal
+        let assert_eq_int_type = void_type.fn_type(&[i32_type.into(), i32_type.into()], false);
+        self.module.add_function("blood_assert_eq_int", assert_eq_int_type, None);
+
+        // blood_assert_eq_bool(i32, i32) -> void - assert two bools are equal (as i32)
+        self.module.add_function("blood_assert_eq_bool", assert_eq_int_type, None);
 
         // print_char(i32) -> void
         self.module.add_function("print_char", print_int_type, None);
@@ -2338,6 +2373,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // ptr_write_u64(ptr: i64, value: i64) -> void (u64 represented as i64)
         self.module.add_function("ptr_write_u64", ptr_write_i64_type, None);
+
+        // ptr_read_u8(ptr: i64) -> i8 (u8 represented as i8)
+        let ptr_read_u8_type = i8_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("ptr_read_u8", ptr_read_u8_type, None);
+
+        // ptr_write_u8(ptr: i64, value: i8) -> void (u8 represented as i8)
+        let ptr_write_u8_type = void_type.fn_type(&[i64_type.into(), i8_type.into()], false);
+        self.module.add_function("ptr_write_u8", ptr_write_u8_type, None);
 
         // print_i64(i64) -> void - already declared above, but let's ensure
 

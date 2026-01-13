@@ -165,6 +165,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Lower the body type as fallback.
                 self.lower_type(body)
             }
+            TypeKind::Ownership { inner, .. } => {
+                // Ownership qualifiers are compile-time only.
+                // Runtime representation is the same as the inner type.
+                self.lower_type(inner)
+            }
         }
     }
 

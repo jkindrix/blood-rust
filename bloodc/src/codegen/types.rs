@@ -52,6 +52,11 @@ pub fn type_size(ty: &Type) -> usize {
             // Use body type size as fallback
             type_size(body)
         }
+        TypeKind::Ownership { inner, .. } => {
+            // Ownership qualifiers are compile-time only
+            // Runtime size is the same as the inner type
+            type_size(inner)
+        }
     }
 }
 
@@ -126,6 +131,11 @@ pub fn type_alignment(ty: &Type) -> usize {
             // Forall types should be instantiated before codegen
             // Use body type alignment as fallback
             type_alignment(body)
+        }
+        TypeKind::Ownership { inner, .. } => {
+            // Ownership qualifiers are compile-time only
+            // Runtime alignment is the same as the inner type
+            type_alignment(inner)
         }
     }
 }

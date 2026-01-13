@@ -86,6 +86,21 @@ pub struct RecordField {
     pub ty: Type,
 }
 
+/// Ownership qualifier for linear/affine types.
+///
+/// Linear types must be used exactly once, while affine types must be
+/// used at most once. These qualifiers enable resource management
+/// without garbage collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OwnershipQualifier {
+    /// Linear: must be used exactly once.
+    /// Violation: error if not used or used more than once.
+    Linear,
+    /// Affine: must be used at most once.
+    /// Violation: error if used more than once (not using is OK).
+    Affine,
+}
+
 /// A const value that can appear in type positions (e.g., array sizes).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
@@ -223,6 +238,8 @@ impl Type {
             }
             // Forall types bind their params, but may have free vars in the body
             TypeKind::Forall { body, .. } => body.has_type_vars(),
+            // Ownership-qualified types delegate to the inner type
+            TypeKind::Ownership { inner, .. } => inner.has_type_vars(),
         }
     }
 
@@ -256,6 +273,11 @@ impl Type {
     /// Create an i64 type.
     pub fn i64() -> Self {
         Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I64)))
+    }
+
+    /// Create a u8 type.
+    pub fn u8() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U8)))
     }
 
     /// Create a u32 type.
@@ -351,6 +373,27 @@ impl Type {
     /// Create a universally quantified (forall) type.
     pub fn forall(params: Vec<TyVarId>, body: Type) -> Self {
         Self::new(TypeKind::Forall { params, body: Box::new(body) })
+    }
+
+    /// Create a linear type (must be used exactly once).
+    pub fn linear(inner: Type) -> Self {
+        Self::new(TypeKind::Ownership {
+            qualifier: OwnershipQualifier::Linear,
+            inner,
+        })
+    }
+
+    /// Create an affine type (must be used at most once).
+    pub fn affine(inner: Type) -> Self {
+        Self::new(TypeKind::Ownership {
+            qualifier: OwnershipQualifier::Affine,
+            inner,
+        })
+    }
+
+    /// Create an ownership-qualified type with a specific qualifier.
+    pub fn ownership(qualifier: OwnershipQualifier, inner: Type) -> Self {
+        Self::new(TypeKind::Ownership { qualifier, inner })
     }
 }
 
@@ -469,6 +512,18 @@ pub enum TypeKind {
         /// The body type where params are in scope.
         body: Box<Type>,
     },
+
+    /// An ownership-qualified type: `linear T`, `affine T`
+    ///
+    /// Enables substructural type checking for resource management:
+    /// - `linear T`: value must be used exactly once
+    /// - `affine T`: value must be used at most once
+    Ownership {
+        /// The ownership qualifier (linear or affine).
+        qualifier: OwnershipQualifier,
+        /// The underlying type.
+        inner: Type,
+    },
 }
 
 impl fmt::Display for TypeKind {
@@ -566,6 +621,18 @@ impl fmt::Display for TypeKind {
                 }
                 write!(f, ">. {body}")
             }
+            TypeKind::Ownership { qualifier, inner } => {
+                write!(f, "{qualifier} {inner}")
+            }
+        }
+    }
+}
+
+impl fmt::Display for OwnershipQualifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OwnershipQualifier::Linear => write!(f, "linear"),
+            OwnershipQualifier::Affine => write!(f, "affine"),
         }
     }
 }

@@ -88,5 +88,8 @@ pub(super) fn type_may_contain_genref_impl(ty: &Type) -> bool {
 
         // Forall types may contain genrefs if body does
         TypeKind::Forall { body, .. } => type_may_contain_genref_impl(body),
+
+        // Ownership-qualified types delegate to the inner type
+        TypeKind::Ownership { inner, .. } => type_may_contain_genref_impl(inner),
     }
 }
