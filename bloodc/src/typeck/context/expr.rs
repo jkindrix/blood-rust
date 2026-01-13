@@ -3364,8 +3364,8 @@ impl<'a> TypeContext<'a> {
         // Determine return type based on macro
         let return_ty = match macro_name {
             "format" => {
-                // format! returns String
-                Type::new(hir::TypeKind::Primitive(hir::PrimitiveTy::String))
+                // format! returns str (the expansion builds a str slice from str_concat)
+                Type::new(hir::TypeKind::Primitive(hir::PrimitiveTy::Str))
             }
             "println" | "print" | "eprintln" | "eprint" => {
                 // print macros return unit
@@ -3422,12 +3422,12 @@ impl<'a> TypeContext<'a> {
                     first_ty
                 };
 
-                // Return Vec<T> type
-                let vec_ty = self.make_vec_type(element_ty.clone());
+                // Return array type [T; N] where N is the element count
+                let array_ty = Type::array(element_ty.clone(), checked_elements.len() as u64);
 
                 Ok(hir::Expr::new(
                     hir::ExprKind::VecLiteral(checked_elements),
-                    vec_ty,
+                    array_ty,
                     span,
                 ))
             }
@@ -3435,21 +3435,53 @@ impl<'a> TypeContext<'a> {
                 let value_expr = self.infer_expr(value)?;
                 let count_expr = self.infer_expr(count)?;
 
-                // Count should be usize
-                let usize_ty = Type::usize();
-                self.unifier.unify(&usize_ty, &count_expr.ty, count.span)?;
+                // Count should be an integer type (we accept any integer and extract the value)
+                // Since we only support constant literals, we don't strictly require usize type
+                let count_is_int = matches!(
+                    count_expr.ty.kind(),
+                    hir::TypeKind::Primitive(
+                        hir::PrimitiveTy::Int(_) | hir::PrimitiveTy::Uint(_)
+                    )
+                );
+                if !count_is_int {
+                    return Err(TypeError::new(
+                        TypeErrorKind::Mismatch {
+                            expected: Type::usize(),
+                            found: count_expr.ty.clone(),
+                        },
+                        count.span,
+                    ));
+                }
 
                 let element_ty = value_expr.ty.clone();
-                let vec_ty = self.make_vec_type(element_ty);
 
-                Ok(hir::Expr::new(
-                    hir::ExprKind::VecRepeat {
-                        value: Box::new(value_expr),
-                        count: Box::new(count_expr),
-                    },
-                    vec_ty,
-                    span,
-                ))
+                // Try to extract the count as a constant for array type sizing
+                let array_size = self.extract_usize_const(&count_expr);
+
+                match array_size {
+                    Some(size) => {
+                        // Count is constant, create array type [T; N]
+                        let array_ty = Type::array(element_ty, size);
+                        Ok(hir::Expr::new(
+                            hir::ExprKind::VecRepeat {
+                                value: Box::new(value_expr),
+                                count: Box::new(count_expr),
+                            },
+                            array_ty,
+                            span,
+                        ))
+                    }
+                    None => {
+                        // Count is not a constant - for now, error
+                        Err(TypeError {
+                            kind: TypeErrorKind::UnsupportedFeature {
+                                feature: "vec! repeat count must be a constant integer literal".to_string(),
+                            },
+                            span,
+                            help: Some("use a literal like `vec![0; 10]` instead of a variable".to_string()),
+                        })
+                    }
+                }
             }
         }
     }
@@ -3499,10 +3531,19 @@ impl<'a> TypeContext<'a> {
         ))
     }
 
-    /// Create a Vec<T> type
-    fn make_vec_type(&self, element_ty: Type) -> Type {
-        // For now, use Slice type as placeholder for Vec<T>
-        // A proper implementation would look up Vec in the stdlib
-        Type::new(hir::TypeKind::Slice { element: element_ty })
+    /// Try to extract a constant usize value from an expression.
+    /// Returns Some(value) if the expression is an integer literal, None otherwise.
+    fn extract_usize_const(&self, expr: &hir::Expr) -> Option<u64> {
+        match &expr.kind {
+            hir::ExprKind::Literal(hir::LiteralValue::Int(n)) => {
+                // Convert i128 to u64 if it fits
+                if *n >= 0 && *n <= u64::MAX as i128 {
+                    Some(*n as u64)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }
