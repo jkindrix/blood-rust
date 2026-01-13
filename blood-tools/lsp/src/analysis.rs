@@ -955,10 +955,16 @@ impl HoverProvider {
 
     /// Provides hover information for a position in a document.
     pub fn hover(&self, doc: &Document, position: Position) -> Option<Hover> {
-        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
         let offset = doc.position_to_offset(position)?;
 
-        // Find symbol at offset
+        // First, check if we're on a keyword or builtin
+        if let Some(hover) = self.keyword_hover(&text, offset) {
+            return Some(hover);
+        }
+
+        // Otherwise, look up symbol at offset
+        let analysis = self.analyzer.analyze(doc)?;
         let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
         let symbol = analysis.symbols.get(*symbol_idx)?;
 
@@ -969,13 +975,534 @@ impl HoverProvider {
             content.push_str(doc_comment);
         }
 
+        // Add examples for user-defined types based on their kind
+        if let Some(example) = self.symbol_example(&symbol) {
+            content.push_str("\n\n---\n\n**Example:**\n\n");
+            content.push_str(&example);
+        }
+
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: content,
             }),
-            range: Some(self.span_to_range(&symbol.def_span, &doc.text())),
+            range: Some(self.span_to_range(&symbol.def_span, &text)),
         })
+    }
+
+    /// Provides hover for keywords and built-in constructs.
+    fn keyword_hover(&self, text: &str, offset: usize) -> Option<Hover> {
+        // Extract the word at the offset
+        let word = self.extract_word_at_offset(text, offset)?;
+        let word_start = self.find_word_start(text, offset)?;
+
+        // Get documentation for keywords and builtins
+        let (title, description, example) = match word.as_str() {
+            "fn" => (
+                "fn",
+                "Declares a function with optional effect annotations.",
+                r#"```blood
+fn greet(name: str) -> str {
+    format!("Hello, {}!", name)
+}
+
+// With effects
+fn read_file(path: str) -> str / IO {
+    // ...
+}
+```"#,
+            ),
+            "effect" => (
+                "effect",
+                "Declares an algebraic effect with operations that can be performed.",
+                r#"```blood
+effect State<T> {
+    fn get() -> T;
+    fn put(value: T);
+}
+
+// Usage
+fn counter() -> i32 / State<i32> {
+    let current = perform State::get();
+    perform State::put(current + 1);
+    current
+}
+```"#,
+            ),
+            "handler" => (
+                "handler",
+                "Declares an effect handler that provides implementations for effect operations.",
+                r#"```blood
+handler StateHandler<T> for State<T> {
+    state: T,
+
+    fn get() -> T {
+        resume(self.state)
+    }
+
+    fn put(value: T) {
+        self.state = value;
+        resume(())
+    }
+}
+
+// Usage
+with StateHandler { state: 0 } {
+    counter()
+}
+```"#,
+            ),
+            "perform" => (
+                "perform",
+                "Performs an effect operation, suspending the current computation until a handler provides a value.",
+                r#"```blood
+effect Log {
+    fn log(message: str);
+}
+
+fn example() / Log {
+    perform Log::log("Starting...");
+    // computation continues after handler resumes
+}
+```"#,
+            ),
+            "resume" => (
+                "resume",
+                "Resumes a suspended computation within an effect handler, optionally passing a value.",
+                r#"```blood
+handler Logger for Log {
+    fn log(message: str) {
+        println!("{}", message);
+        resume(())  // Resume with unit value
+    }
+}
+```"#,
+            ),
+            "with" => (
+                "with",
+                "Runs a computation with a specific effect handler installed.",
+                r#"```blood
+let result = with MyHandler { state: 0 } {
+    perform_some_operation()
+};
+```"#,
+            ),
+            "struct" => (
+                "struct",
+                "Declares a composite data type with named fields.",
+                r#"```blood
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+// With generics
+struct Pair<T, U> {
+    first: T,
+    second: U,
+}
+
+// Usage
+let p = Point { x: 1.0, y: 2.0 };
+```"#,
+            ),
+            "enum" => (
+                "enum",
+                "Declares a tagged union type with variants.",
+                r#"```blood
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// Pattern matching
+match value {
+    Option::Some(x) => println!("{}", x),
+    Option::None => println!("no value"),
+}
+```"#,
+            ),
+            "match" => (
+                "match",
+                "Pattern matches a value against multiple patterns, executing the corresponding arm.",
+                r#"```blood
+match value {
+    0 => println!("zero"),
+    1..=9 => println!("single digit"),
+    n if n < 0 => println!("negative"),
+    _ => println!("other"),
+}
+
+// Destructuring
+match point {
+    Point { x: 0, y } => println!("on y-axis at {}", y),
+    Point { x, y: 0 } => println!("on x-axis at {}", x),
+    Point { x, y } => println!("at ({}, {})", x, y),
+}
+```"#,
+            ),
+            "let" => (
+                "let",
+                "Binds a value to a pattern, with optional type annotation.",
+                r#"```blood
+let x = 42;
+let y: f64 = 3.14;
+let (a, b) = (1, 2);
+let Point { x, y } = point;
+let mut counter = 0;
+```"#,
+            ),
+            "if" => (
+                "if",
+                "Conditional expression that evaluates one of two branches.",
+                r#"```blood
+if condition {
+    // then branch
+} else {
+    // else branch
+}
+
+// As expression
+let result = if x > 0 { "positive" } else { "non-positive" };
+
+// If-let for pattern matching
+if let Some(value) = option {
+    println!("{}", value);
+}
+```"#,
+            ),
+            "loop" => (
+                "loop",
+                "Creates an infinite loop that can be exited with `break`.",
+                r#"```blood
+loop {
+    if should_stop() {
+        break;
+    }
+}
+
+// With value
+let result = loop {
+    if done() {
+        break computed_value;
+    }
+};
+```"#,
+            ),
+            "while" => (
+                "while",
+                "Loops while a condition is true.",
+                r#"```blood
+while condition {
+    // loop body
+}
+
+// While-let for iteration
+while let Some(item) = iter.next() {
+    process(item);
+}
+```"#,
+            ),
+            "for" => (
+                "for",
+                "Iterates over elements of an iterator.",
+                r#"```blood
+for item in collection {
+    process(item);
+}
+
+for i in 0..10 {
+    println!("{}", i);
+}
+
+for (idx, value) in items.iter().enumerate() {
+    println!("{}: {}", idx, value);
+}
+```"#,
+            ),
+            "trait" => (
+                "trait",
+                "Declares a trait (interface) that types can implement.",
+                r#"```blood
+trait Display {
+    fn display(self) -> str;
+}
+
+impl Display for Point {
+    fn display(self) -> str {
+        format!("({}, {})", self.x, self.y)
+    }
+}
+```"#,
+            ),
+            "impl" => (
+                "impl",
+                "Implements methods for a type, or implements a trait for a type.",
+                r#"```blood
+impl Point {
+    fn new(x: f64, y: f64) -> Point {
+        Point { x, y }
+    }
+
+    fn distance(self, other: Point) -> f64 {
+        // ...
+    }
+}
+
+impl Display for Point {
+    fn display(self) -> str {
+        format!("({}, {})", self.x, self.y)
+    }
+}
+```"#,
+            ),
+            "println" | "println!" => (
+                "println!",
+                "Prints formatted output to stdout with a newline.",
+                r#"```blood
+println!("Hello, world!");
+println!("x = {}", x);
+println!("{} + {} = {}", a, b, a + b);
+```"#,
+            ),
+            "print" | "print!" => (
+                "print!",
+                "Prints formatted output to stdout without a newline.",
+                r#"```blood
+print!("Loading...");
+// do work
+println!(" done!");
+```"#,
+            ),
+            "format" | "format!" => (
+                "format!",
+                "Creates a formatted string.",
+                r#"```blood
+let msg = format!("Hello, {}!", name);
+let coords = format!("({}, {})", x, y);
+```"#,
+            ),
+            "eprintln" | "eprintln!" => (
+                "eprintln!",
+                "Prints formatted output to stderr with a newline.",
+                r#"```blood
+eprintln!("Error: {}", message);
+```"#,
+            ),
+            "dbg" | "dbg!" => (
+                "dbg!",
+                "Debug macro that prints the expression and its value to stderr, then returns the value.",
+                r#"```blood
+let x = dbg!(compute_value());
+// Prints: compute_value() = 42 (or similar)
+// x is now 42
+```"#,
+            ),
+            "vec" | "vec!" => (
+                "vec!",
+                "Creates an array from a list of elements or repeated values.",
+                r#"```blood
+let nums = vec![1, 2, 3, 4, 5];
+let zeros = vec![0; 10];  // 10 zeros
+```"#,
+            ),
+            "assert" | "assert!" => (
+                "assert!",
+                "Panics if the condition is false.",
+                r#"```blood
+assert!(x > 0);
+assert!(result.is_ok(), "Operation failed");
+```"#,
+            ),
+            "return" => (
+                "return",
+                "Returns a value from the current function.",
+                r#"```blood
+fn find(items: [i32], target: i32) -> bool {
+    for item in items {
+        if item == target {
+            return true;
+        }
+    }
+    false
+}
+```"#,
+            ),
+            "break" => (
+                "break",
+                "Exits the current loop, optionally with a value.",
+                r#"```blood
+loop {
+    if done() {
+        break;
+    }
+}
+
+let result = loop {
+    if found() {
+        break value;
+    }
+};
+```"#,
+            ),
+            "continue" => (
+                "continue",
+                "Skips to the next iteration of a loop.",
+                r#"```blood
+for i in 0..10 {
+    if i % 2 == 0 {
+        continue;
+    }
+    println!("{}", i);  // prints odd numbers
+}
+```"#,
+            ),
+            "pub" => (
+                "pub",
+                "Makes an item publicly visible outside its module.",
+                r#"```blood
+pub fn public_function() { }
+pub struct PublicType { }
+pub mod public_module { }
+```"#,
+            ),
+            "mod" => (
+                "mod",
+                "Declares a module.",
+                r#"```blood
+mod utils {
+    pub fn helper() { }
+}
+
+// Use items from module
+utils::helper();
+```"#,
+            ),
+            "use" => (
+                "use",
+                "Imports items from a module into the current scope.",
+                r#"```blood
+use std::io;
+use std::collections::{HashMap, HashSet};
+use crate::utils::helper;
+```"#,
+            ),
+            "unsafe" => (
+                "unsafe",
+                "Marks a block or function as unsafe, allowing raw pointer operations.",
+                r#"```blood
+unsafe {
+    *raw_ptr = value;
+}
+
+unsafe fn dangerous() { }
+```"#,
+            ),
+            _ => return None,
+        };
+
+        let word_end = word_start + word.len();
+        let range = Range {
+            start: self.offset_to_position(word_start, text),
+            end: self.offset_to_position(word_end, text),
+        };
+
+        let content = format!(
+            "```blood\n{}\n```\n\n{}\n\n---\n\n**Example:**\n\n{}",
+            title, description, example
+        );
+
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: Some(range),
+        })
+    }
+
+    /// Extracts the word at the given offset.
+    fn extract_word_at_offset(&self, text: &str, offset: usize) -> Option<String> {
+        if offset >= text.len() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+
+        // Find word start
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_' || bytes[start - 1] == b'!') {
+            start -= 1;
+        }
+
+        // Find word end
+        let mut end = offset;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'!') {
+            end += 1;
+        }
+
+        if start == end {
+            return None;
+        }
+
+        Some(text[start..end].to_string())
+    }
+
+    /// Finds the start of the word at the given offset.
+    fn find_word_start(&self, text: &str, offset: usize) -> Option<usize> {
+        if offset >= text.len() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_' || bytes[start - 1] == b'!') {
+            start -= 1;
+        }
+
+        Some(start)
+    }
+
+    /// Provides example code for user-defined symbols.
+    fn symbol_example(&self, symbol: &SymbolInfo) -> Option<String> {
+        match symbol.kind {
+            SymbolKind::FUNCTION => {
+                Some(format!(
+                    "```blood\n// Call the function\nlet result = {}(args);\n```",
+                    symbol.name
+                ))
+            }
+            SymbolKind::STRUCT => {
+                Some(format!(
+                    "```blood\n// Create an instance\nlet instance = {} {{ /* fields */ }};\n```",
+                    symbol.name
+                ))
+            }
+            SymbolKind::ENUM => {
+                Some(format!(
+                    "```blood\n// Use a variant\nlet value = {}::VariantName;\n\n// Pattern match\nmatch value {{\n    {}::VariantName => {{ /* ... */ }}\n}}\n```",
+                    symbol.name, symbol.name
+                ))
+            }
+            SymbolKind::INTERFACE if symbol.description.contains("effect ") => {
+                Some(format!(
+                    "```blood\n// Perform an operation\nperform {}::operation();\n```",
+                    symbol.name
+                ))
+            }
+            SymbolKind::CLASS if symbol.description.contains("handler ") => {
+                Some(format!(
+                    "```blood\n// Use the handler\nwith {} {{ /* state */ }} {{\n    // computation\n}}\n```",
+                    symbol.name
+                ))
+            }
+            _ => None,
+        }
     }
 
     /// Converts a span to an LSP range.
@@ -1033,16 +1560,234 @@ impl DefinitionProvider {
         let text = doc.text();
         let offset = doc.position_to_offset(position)?;
 
-        // Find symbol at offset
-        let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
-        let symbol = analysis.symbols.get(*symbol_idx)?;
+        // First, try to find a direct symbol at offset
+        if let Some(symbol_idx) = analysis.symbol_at_offset.get(&offset) {
+            if let Some(symbol) = analysis.symbols.get(*symbol_idx) {
+                let range = self.span_to_range(&symbol.def_span, &text);
+                return Some(Location {
+                    uri: doc.uri().clone(),
+                    range,
+                });
+            }
+        }
 
-        let range = self.span_to_range(&symbol.def_span, &text);
+        // Try to resolve qualified paths (e.g., Effect::operation)
+        if let Some(location) = self.find_qualified_definition(doc, &text, offset, &analysis) {
+            return Some(location);
+        }
 
-        Some(Location {
-            uri: doc.uri().clone(),
-            range,
-        })
+        // Try to find effect operation references in perform expressions
+        if let Some(location) = self.find_effect_operation_definition(doc, &text, offset, &analysis) {
+            return Some(location);
+        }
+
+        None
+    }
+
+    /// Finds definition for qualified paths like `Effect::operation`.
+    fn find_qualified_definition(
+        &self,
+        doc: &Document,
+        text: &str,
+        offset: usize,
+        analysis: &AnalysisResult,
+    ) -> Option<Location> {
+        // Extract the word and check if it's part of a qualified path
+        let word = self.extract_word_at_offset(text, offset)?;
+
+        // Look backwards for `::`  to find if this is part of a qualified name
+        let before_offset = self.find_word_start(text, offset)?;
+
+        // Check if there's `::` before this word
+        if before_offset >= 2 {
+            let potential_colons = &text[before_offset.saturating_sub(2)..before_offset];
+            if potential_colons == "::" {
+                // Find the qualifier (effect/struct/enum name) before ::
+                let qualifier_end = before_offset - 2;
+                if let Some(qualifier) = self.extract_word_ending_at(text, qualifier_end) {
+                    // Look for the operation/method within the qualified type
+                    return self.find_member_definition(doc, &qualifier, &word, analysis);
+                }
+            }
+        }
+
+        // Check if there's `::` after this word (cursor is on the qualifier)
+        let word_end = before_offset + word.len();
+        if word_end + 2 <= text.len() {
+            let potential_colons = &text[word_end..word_end + 2];
+            if potential_colons == "::" {
+                // Find the member name after ::
+                if let Some(member) = self.extract_word_starting_at(text, word_end + 2) {
+                    return self.find_member_definition(doc, &word, &member, analysis);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Finds a member (operation, variant, method) definition within a type.
+    fn find_member_definition(
+        &self,
+        doc: &Document,
+        qualifier: &str,
+        member: &str,
+        analysis: &AnalysisResult,
+    ) -> Option<Location> {
+        // Search for a symbol that matches the member name and is associated with the qualifier
+        for symbol in &analysis.symbols {
+            // Check for effect operations
+            if symbol.name == member {
+                if symbol.description.contains(&format!("op {}(", member)) {
+                    // This is an effect operation, check if it belongs to the right effect
+                    // Look for the parent effect symbol
+                    for parent in &analysis.symbols {
+                        if parent.name == qualifier && parent.description.contains("effect ") {
+                            // Found the effect, return the operation location
+                            return Some(Location {
+                                uri: doc.uri().clone(),
+                                range: self.span_to_range(&symbol.def_span, &doc.text()),
+                            });
+                        }
+                    }
+                }
+
+                // Check for enum variants
+                if symbol.description.contains(&format!("variant of {}", qualifier)) {
+                    return Some(Location {
+                        uri: doc.uri().clone(),
+                        range: self.span_to_range(&symbol.def_span, &doc.text()),
+                    });
+                }
+
+                // Check for methods (impl methods)
+                if symbol.description.contains(&format!("{}::{}", qualifier, member)) {
+                    return Some(Location {
+                        uri: doc.uri().clone(),
+                        range: self.span_to_range(&symbol.def_span, &doc.text()),
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Finds effect operation definitions from perform expressions.
+    fn find_effect_operation_definition(
+        &self,
+        doc: &Document,
+        text: &str,
+        offset: usize,
+        analysis: &AnalysisResult,
+    ) -> Option<Location> {
+        // Look for `perform` keyword before the offset to detect perform expressions
+        let search_start = offset.saturating_sub(100); // Look back up to 100 chars
+        let search_text = &text[search_start..offset.min(text.len())];
+
+        // Check if we're in a perform expression
+        if let Some(perform_pos) = search_text.rfind("perform ") {
+            let perform_abs_pos = search_start + perform_pos;
+            let after_perform = &text[perform_abs_pos + 8..];
+
+            // Extract the effect::operation part
+            // Pattern: perform Effect::operation(...)
+            if let Some(paren_pos) = after_perform.find('(') {
+                let path = after_perform[..paren_pos].trim();
+                if let Some(colon_pos) = path.find("::") {
+                    let effect_name = path[..colon_pos].trim();
+                    let op_name = path[colon_pos + 2..].trim();
+
+                    // Check if offset is within this path
+                    let path_start = perform_abs_pos + 8;
+                    let path_end = path_start + path.len();
+
+                    if offset >= path_start && offset <= path_end + 1 {
+                        // Try to find the operation definition
+                        return self.find_member_definition(doc, effect_name, op_name, analysis);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Extracts the word at a given offset.
+    fn extract_word_at_offset(&self, text: &str, offset: usize) -> Option<String> {
+        if offset >= text.len() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+
+        let mut end = offset;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+
+        if start == end {
+            return None;
+        }
+
+        Some(text[start..end].to_string())
+    }
+
+    /// Finds the start of the word at the given offset.
+    fn find_word_start(&self, text: &str, offset: usize) -> Option<usize> {
+        if offset >= text.len() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let mut start = offset;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+
+        Some(start)
+    }
+
+    /// Extracts a word ending at the given position.
+    fn extract_word_ending_at(&self, text: &str, end: usize) -> Option<String> {
+        if end == 0 || end > text.len() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let mut start = end;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+
+        if start == end {
+            return None;
+        }
+
+        Some(text[start..end].to_string())
+    }
+
+    /// Extracts a word starting at the given position.
+    fn extract_word_starting_at(&self, text: &str, start: usize) -> Option<String> {
+        if start >= text.len() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+
+        if start == end {
+            return None;
+        }
+
+        Some(text[start..end].to_string())
     }
 
     /// Converts a span to an LSP range.
@@ -1257,8 +2002,23 @@ impl CompletionProvider {
     }
 
     /// Determines the completion context from the cursor position.
-    fn determine_context(&self, prefix: &str, _text: &str, _position: Position) -> CompletionContext {
+    fn determine_context(&self, prefix: &str, text: &str, position: Position) -> CompletionContext {
         let trimmed = prefix.trim();
+
+        // Check for handler context (inside handler body after 'handler Name for Effect')
+        if self.is_in_handler_context(text, position) {
+            return CompletionContext::Handler;
+        }
+
+        // Check for perform effect context (after 'perform ')
+        if trimmed.ends_with("perform ") || trimmed.contains("perform ") {
+            return CompletionContext::PerformEffect;
+        }
+
+        // Check for with handler context (after 'with ')
+        if trimmed.ends_with("with ") {
+            return CompletionContext::WithHandler;
+        }
 
         // Check for method/field access
         if trimmed.ends_with('.') || trimmed.contains(". ") {
@@ -1292,6 +2052,31 @@ impl CompletionProvider {
         CompletionContext::Expression
     }
 
+    /// Checks if the cursor is inside a handler definition.
+    fn is_in_handler_context(&self, text: &str, position: Position) -> bool {
+        // Look for 'handler' keyword before the current position
+        let lines: Vec<&str> = text.lines().collect();
+        let line_idx = position.line as usize;
+
+        // Search backwards for handler declaration
+        for i in (0..=line_idx).rev() {
+            if let Some(line) = lines.get(i) {
+                if line.trim().starts_with("handler ") && line.contains(" for ") {
+                    // Check if we're after the opening brace
+                    let after_handler: String = lines[i..=line_idx].join("\n");
+                    let open_count = after_handler.matches('{').count();
+                    let close_count = after_handler.matches('}').count();
+                    return open_count > close_count;
+                }
+                // Stop if we hit a closing brace at the start of a line (end of previous block)
+                if line.trim() == "}" {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+
     /// Provides keyword completions based on context.
     fn keyword_completions(&self, context: &CompletionContext) -> Vec<CompletionItem> {
         match context {
@@ -1302,6 +2087,7 @@ impl CompletionProvider {
                 self.keyword_item("handler", "Effect handler"),
                 self.keyword_item("perform", "Perform effect operation"),
                 self.keyword_item("resume", "Resume continuation"),
+                self.keyword_item("with", "Run with effect handler"),
                 self.keyword_item("match", "Pattern matching"),
                 self.keyword_item("if", "Conditional expression"),
                 self.keyword_item("while", "While loop"),
@@ -1336,7 +2122,35 @@ impl CompletionProvider {
             CompletionContext::Pattern => vec![
                 self.keyword_item("_", "Wildcard pattern"),
             ],
+            CompletionContext::Handler => vec![
+                // Inside a handler, suggest common patterns
+                self.snippet_item(
+                    "fn",
+                    "fn ${1:operation}(${2:params}) {\n    resume(${3:value})\n}",
+                    "Handler operation implementation",
+                ),
+                self.keyword_item("resume", "Resume with a value"),
+                self.keyword_item("self", "Handler state"),
+            ],
+            CompletionContext::PerformEffect => vec![
+                // After 'perform', just let symbol completions handle effects
+            ],
+            CompletionContext::WithHandler => vec![
+                // After 'with', just let symbol completions handle handlers
+            ],
             CompletionContext::MemberAccess | CompletionContext::Import => vec![],
+        }
+    }
+
+    /// Creates a snippet completion item.
+    fn snippet_item(&self, label: &str, snippet: &str, description: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(description.to_string()),
+            insert_text: Some(snippet.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
         }
     }
 
@@ -1362,10 +2176,26 @@ impl CompletionProvider {
         for symbol in &analysis.symbols {
             // Filter by context
             let matches_context = match context {
-                CompletionContext::Type => matches!(symbol.kind, SymbolKind::STRUCT | SymbolKind::ENUM | SymbolKind::TYPE_PARAMETER),
+                CompletionContext::Type => {
+                    matches!(symbol.kind, SymbolKind::STRUCT | SymbolKind::ENUM | SymbolKind::TYPE_PARAMETER)
+                }
                 CompletionContext::Expression => true, // All symbols can appear in expressions
                 CompletionContext::Effect => symbol.description.contains("effect "),
-                CompletionContext::Pattern => matches!(symbol.kind, SymbolKind::STRUCT | SymbolKind::ENUM),
+                CompletionContext::Pattern => {
+                    matches!(symbol.kind, SymbolKind::STRUCT | SymbolKind::ENUM)
+                }
+                CompletionContext::Handler => {
+                    // In handler context, show the effect's operations for implementation hints
+                    symbol.kind == SymbolKind::METHOD && symbol.description.contains("op ")
+                }
+                CompletionContext::PerformEffect => {
+                    // After 'perform', show effects and their operations
+                    symbol.description.contains("effect ") || symbol.description.contains("op ")
+                }
+                CompletionContext::WithHandler => {
+                    // After 'with', show handlers
+                    symbol.description.contains("handler ")
+                }
                 CompletionContext::MemberAccess => true, // Need type info to filter properly
                 CompletionContext::Import => true,
             };
@@ -1388,11 +2218,30 @@ impl CompletionProvider {
                 SymbolKind::TYPE_PARAMETER => Some(CompletionItemKind::TYPE_PARAMETER),
                 SymbolKind::FIELD => Some(CompletionItemKind::FIELD),
                 SymbolKind::METHOD => Some(CompletionItemKind::METHOD),
+                SymbolKind::INTERFACE if symbol.description.contains("effect ") => {
+                    Some(CompletionItemKind::INTERFACE)
+                }
+                SymbolKind::CLASS if symbol.description.contains("handler ") => {
+                    Some(CompletionItemKind::CLASS)
+                }
                 _ => Some(CompletionItemKind::TEXT),
             };
 
-            items.push(CompletionItem {
-                label: symbol.name.clone(),
+            // Add special formatting for different contexts
+            let (label, insert_text) = match context {
+                CompletionContext::PerformEffect if symbol.description.contains("effect ") => {
+                    // For effects, suggest the Effect::operation pattern
+                    (symbol.name.clone(), Some(format!("{}::", symbol.name)))
+                }
+                CompletionContext::WithHandler if symbol.description.contains("handler ") => {
+                    // For handlers, suggest the handler initialization pattern
+                    (symbol.name.clone(), Some(format!("{} {{ }}", symbol.name)))
+                }
+                _ => (symbol.name.clone(), None),
+            };
+
+            let mut item = CompletionItem {
+                label,
                 kind,
                 detail: Some(symbol.description.clone()),
                 documentation: symbol.doc.as_ref().map(|d| {
@@ -1402,7 +2251,13 @@ impl CompletionProvider {
                     })
                 }),
                 ..Default::default()
-            });
+            };
+
+            if let Some(text) = insert_text {
+                item.insert_text = Some(text);
+            }
+
+            items.push(item);
         }
 
         items
@@ -1450,4 +2305,10 @@ enum CompletionContext {
     MemberAccess,
     /// Import path.
     Import,
+    /// Inside a handler definition.
+    Handler,
+    /// After `perform` keyword (for effect operations).
+    PerformEffect,
+    /// After `with` keyword (for handler selection).
+    WithHandler,
 }
