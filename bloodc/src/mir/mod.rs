@@ -27,6 +27,8 @@
 //! - [`lowering`] - HIR to MIR lowering pass
 //! - [`escape`] - Escape analysis for tier promotion
 //! - [`snapshot`] - Generation snapshots for effect handlers
+//! - [`closure_analysis`] - Closure environment size analysis and optimization
+//! - [`visitor`] - Visitor infrastructure for MIR traversal
 //!
 //! ## MIR Structure Overview
 //!
@@ -51,17 +53,21 @@
 //! | Generation snapshots | Pending |
 
 pub mod body;
+pub mod closure_analysis;
 pub mod escape;
 pub mod lowering;
 pub mod ptr;
 pub mod snapshot;
 pub mod types;
+pub mod visitor;
 
 pub use body::{MirBody, MirLocal, LocalKind};
+pub use closure_analysis::{ClosureAnalyzer, ClosureAnalysisConfig, ClosureAnalysisResults, ClosureInfo, ClosureStats};
 pub use escape::{EscapeAnalyzer, EscapeState, EscapeResults};
 pub use lowering::MirLowering;
 pub use ptr::{BloodPtr, PtrMetadata, MemoryTier, PtrFlags};
-pub use snapshot::{GenerationSnapshot, SnapshotEntry};
+pub use snapshot::{GenerationSnapshot, SnapshotEntry, LazySnapshot, LazyValidationStats};
+pub use visitor::{Visitor, Location, PlaceContext, walk_body, collect_rvalue_locals, collect_operand_locals};
 pub use types::{
     BasicBlock, BasicBlockData, BasicBlockId,
     Statement, StatementKind,
