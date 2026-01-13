@@ -606,8 +606,24 @@ impl<'a> DispatchResolver<'a> {
     /// Try to match a parameter type against an argument type, extracting
     /// type parameter substitutions.
     ///
-    /// Returns `Ok(())` if matching succeeded, or an error if there's a
-    /// type mismatch or conflicting substitutions.
+    /// # Return Values
+    ///
+    /// - `Ok(())` in two cases:
+    ///   1. **Substitution extracted**: A type parameter was successfully bound to a concrete type
+    ///   2. **Structure mismatch**: The parameter and argument have different type constructors
+    ///      (e.g., param is `Ref` but arg is `i32`). In this case, no substitution is extracted
+    ///      and type compatibility is deferred to the subsequent subtype checking phase.
+    ///
+    /// - `Err(InstantiationResult)` if there's a conflicting substitution (same type parameter
+    ///   bound to two different types).
+    ///
+    /// # Why Structure Mismatches Return Ok
+    ///
+    /// This function only extracts substitutions from structurally matching types. When
+    /// structures don't match, returning `Ok(())` is correct because:
+    /// 1. This function's job is substitution extraction, not type validation
+    /// 2. Subtype checking handles actual type compatibility
+    /// 3. A mismatch here doesn't mean the method is invalid - it may still be valid via subtyping
     fn try_match_type_param(
         &self,
         param_type: &Type,
@@ -646,7 +662,9 @@ impl<'a> DispatchResolver<'a> {
                             Ok(()) // Let subtype checking handle this
                         }
                     }
-                    _ => Ok(()), // Let subtype checking handle non-ref args
+                    // Structure mismatch (param is Ref, arg is not): no substitution to extract.
+                    // Type compatibility will be validated by subtype checking.
+                    _ => Ok(()),
                 }
             }
 
@@ -757,16 +775,31 @@ impl<'a> DispatchResolver<'a> {
                 }
             }
 
-            // Primitive types, Never, Error, Infer, non-method Param: no matching needed
+            // Ground types and non-extractable types: no type parameter substitutions possible.
+            // These are either:
+            // - Concrete types (Primitive, Never) where no generic extraction is needed
+            // - Error types from earlier compilation phases
+            // - Inference variables handled elsewhere
+            // - Params not in valid_params (handled by earlier check)
+            // - Complex types (Closure, DynTrait, Forall) that don't participate in simple substitution
+            //
+            // Returning Ok(()) is correct: no substitution extracted, defer to subtype checking.
             TypeKind::Primitive(_)
             | TypeKind::Never
             | TypeKind::Error
             | TypeKind::Infer(_)
-            | TypeKind::Param(_) // Param not in valid_params
+            | TypeKind::Param(_) // Param not in valid_params (handled above when it IS in valid_params)
             | TypeKind::Closure { .. }
             | TypeKind::DynTrait { .. }
             | TypeKind::Forall { .. } => Ok(()),
         }
+
+        // NOTE on structure mismatch cases (all the `_ => Ok(())` above):
+        // When the param and arg have different type constructors (e.g., param is Array, arg is i32),
+        // we return Ok(()) rather than Err because:
+        // 1. This function's purpose is substitution EXTRACTION, not type VALIDATION
+        // 2. The actual type compatibility check happens in `is_subtype_of` called later
+        // 3. Returning Ok(()) means "no substitutions from this mismatch, but not necessarily invalid"
     }
 
     /// Apply type parameter substitutions to a type.
