@@ -63,9 +63,11 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             Rvalue::BinaryOp { op, left, right } => {
+                let operand_ty = self.get_operand_type(left, body);
+                let is_float = self.is_float_type(operand_ty);
                 let lhs = self.compile_mir_operand(left, body, escape_results)?;
                 let rhs = self.compile_mir_operand(right, body, escape_results)?;
-                self.compile_binary_op(*op, lhs, rhs)
+                self.compile_binary_op(*op, lhs, rhs, is_float)
             }
 
             Rvalue::CheckedBinaryOp { op, left, right } => {
@@ -415,6 +417,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         op: BinOp,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
+        is_float: bool,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        if is_float {
+            self.compile_float_binary_op(op, lhs, rhs)
+        } else {
+            self.compile_int_binary_op(op, lhs, rhs)
+        }
+    }
+
+    /// Compile an integer binary operation.
+    fn compile_int_binary_op(
+        &mut self,
+        op: BinOp,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         let lhs_int = lhs.into_int_value();
         let rhs_int = rhs.into_int_value();
@@ -447,6 +464,64 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(result.into())
     }
 
+    /// Compile a floating-point binary operation.
+    fn compile_float_binary_op(
+        &mut self,
+        op: BinOp,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use inkwell::FloatPredicate;
+
+        let lhs_float = lhs.into_float_value();
+        let rhs_float = rhs.into_float_value();
+
+        let result: BasicValueEnum<'ctx> = match op {
+            BinOp::Add => self.builder.build_float_add(lhs_float, rhs_float, "fadd")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float add error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Sub => self.builder.build_float_sub(lhs_float, rhs_float, "fsub")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float sub error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Mul => self.builder.build_float_mul(lhs_float, rhs_float, "fmul")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float mul error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Div => self.builder.build_float_div(lhs_float, rhs_float, "fdiv")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float div error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Rem => self.builder.build_float_rem(lhs_float, rhs_float, "frem")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float rem error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Eq => self.builder.build_float_compare(FloatPredicate::OEQ, lhs_float, rhs_float, "feq")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float compare error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Ne => self.builder.build_float_compare(FloatPredicate::ONE, lhs_float, rhs_float, "fne")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float compare error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Lt => self.builder.build_float_compare(FloatPredicate::OLT, lhs_float, rhs_float, "flt")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float compare error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Le => self.builder.build_float_compare(FloatPredicate::OLE, lhs_float, rhs_float, "fle")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float compare error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Gt => self.builder.build_float_compare(FloatPredicate::OGT, lhs_float, rhs_float, "fgt")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float compare error: {}", e), Span::dummy())])?
+                .into(),
+            BinOp::Ge => self.builder.build_float_compare(FloatPredicate::OGE, lhs_float, rhs_float, "fge")
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM float compare error: {}", e), Span::dummy())])?
+                .into(),
+            // Bitwise operations not supported for floats
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::Offset => {
+                return Err(vec![Diagnostic::error(
+                    format!("bitwise operation {:?} not supported for floating-point types", op),
+                    Span::dummy(),
+                )]);
+            }
+        };
+
+        Ok(result)
+    }
+
     /// Compile a checked binary operation using LLVM overflow intrinsics.
     ///
     /// Returns a struct `(result, overflow_flag)` where overflow_flag is true
@@ -473,7 +548,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // For operations without overflow intrinsics, fall back to unchecked
             // and return (result, false)
             _ => {
-                let result = self.compile_binary_op(op, lhs, rhs)?;
+                let result = self.compile_binary_op(op, lhs, rhs, false)?;
                 // Build a struct with result and false (no overflow)
                 let bool_type = self.context.bool_type();
                 let no_overflow = bool_type.const_zero();
@@ -882,5 +957,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // Default to signed for other types (conservative)
             _ => true,
         }
+    }
+
+    /// Check if a type is a floating-point type.
+    pub(super) fn is_float_type(&self, ty: &Type) -> bool {
+        matches!(ty.kind(), TypeKind::Primitive(PrimitiveTy::Float(_)))
     }
 }
