@@ -65,7 +65,7 @@ impl SemanticAnalyzer {
 
         // Collect symbols from declarations
         for decl in &program.declarations {
-            self.collect_declaration_symbols(decl, &interner, &mut symbols, &mut symbol_at_offset);
+            self.collect_declaration_symbols(decl, &text, &interner, &mut symbols, &mut symbol_at_offset);
         }
 
         // Attempt type checking to get inferred types
@@ -116,6 +116,7 @@ impl SemanticAnalyzer {
     fn collect_declaration_symbols(
         &self,
         decl: &Declaration,
+        source: &str,
         interner: &string_interner::DefaultStringInterner,
         symbols: &mut Vec<SymbolInfo>,
         symbol_at_offset: &mut HashMap<usize, usize>,
@@ -140,7 +141,7 @@ impl SemanticAnalyzer {
                     format!("fn {}({}) -> {} / {}", name, params.join(", "), ret, effects)
                 };
 
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -164,13 +165,13 @@ impl SemanticAnalyzer {
 
                 // Collect symbols from function body
                 if let Some(body) = &fn_decl.body {
-                    self.collect_block_symbols(body, interner, symbols, symbol_at_offset);
+                    self.collect_block_symbols(body, source, interner, symbols, symbol_at_offset);
                 }
             }
             Declaration::Struct(struct_decl) => {
                 let name = self.resolve_symbol(&struct_decl.name.node, interner);
                 let description = format!("struct {}", name);
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -192,7 +193,7 @@ impl SemanticAnalyzer {
                     .map(|v| self.resolve_symbol(&v.name.node, interner))
                     .collect();
                 let description = format!("enum {} {{ {} }}", name, variants.join(", "));
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -232,7 +233,7 @@ impl SemanticAnalyzer {
                     .map(|op| self.resolve_symbol(&op.name.node, interner))
                     .collect();
                 let description = format!("effect {} {{ {} }}", name, ops.join(", "));
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -279,7 +280,7 @@ impl SemanticAnalyzer {
                     ast::HandlerKind::Shallow => "shallow",
                 };
                 let description = format!("{} handler {} for {}", kind, name, effect_name);
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -298,7 +299,7 @@ impl SemanticAnalyzer {
             Declaration::Trait(trait_decl) => {
                 let name = self.resolve_symbol(&trait_decl.name.node, interner);
                 let description = format!("trait {}", name);
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -318,7 +319,7 @@ impl SemanticAnalyzer {
                 let name = self.resolve_symbol(&type_decl.name.node, interner);
                 let aliased = self.type_to_string(&type_decl.ty, interner);
                 let description = format!("type {} = {}", name, aliased);
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -338,7 +339,7 @@ impl SemanticAnalyzer {
                 let name = self.resolve_symbol(&const_decl.name.node, interner);
                 let ty = self.type_to_string(&const_decl.ty, interner);
                 let description = format!("const {}: {}", name, ty);
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -359,7 +360,7 @@ impl SemanticAnalyzer {
                 let ty = self.type_to_string(&static_decl.ty, interner);
                 let mut_str = if static_decl.is_mut { "mut " } else { "" };
                 let description = format!("static {}{}: {}", mut_str, name, ty);
-                let doc = self.extract_doc_comment(decl);
+                let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();
                 symbols.push(SymbolInfo {
@@ -504,6 +505,7 @@ impl SemanticAnalyzer {
     fn collect_block_symbols(
         &self,
         block: &ast::Block,
+        source: &str,
         interner: &string_interner::DefaultStringInterner,
         symbols: &mut Vec<SymbolInfo>,
         symbol_at_offset: &mut HashMap<usize, usize>,
@@ -536,16 +538,16 @@ impl SemanticAnalyzer {
                     }
                 }
                 Statement::Expr { expr, .. } => {
-                    self.collect_expr_symbols(expr, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(expr, source, interner, symbols, symbol_at_offset);
                 }
                 Statement::Item(decl) => {
-                    self.collect_declaration_symbols(decl, interner, symbols, symbol_at_offset);
+                    self.collect_declaration_symbols(decl, source, interner, symbols, symbol_at_offset);
                 }
             }
         }
 
         if let Some(expr) = &block.expr {
-            self.collect_expr_symbols(expr, interner, symbols, symbol_at_offset);
+            self.collect_expr_symbols(expr, source, interner, symbols, symbol_at_offset);
         }
     }
 
@@ -553,6 +555,7 @@ impl SemanticAnalyzer {
     fn collect_expr_symbols(
         &self,
         expr: &ast::Expr,
+        source: &str,
         interner: &string_interner::DefaultStringInterner,
         symbols: &mut Vec<SymbolInfo>,
         symbol_at_offset: &mut HashMap<usize, usize>,
@@ -562,143 +565,143 @@ impl SemanticAnalyzer {
                 for param in params {
                     self.collect_pattern_symbols(&param.pattern, interner, symbols, symbol_at_offset);
                 }
-                self.collect_expr_symbols(body, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(body, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Block(block) => {
-                self.collect_block_symbols(block, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(block, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::If { condition, then_branch, else_branch } => {
-                self.collect_expr_symbols(condition, interner, symbols, symbol_at_offset);
-                self.collect_block_symbols(then_branch, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(condition, source, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(then_branch, source, interner, symbols, symbol_at_offset);
                 if let Some(else_branch) = else_branch {
                     match else_branch {
                         ast::ElseBranch::Block(block) => {
-                            self.collect_block_symbols(block, interner, symbols, symbol_at_offset);
+                            self.collect_block_symbols(block, source, interner, symbols, symbol_at_offset);
                         }
                         ast::ElseBranch::If(if_expr) => {
-                            self.collect_expr_symbols(if_expr, interner, symbols, symbol_at_offset);
+                            self.collect_expr_symbols(if_expr, source, interner, symbols, symbol_at_offset);
                         }
                     }
                 }
             }
             ExprKind::IfLet { pattern, scrutinee, then_branch, else_branch } => {
                 self.collect_pattern_symbols(pattern, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(scrutinee, interner, symbols, symbol_at_offset);
-                self.collect_block_symbols(then_branch, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(scrutinee, source, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(then_branch, source, interner, symbols, symbol_at_offset);
                 if let Some(else_branch) = else_branch {
                     match else_branch {
                         ast::ElseBranch::Block(block) => {
-                            self.collect_block_symbols(block, interner, symbols, symbol_at_offset);
+                            self.collect_block_symbols(block, source, interner, symbols, symbol_at_offset);
                         }
                         ast::ElseBranch::If(if_expr) => {
-                            self.collect_expr_symbols(if_expr, interner, symbols, symbol_at_offset);
+                            self.collect_expr_symbols(if_expr, source, interner, symbols, symbol_at_offset);
                         }
                     }
                 }
             }
             ExprKind::Match { scrutinee, arms } => {
-                self.collect_expr_symbols(scrutinee, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(scrutinee, source, interner, symbols, symbol_at_offset);
                 for arm in arms {
                     self.collect_pattern_symbols(&arm.pattern, interner, symbols, symbol_at_offset);
-                    self.collect_expr_symbols(&arm.body, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(&arm.body, source, interner, symbols, symbol_at_offset);
                 }
             }
             ExprKind::Loop { body, .. } | ExprKind::Unsafe(body) | ExprKind::Region { body, .. } => {
-                self.collect_block_symbols(body, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(body, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::While { condition, body, .. } => {
-                self.collect_expr_symbols(condition, interner, symbols, symbol_at_offset);
-                self.collect_block_symbols(body, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(condition, source, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(body, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::WhileLet { pattern, scrutinee, body, .. } => {
                 self.collect_pattern_symbols(pattern, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(scrutinee, interner, symbols, symbol_at_offset);
-                self.collect_block_symbols(body, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(scrutinee, source, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(body, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::For { pattern, iter, body, .. } => {
                 self.collect_pattern_symbols(pattern, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(iter, interner, symbols, symbol_at_offset);
-                self.collect_block_symbols(body, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(iter, source, interner, symbols, symbol_at_offset);
+                self.collect_block_symbols(body, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::WithHandle { handler, body } => {
-                self.collect_expr_symbols(handler, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(body, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(handler, source, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(body, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Binary { left, right, .. } => {
-                self.collect_expr_symbols(left, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(right, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(left, source, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(right, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Unary { operand, .. } => {
-                self.collect_expr_symbols(operand, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(operand, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Call { callee, args, .. } => {
-                self.collect_expr_symbols(callee, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(callee, source, interner, symbols, symbol_at_offset);
                 for arg in args {
-                    self.collect_expr_symbols(&arg.value, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(&arg.value, source, interner, symbols, symbol_at_offset);
                 }
             }
             ExprKind::MethodCall { receiver, args, .. } => {
-                self.collect_expr_symbols(receiver, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(receiver, source, interner, symbols, symbol_at_offset);
                 for arg in args {
-                    self.collect_expr_symbols(&arg.value, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(&arg.value, source, interner, symbols, symbol_at_offset);
                 }
             }
             ExprKind::Field { base, .. } | ExprKind::Paren(base) => {
-                self.collect_expr_symbols(base, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(base, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Index { base, index } => {
-                self.collect_expr_symbols(base, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(index, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(base, source, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(index, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Tuple(elements) => {
                 for elem in elements {
-                    self.collect_expr_symbols(elem, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(elem, source, interner, symbols, symbol_at_offset);
                 }
             }
             ExprKind::Array(array) => {
                 match array {
                     ast::ArrayExpr::List(elements) => {
                         for elem in elements {
-                            self.collect_expr_symbols(elem, interner, symbols, symbol_at_offset);
+                            self.collect_expr_symbols(elem, source, interner, symbols, symbol_at_offset);
                         }
                     }
                     ast::ArrayExpr::Repeat { value, count } => {
-                        self.collect_expr_symbols(value, interner, symbols, symbol_at_offset);
-                        self.collect_expr_symbols(count, interner, symbols, symbol_at_offset);
+                        self.collect_expr_symbols(value, source, interner, symbols, symbol_at_offset);
+                        self.collect_expr_symbols(count, source, interner, symbols, symbol_at_offset);
                     }
                 }
             }
             ExprKind::Record { fields, base, .. } => {
                 for field in fields {
                     if let Some(value) = &field.value {
-                        self.collect_expr_symbols(value, interner, symbols, symbol_at_offset);
+                        self.collect_expr_symbols(value, source, interner, symbols, symbol_at_offset);
                     }
                 }
                 if let Some(base) = base {
-                    self.collect_expr_symbols(base, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(base, source, interner, symbols, symbol_at_offset);
                 }
             }
             ExprKind::Cast { expr, .. } | ExprKind::Return(Some(expr)) | ExprKind::Resume(expr) => {
-                self.collect_expr_symbols(expr, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(expr, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Assign { target, value } | ExprKind::AssignOp { target, value, .. } => {
-                self.collect_expr_symbols(target, interner, symbols, symbol_at_offset);
-                self.collect_expr_symbols(value, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(target, source, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(value, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Range { start, end, .. } => {
                 if let Some(start) = start {
-                    self.collect_expr_symbols(start, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(start, source, interner, symbols, symbol_at_offset);
                 }
                 if let Some(end) = end {
-                    self.collect_expr_symbols(end, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(end, source, interner, symbols, symbol_at_offset);
                 }
             }
             ExprKind::Break { value: Some(value), .. } => {
-                self.collect_expr_symbols(value, interner, symbols, symbol_at_offset);
+                self.collect_expr_symbols(value, source, interner, symbols, symbol_at_offset);
             }
             ExprKind::Perform { args, .. } => {
                 for arg in args {
-                    self.collect_expr_symbols(arg, interner, symbols, symbol_at_offset);
+                    self.collect_expr_symbols(arg, source, interner, symbols, symbol_at_offset);
                 }
             }
             // Terminal expressions with no nested symbols
@@ -811,9 +814,61 @@ impl SemanticAnalyzer {
     }
 
     /// Extracts documentation comment from a declaration.
-    fn extract_doc_comment(&self, _decl: &Declaration) -> Option<String> {
-        // TODO: Parse doc comments from the source once we have trivia preservation
-        None
+    ///
+    /// Looks for `///` doc comments immediately preceding the declaration.
+    /// Returns the concatenated doc comment content with leading `/// ` stripped.
+    fn extract_doc_comment(&self, source: &str, decl_span_start: usize) -> Option<String> {
+        // Find the line containing the declaration start
+        let prefix = &source[..decl_span_start];
+
+        // Split into lines, keeping track of their positions
+        let lines: Vec<&str> = prefix.lines().collect();
+        if lines.is_empty() {
+            return None;
+        }
+
+        // Walk backwards from the last line before the declaration
+        // collecting consecutive doc comment lines
+        let mut doc_lines: Vec<&str> = Vec::new();
+
+        for line in lines.iter().rev() {
+            let trimmed = line.trim();
+
+            // Check for doc comment (/// ...)
+            if let Some(content) = trimmed.strip_prefix("///") {
+                // Strip the leading space if present
+                let content = content.strip_prefix(' ').unwrap_or(content);
+                doc_lines.push(content);
+            } else if trimmed.is_empty() {
+                // Empty lines between doc comments and declaration are OK
+                // but we stop if we already have doc lines
+                if !doc_lines.is_empty() {
+                    // Check if we've hit a non-doc-comment line
+                    continue;
+                }
+            } else {
+                // Non-doc-comment, non-empty line - stop
+                break;
+            }
+        }
+
+        if doc_lines.is_empty() {
+            return None;
+        }
+
+        // Reverse since we collected bottom-up
+        doc_lines.reverse();
+        Some(doc_lines.join("\n"))
+    }
+
+    /// Gets the span start for a declaration.
+    ///
+    /// Returns the byte offset of the declaration's name (or start position),
+    /// which is used to find doc comments preceding the declaration.
+    fn get_decl_span_start(&self, decl: &Declaration) -> usize {
+        // Use the declaration's overall span start, which is where doc comments
+        // would be located (just before the declaration begins)
+        decl.span().start
     }
 }
 
