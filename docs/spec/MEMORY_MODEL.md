@@ -344,7 +344,7 @@ The 128-bit pointer overhead is accepted because:
 
 | Approach | Memory Overhead | CPU Overhead | Complexity | GC Pauses |
 |----------|-----------------|--------------|------------|-----------|
-| **Blood (128-bit gen-ref)** | 2x pointers | 1-2 cycles/check | Low | None |
+| **Blood (128-bit gen-ref)** | 2x pointers | ~4 cycles/check* | Low | None |
 | **Rust (borrow checker)** | None | None | High | None |
 | **Go (GC)** | ~1.5x heap | Variable | Low | 1-10ms |
 | **Java (GC)** | ~2x heap | Variable | Low | 10-100ms |
@@ -355,19 +355,82 @@ Blood's approach trades memory/CPU overhead for:
 - No GC pauses
 - Stronger safety than C
 
+*Note: The ~4 cycles/check is for heap dereferences with slot registry lookup. Stack references (Tier 0) have zero overhead. Benchmarked in `bloodc/benches/runtime_bench.rs`.
+
+#### 2.6.7 When 128-bit Overhead is Acceptable vs. Problematic
+
+**ACCEPTABLE — Use 128-bit pointers freely:**
+
+| Scenario | Why Acceptable |
+|----------|----------------|
+| **Application code** | Programmer productivity and safety outweigh ~5-15% overhead |
+| **Safety-critical systems** | Memory safety is mandatory; GC pauses are unacceptable |
+| **Long-running servers** | Avoiding GC pauses is worth steady-state overhead |
+| **Moderate pointer density** | Most programs are not pointer-heavy |
+| **Compute-bound workloads** | Pointer overhead is negligible vs. computation |
+
+**POTENTIALLY PROBLEMATIC — Consider alternatives:**
+
+| Scenario | Why Problematic | Mitigation |
+|----------|-----------------|------------|
+| **Linked lists** | Every node traversal incurs 2x memory traffic | Use arrays or `Vec<T>` instead |
+| **Dense pointer arrays** | 4 pointers per cache line instead of 8 | Pack data, not pointers |
+| **Graph algorithms** | Heavy pointer chasing magnifies overhead | Use index-based adjacency lists |
+| **Hot inner loops** | Every heap dereference costs ~4 cycles | Hoist values out of loops |
+| **Memory-constrained embedded** | 2x pointer size may exceed RAM budget | Consider Tier 0 only or alternative approach |
+| **Real-time with µs latency** | ~1.3ns per dereference may be significant | Profile and optimize hot paths |
+
+**GUIDELINES FOR MINIMIZING OVERHEAD:**
+
+1. **Prefer stack allocation**: Values that don't escape are Tier 0 (zero overhead)
+2. **Use value types**: `struct Point { x: i32, y: i32 }` is better than `&Point`
+3. **Avoid pointer-heavy data structures**: Linked lists, doubly-linked, etc.
+4. **Pack data, not pointers**: Store values inline when possible
+5. **Hoist dereferences**: Move heap access outside tight loops
+6. **Use arrays over graphs**: Index-based structures avoid pointer overhead
+
+**ANTI-PATTERNS TO AVOID:**
+
+```blood
+// BAD: Linked list with 128-bit pointers per node
+struct Node { value: i32, next: &Node }  // 16 bytes per link
+
+// GOOD: Array-based list
+struct ArrayList { data: [i32; 1024], len: i32 }  // No pointers
+
+// BAD: Pointer chasing in hot loop
+for i in 0..1000000 {
+    sum = sum + node.value  // Dereference per iteration
+    node = node.next
+}
+
+// GOOD: Index-based access
+for i in 0..len {
+    sum = sum + array[i]  // Single array, no pointer overhead
+}
+```
+
+**WHEN TO PROFILE:**
+
+Profile your application if:
+- More than 30% of data is pointers
+- Linked structures are traversed millions of times per second
+- Real-time requirements under 1ms latency
+- Memory usage is constrained below 100MB
+
 ---
 
 ## 3. Memory Tiers
 
 ### 3.1 Tier Overview
 
-| Tier | Name | Lifecycle | Safety Mechanism | Cost (expected)* |
+| Tier | Name | Lifecycle | Safety Mechanism | Cost (benchmarked) |
 |------|------|-----------|------------------|---------------------|
-| 0 | Stack | Lexical scope | Compile-time proof | Zero |
-| 1 | Region | Explicit scope | Generational check | ~1-2 cycles |
+| 0 | Stack | Lexical scope | Compile-time proof | Zero (~0.2ns) |
+| 1 | Region | Explicit scope | Generational check | ~4 cycles (~1.3ns) |
 | 2 | Persistent | Reference-counted | Deferred RC | Variable |
 
-*Cycle costs derived from Vale's implementation. See Performance Basis in §1.1.
+*Cycle costs benchmarked in `bloodc/benches/runtime_bench.rs`. Tier 0 is essentially free; Tier 1 cost is dominated by slot registry lookup.
 
 ### 3.2 Tier 0: Stack
 
@@ -2064,6 +2127,24 @@ In debug builds:
 
 ## Appendix A: Pointer Layout Reference
 
+### A.1 Integration Status by Component
+
+| Component | Field | Status | Location | Notes |
+|-----------|-------|--------|----------|-------|
+| **128-bit Pointer** | ADDRESS | ✅ Implemented | `mir/ptr.rs` | Full 64-bit address support |
+| | GENERATION | ✅ Implemented | `mir/ptr.rs` | Slot registry integration |
+| | TIER | ✅ Implemented | `mir/ptr.rs` | Stack(0), Region(1), Persistent(2) |
+| | FLAGS | ✅ Implemented | `mir/ptr.rs` | MUT, LINEAR, FROZEN, NULLABLE |
+| | TYPE_FP | ✅ Implemented | `mir/ptr.rs` | 24-bit type fingerprint |
+| **64-bit Stack Ptr** | ADDRESS | ✅ Implemented | `mir/ptr.rs` | Tier 0 thin pointers |
+| **Persistent Slot** | REFCOUNT | 📋 Designed | — | Deferred RC planned |
+| | WEAK_COUNT | 📋 Designed | — | Weak reference support |
+| | METADATA | 📋 Designed | — | Per-slot metadata |
+
+**Legend**: ✅ Implemented | 🔶 Partial | 📋 Designed | ❌ Not Started
+
+### A.2 Bit Layouts
+
 ```
 128-bit Blood Pointer (Tier 1/2):
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -2071,6 +2152,7 @@ In debug builds:
 ├──────┼─────────────────┼─────────────────┼───────┼───────┼────────────────┤
 │ Name │ ADDRESS         │ GENERATION      │ TIER  │ FLAGS │ TYPE_FP        │
 │ Size │ 64 bits         │ 32 bits         │ 4 bits│ 4 bits│ 24 bits        │
+│ Status │ ✅ Implemented │ ✅ Implemented │ ✅    │ ✅    │ ✅ Implemented │
 └────────────────────────────────────────────────────────────────────────────┘
 
 64-bit Stack Pointer (Tier 0):
@@ -2079,6 +2161,7 @@ In debug builds:
 ├──────┼─────────────────────────────────────────────────────────────────────┤
 │ Name │ ADDRESS                                                             │
 │ Size │ 64 bits                                                             │
+│ Status │ ✅ Implemented                                                    │
 └────────────────────────────────────────────────────────────────────────────┘
 
 Persistent Slot Header:
@@ -2087,6 +2170,7 @@ Persistent Slot Header:
 ├────────┼─────────────────┼─────────────────┼───────────┼──────────────────┤
 │ Name   │ REFCOUNT        │ WEAK_COUNT      │ METADATA  │ VALUE            │
 │ Size   │ 64 bits         │ 32 bits         │ 32 bits   │ Variable         │
+│ Status │ 📋 Designed     │ 📋 Designed     │ 📋 Designed │ 📋 Designed    │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 

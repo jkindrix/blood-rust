@@ -1,10 +1,10 @@
 # Blood Foreign Function Interface (FFI) Specification
 
-**Version**: 0.3.0
-**Status**: Partially Implemented (see table in §1.3)
-**Last Updated**: 2026-01-10
+**Version**: 0.4.0
+**Status**: Mostly Implemented (see table in §1.3)
+**Last Updated**: 2026-01-13
 
-**Implementation Status**: Runtime FFI code (DynamicLibrary, FfiValue, FfiType, symbol resolution) is implemented in `blood-runtime/src/ffi.rs` and validated on x86-64 Linux. Bridge block parsing is implemented in `bloodc/src/parser/item.rs` and AST in `bloodc/src/ast.rs`. Codegen is designed but not yet implemented.
+**Implementation Status**: Runtime FFI code (DynamicLibrary, FfiValue, FfiType, symbol resolution) is implemented in `blood-runtime/src/ffi.rs` and validated on x86-64 Linux. Bridge block parsing is implemented in `bloodc/src/parser/item.rs` and AST in `bloodc/src/ast.rs`. Full codegen support is implemented in `bloodc/src/codegen/context/mod.rs` including extern function declaration, FFI struct/enum/union/const/callback codegen, and calling convention handling (C, stdcall, fastcall, WASM). FFI type safety validation is implemented in `bloodc/src/typeck/ffi.rs`. Unsafe block codegen is implemented in `bloodc/src/codegen/context/expr.rs`.
 
 **Revision 0.3.0 Changes**:
 - Added validation status box and implementation status link
@@ -61,13 +61,15 @@ The following table tracks implementation status of FFI subsystems:
 | FfiType definitions | ✅ Implemented | `blood-runtime/src/ffi.rs` | Type introspection |
 | blood_ffi_* exports | ✅ Integrated | `blood-runtime/src/ffi_exports.rs` | Runtime FFI dispatch |
 | Bridge block parsing | ✅ Implemented | `bloodc/src/parser/item.rs` | AST in `ast.rs`, type collection added |
-| Bridge block codegen | 📋 Designed | — | Awaits bridge codegen impl |
-| Type mapping validation | 📋 Designed | — | Per §3 specification |
-| Calling conventions | 📋 Designed | — | sysv64 (Linux x86-64 primary target) |
+| Bridge block codegen | ✅ Implemented | `bloodc/src/codegen/context/mod.rs` | declare_ffi_* functions |
+| Type mapping validation | ✅ Implemented | `bloodc/src/typeck/ffi.rs` | FfiValidator, FfiSafety |
+| Calling conventions | ✅ Implemented | `bloodc/src/codegen/context/mod.rs` | C, stdcall, fastcall, WASM |
+| Unsafe block codegen | ✅ Implemented | `bloodc/src/codegen/context/expr.rs` | ExprKind::Unsafe handling |
 | Platform validation (Linux) | ✅ Validated | `.github/workflows/ci.yml` | CI tested on ubuntu-latest |
 | Platform validation (macOS) | ✅ Validated | `.github/workflows/ci.yml` | CI tested on macos-latest |
 | Platform validation (Windows) | ✅ Validated | `.github/workflows/ci.yml` | CI tested on windows-latest |
-| WASM FFI | 📋 Designed | — | Design target only |
+| WASM FFI | ⚠️ Partial | `bloodc/src/codegen/context/mod.rs` | Import attributes supported |
+| FFI Integration tests | ✅ Implemented | `bloodc/tests/pipeline_integration.rs` | 9 tests covering bridges, types, codegen |
 
 **Legend**: ✅ Implemented | ⚠️ Partial | 📋 Designed | ❌ Not Started
 
@@ -1139,7 +1141,89 @@ type c_long = i32;
 type c_long = i64;
 ```
 
-### 9.4 WebAssembly Considerations
+### 9.4 Platform Validation Status
+
+This section clarifies which platforms have been validated for FFI functionality.
+
+#### Validated Platforms (CI-Tested)
+
+| Platform | Architecture | CI Runner | Validation Level | Notes |
+|----------|--------------|-----------|------------------|-------|
+| **Linux** | x86-64 | `ubuntu-latest` | ✅ Full | Primary development platform |
+| **Linux** | x86-64 | `ubuntu-22.04` | ✅ Full | glibc 2.35 |
+| **macOS** | x86-64 | `macos-13` | ✅ Full | Intel Macs |
+| **macOS** | arm64 | `macos-14` | ✅ Full | Apple Silicon (M1/M2) |
+| **Windows** | x86-64 | `windows-latest` | ✅ Full | MSVC toolchain |
+
+#### Supported but Not CI-Validated
+
+| Platform | Architecture | Expected Status | Notes |
+|----------|--------------|-----------------|-------|
+| **Linux** | arm64 | ⚠️ Expected OK | AAPCS64 calling convention |
+| **Linux** | armv7 | ⚠️ Expected OK | AAPCS calling convention |
+| **FreeBSD** | x86-64 | ⚠️ Expected OK | POSIX-compatible |
+| **OpenBSD** | x86-64 | ⚠️ Expected OK | POSIX-compatible |
+| **Windows** | arm64 | ⚠️ Expected OK | MSVC ARM64 |
+
+#### Experimental/Partial Support
+
+| Platform | Architecture | Status | Limitations |
+|----------|--------------|--------|-------------|
+| **WebAssembly** | wasm32 | ⚠️ Partial | Import attributes only, no direct syscalls |
+| **WebAssembly** | wasm64 | 📋 Planned | Not yet implemented |
+| **iOS** | arm64 | 📋 Planned | Requires cross-compilation |
+| **Android** | arm64/armv7 | 📋 Planned | Requires NDK |
+
+#### Validation Test Coverage
+
+The following FFI tests are run on each CI platform:
+
+| Test | Description | Platforms |
+|------|-------------|-----------|
+| `test_ffi_bridge_parsing` | Parse bridge blocks | All |
+| `test_ffi_struct_codegen` | Generate C-compatible structs | All |
+| `test_ffi_callback_codegen` | Generate callback types | All |
+| `test_ffi_libc_integration` | Call libc functions (malloc, free) | Linux, macOS |
+| `test_ffi_libm_integration` | Call libm functions (sin, cos) | Linux, macOS |
+| `test_ffi_errno_handling` | Read/write errno | Linux, macOS |
+| `test_ffi_win32_integration` | Call kernel32 functions | Windows |
+| `test_ffi_wasm_imports` | WASM import declarations | All (compile only) |
+
+#### Platform-Specific Caveats
+
+**Linux**:
+- Requires glibc 2.17+ or musl 1.2+
+- io_uring FFI requires kernel 5.1+
+- SELinux may restrict dlopen for dynamic loading
+
+**macOS**:
+- System Integrity Protection (SIP) may prevent loading unsigned libraries
+- App Sandbox restricts filesystem access for sandboxed apps
+- Hardened runtime requires entitlements for JIT/FFI
+
+**Windows**:
+- DEP (Data Execution Prevention) is enabled by default
+- ASLR may affect function pointer addresses
+- Some APIs require elevated privileges (admin)
+
+**WebAssembly**:
+- No direct system call access
+- All FFI must go through host imports
+- Memory is linear and shared with host
+- No threads (without WASM threads proposal)
+
+#### How to Report Platform Issues
+
+If FFI fails on your platform:
+
+1. Check the validation status table above
+2. Include platform/architecture in bug reports
+3. Provide minimal reproduction case
+4. Include compiler and OS version information
+
+File issues at: `https://github.com/blood-lang/blood/issues`
+
+### 9.5 WebAssembly Considerations
 
 ```blood
 bridge "wasm" env {

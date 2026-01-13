@@ -760,6 +760,254 @@ benches/
 
 ---
 
+## ADR-022: Slot Registry for Generation Tracking
+
+**Status**: Accepted
+
+**Context**: Generational references need to track the current generation for each heap allocation. Two approaches:
+1. **Inline storage**: Store generation adjacent to the allocation (like malloc metadata)
+2. **Global registry**: Hash table mapping addresses to generations
+
+**Decision**: Blood uses a global slot registry hash table.
+
+**Rationale**:
+- Separates generation metadata from user data (no header overhead per allocation)
+- Enables generation tracking for externally-allocated memory (FFI)
+- Hash table provides O(1) amortized lookup
+- Simpler memory layout (allocations don't need special alignment for metadata)
+- Registry can be shared across allocators
+
+**Consequences**:
+- Generation check requires hash lookup (~4 cycles measured) instead of adjacent load (~1-2 cycles)
+- Global mutable state requires synchronization in multi-threaded contexts
+- Fixed registry size limits maximum concurrent allocations
+- Trade-off accepted for flexibility and FFI compatibility
+
+---
+
+## ADR-023: MIR as Intermediate Representation
+
+**Status**: Accepted
+
+**Context**: Compiler needs to transform high-level Blood code to LLVM IR. Options:
+1. **Direct HIR→LLVM**: Single lowering pass
+2. **MIR intermediate**: HIR → MIR → LLVM (like Rust)
+
+**Decision**: Blood introduces MIR (Mid-level IR) between HIR and LLVM.
+
+**Rationale**:
+- MIR provides explicit control flow (basic blocks, terminators)
+- Generation checks can be inserted uniformly at MIR level
+- Escape analysis operates naturally on MIR's explicit temporaries
+- Pattern matching compiles to decision trees in MIR
+- Separates high-level transformations from low-level codegen
+- Enables MIR-level optimizations (dead code elimination, inlining)
+
+**Consequences**:
+- Additional compilation phase and data structures
+- MIR must faithfully represent Blood semantics
+- Two codegen paths exist (legacy HIR→LLVM and new HIR→MIR→LLVM)
+- Better debugging (MIR is inspectable)
+
+---
+
+## ADR-024: Closure Capture by Local ID Comparison
+
+**Status**: Accepted
+
+**Context**: Closures capture variables from their enclosing scope. Need to determine which variables are captures vs. local parameters.
+
+**Decision**: A variable is a capture if its LocalId is numerically less than the closure's first local parameter ID.
+
+**Rationale**:
+- LocalIds are assigned sequentially during HIR lowering
+- Outer scope variables get lower IDs than closure parameters
+- Simple numeric comparison is fast and deterministic
+- Works correctly even when IDs aren't contiguous (closures share outer ID space)
+
+**Consequences**:
+- Relies on ID assignment order (implementation detail)
+- Must maintain ID ordering invariant across HIR transformations
+- Simple heuristic may need refinement for nested closures
+- Efficient O(1) capture detection
+
+---
+
+## ADR-025: Evidence Passing for Effect Handlers
+
+**Status**: Accepted
+
+**Context**: Algebraic effects require finding the appropriate handler at runtime when an operation is performed. Options:
+1. **Dynamic lookup**: Walk the handler stack at each operation
+2. **Evidence passing**: Pass handler references as implicit parameters
+3. **Static compilation**: Monomorphize handlers into direct calls
+
+**Decision**: Blood uses evidence passing based on the ICFP'21 approach.
+
+**Rationale**:
+- Evidence vectors enable O(1) handler lookup
+- Compatible with deep and shallow handlers
+- Supports polymorphic effect operations
+- Enables tail-resumptive optimization (resume in tail position compiles to direct call)
+- Handler installation is O(1) push onto evidence vector
+
+**Consequences**:
+- Functions with effects receive implicit evidence parameter
+- Evidence vector threaded through all effectful computations
+- Tail-resumptive handlers achieve ~1.3 cycles overhead (measured)
+- Non-tail-resumptive handlers require continuation allocation (~65 cycles)
+
+---
+
+## ADR-026: Affine Value Checking for Multi-Shot Handlers
+
+**Status**: Accepted
+
+**Context**: Multi-shot handlers (like Choice) can resume continuations multiple times. Linear values (must use exactly once) cannot be duplicated. What about affine values (at most once)?
+
+**Decision**: Affine values are allowed in multi-shot handlers; linear values are rejected at compile time.
+
+**Rationale**:
+- Affine values can be dropped, so duplication doesn't violate their contract
+- Linear values cannot be dropped, so duplication would violate exactly-once semantics
+- Compile-time check prevents runtime errors
+- Type system tracks linearity annotations on values
+- Only values captured across perform points are checked (not all values in scope)
+
+**Implementation**:
+```
+multi-shot perform → check captured values → reject if any are linear
+                                           → allow if all are affine/unrestricted
+```
+
+**Consequences**:
+- Linear values require explicit consumption before multi-shot effect operations
+- Affine resources (file handles) work naturally with Choice effect
+- Error messages guide users to restructure code or change value linearity
+
+---
+
+## ADR-027: Generation Bypass for Persistent Tier
+
+**Status**: Accepted
+
+**Context**: Persistent tier (Tier 2) uses reference counting instead of generational references. Should generation checks still apply?
+
+**Decision**: Persistent pointers bypass generation checks entirely, using a reserved "persistent" generation value.
+
+**Rationale**:
+- Persistent allocations are never freed (only decremented when count reaches zero)
+- Reference counting guarantees liveness
+- Generation check overhead is unnecessary for refcounted memory
+- Reserved generation value (0xFFFF_FFFE) enables O(1) bypass detection
+- Tier 2 allocator returns pointers with persistent generation
+
+**Implementation**:
+```
+dereference(ptr):
+  if ptr.generation == PERSISTENT_MARKER:
+    return direct_access(ptr.address)  // No check needed
+  else:
+    return generation_checked_access(ptr)
+```
+
+**Consequences**:
+- Persistent tier has lower access overhead than generational tier
+- Tier promotion (generational → persistent) requires pointer rewriting
+- Mixed allocations work correctly (some checked, some bypassed)
+- ~425ps measured for persistent dereference vs ~1.27ns for generational
+
+---
+
+## ADR-028: Tail-Resumptive Handler Optimization
+
+**Status**: Accepted
+
+**Context**: Effect handlers that resume in tail position have a special structure: they don't need to capture a continuation.
+
+**Decision**: Blood detects tail-resumptive handlers and compiles them to direct calls.
+
+**Definition**: A handler is tail-resumptive if every operation clause ends with `resume(value)` in tail position.
+
+**Example**:
+```blood
+// Tail-resumptive (optimized)
+deep handler FastState for State<T> {
+    op get() { resume(state) }      // resume in tail position
+    op put(s) { state = s; resume(()) }  // resume in tail position
+}
+
+// Non-tail-resumptive (needs continuation)
+deep handler SlowState for State<T> {
+    op get() {
+        let x = resume(state);  // resume NOT in tail position
+        log("got");
+        x
+    }
+}
+```
+
+**Optimization**:
+```
+tail-resumptive handler:
+  perform op(args) → call handler_op(args) → return result → continue
+
+non-tail-resumptive handler:
+  perform op(args) → allocate continuation → call handler_op(args)
+                   → resume → restore continuation → continue
+```
+
+**Consequences**:
+- State, Reader, Writer effects typically tail-resumptive (near-zero overhead)
+- Exception, Choice effects typically non-tail-resumptive (continuation overhead)
+- Compiler detects and optimizes automatically
+- No annotation required from user
+
+---
+
+## ADR-029: Hash Table Implementation for HashMap
+
+**Status**: Accepted
+
+**Context**: HashMap needs an efficient collision resolution strategy. Options:
+1. Separate chaining (linked lists per bucket)
+2. Open addressing (linear/quadratic probing)
+3. Robin Hood hashing (displacement-based)
+4. Swiss table (SIMD-accelerated)
+
+**Decision**: Blood's HashMap uses quadratic probing with Robin Hood optimization.
+
+**Rationale**:
+- Quadratic probing avoids primary clustering
+- Robin Hood balances probe distances for consistent performance
+- Tombstone markers enable O(1) deletion
+- 75% load factor provides good space/time tradeoff
+- First tombstone optimization reduces average probe length
+
+**Implementation Details**:
+```
+insert(key, value):
+  idx = hash(key) & mask
+  probe = 0
+  first_tombstone = None
+  while buckets[idx] not empty:
+    if buckets[idx].key == key:
+      return replace(idx, value)
+    if buckets[idx] is tombstone and first_tombstone is None:
+      first_tombstone = idx
+    probe += 1
+    idx = (idx + probe) & mask
+  insert at first_tombstone or idx
+```
+
+**Consequences**:
+- O(1) average case for insert/lookup/delete
+- Worst case O(n) if hash function degrades
+- Requires power-of-2 capacity (mask optimization)
+- Automatic resizing at 75% load factor
+
+---
+
 ## Decision Status Legend
 
 - **Proposed**: Under discussion
@@ -769,4 +1017,4 @@ benches/
 
 ---
 
-*Last updated: 2026-01-09*
+*Last updated: 2026-01-13*
