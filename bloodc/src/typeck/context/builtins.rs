@@ -41,6 +41,18 @@ impl<'a> TypeContext<'a> {
         // println_str(str) -> () - legacy name, same as println
         self.register_builtin_fn("println_str", vec![str_ty.clone()], unit_ty.clone());
 
+        // eprint(str) -> () - print to stderr (maps to runtime eprint_str)
+        self.register_builtin_fn_aliased("eprint", "eprint_str", vec![str_ty.clone()], unit_ty.clone());
+
+        // eprintln(str) -> () - print to stderr with newline (maps to runtime eprintln_str)
+        self.register_builtin_fn_aliased("eprintln", "eprintln_str", vec![str_ty.clone()], unit_ty.clone());
+
+        // eprint_str(str) -> () - print to stderr
+        self.register_builtin_fn("eprint_str", vec![str_ty.clone()], unit_ty.clone());
+
+        // eprintln_str(str) -> () - print to stderr with newline
+        self.register_builtin_fn("eprintln_str", vec![str_ty.clone()], unit_ty.clone());
+
         // print_char(char) -> ()
         self.register_builtin_fn("print_char", vec![char_ty.clone()], unit_ty.clone());
 

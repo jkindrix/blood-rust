@@ -2203,6 +2203,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // println_str({*i8, i64}) -> void
         self.module.add_function("println_str", print_str_type, None);
 
+        // eprint_str({*i8, i64}) -> void - print to stderr
+        self.module.add_function("eprint_str", print_str_type, None);
+
+        // eprintln_str({*i8, i64}) -> void - print to stderr with newline
+        self.module.add_function("eprintln_str", print_str_type, None);
+
         // str_len({*i8, i64}) -> i64 - get string length
         let str_len_type = i64_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("str_len", str_len_type, None);

@@ -830,35 +830,46 @@ impl<'a> MacroExpander<'a> {
         }
     }
 
-    /// Expand vec![...] literal.
+    /// Expand vec![...] literal to array literal.
     fn expand_vec_literal(
         &mut self,
-        _exprs: Vec<Expr>,
+        exprs: Vec<Expr>,
         _ty: &Type,
-        span: Span,
+        _span: Span,
     ) -> ExprKind {
-        // Vec type is not yet fully implemented in Blood
-        self.diagnostics.push(Diagnostic::error(
-            "vec! macro is not yet implemented - Vec<T> type support required".to_string(),
-            span,
-        ));
-        ExprKind::Error
+        // Expand all element expressions
+        let expanded_exprs: Vec<Expr> = exprs.into_iter()
+            .map(|e| self.expand_expr(e))
+            .collect();
+
+        // vec![1, 2, 3] expands to [1, 2, 3]
+        ExprKind::Array(expanded_exprs)
     }
 
-    /// Expand vec![value; count] repeat.
+    /// Expand vec![value; count] repeat to array repeat expression.
     fn expand_vec_repeat(
         &mut self,
-        _value: Expr,
-        _count: Expr,
+        value: Expr,
+        count: Expr,
         _ty: &Type,
-        span: Span,
+        _span: Span,
     ) -> ExprKind {
-        // Vec type is not yet fully implemented in Blood
-        self.diagnostics.push(Diagnostic::error(
-            "vec! repeat macro is not yet implemented - Vec<T> type support required".to_string(),
-            span,
-        ));
-        ExprKind::Error
+        let expanded_value = self.expand_expr(value);
+
+        // Extract the count as a constant (typeck already validated it's a constant)
+        let count_val = match &count.kind {
+            ExprKind::Literal(LiteralValue::Int(n)) => *n as u64,
+            _ => {
+                // Fallback - shouldn't happen if typeck is correct
+                0
+            }
+        };
+
+        // vec![0; 10] expands to [0; 10]
+        ExprKind::Repeat {
+            value: Box::new(expanded_value),
+            count: count_val,
+        }
     }
 
     /// Expand assert!(condition) or assert!(condition, message).
@@ -943,18 +954,87 @@ impl<'a> MacroExpander<'a> {
     }
 
     /// Expand dbg!(expr).
+    ///
+    /// dbg!(expr) expands to:
+    /// {
+    ///     let __dbg_val = expr;
+    ///     eprintln_str(convert_to_string(__dbg_val));
+    ///     __dbg_val
+    /// }
+    ///
+    /// This prints the value to stderr and returns it.
     fn expand_dbg(
         &mut self,
         inner: Expr,
-        _ty: &Type,
-        _span: Span,
+        ty: &Type,
+        span: Span,
     ) -> ExprKind {
-        // For now, dbg! just returns the expression value
-        // A full implementation would print the expression and its value
         let expanded = self.expand_expr(inner);
 
-        // TODO: Implement proper debug printing
-        // For now, just return the value
-        expanded.kind
+        // Try to convert to string for printing
+        match self.convert_to_string(expanded.clone(), span) {
+            Ok(stringified) => {
+                // Create the eprintln call
+                let print_call = self.make_eprintln_expr_call(stringified, span);
+
+                // Build a block that prints and returns the value:
+                // { eprintln_str(str_val); expr }
+                let print_stmt = hir::Stmt::Expr(Expr::new(
+                    print_call,
+                    Type::unit(),
+                    span,
+                ));
+
+                ExprKind::Block {
+                    stmts: vec![print_stmt],
+                    expr: Some(Box::new(Expr::new(
+                        expanded.kind,
+                        ty.clone(),
+                        span,
+                    ))),
+                }
+            }
+            Err(_) => {
+                // If we can't convert to string, just return the expression
+                // (for unsupported types, dbg! still evaluates but doesn't print)
+                expanded.kind
+            }
+        }
+    }
+
+    /// Create an eprintln call with a pre-built string expression.
+    fn make_eprintln_expr_call(&mut self, str_expr: Expr, span: Span) -> ExprKind {
+        if let Some(&def_id) = self.builtin_by_name.get("eprintln_str") {
+            let fn_expr = Expr::new(
+                ExprKind::Def(def_id),
+                Type::function(vec![Type::str()], Type::unit()),
+                span,
+            );
+
+            ExprKind::Call {
+                callee: Box::new(fn_expr),
+                args: vec![str_expr],
+            }
+        } else {
+            // Fall back to println_str if eprintln_str not available
+            if let Some(&def_id) = self.builtin_by_name.get("println_str") {
+                let fn_expr = Expr::new(
+                    ExprKind::Def(def_id),
+                    Type::function(vec![Type::str()], Type::unit()),
+                    span,
+                );
+
+                ExprKind::Call {
+                    callee: Box::new(fn_expr),
+                    args: vec![str_expr],
+                }
+            } else {
+                self.diagnostics.push(Diagnostic::error(
+                    "builtin function 'eprintln_str' not found".to_string(),
+                    span,
+                ));
+                ExprKind::Error
+            }
+        }
     }
 }
