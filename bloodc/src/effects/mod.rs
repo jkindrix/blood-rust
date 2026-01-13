@@ -73,6 +73,7 @@ pub mod row;
 pub mod std_effects;
 
 pub use evidence::{Evidence, EvidenceVector, EvidenceEntry, EvidenceContext, TranslatedOp};
+pub use evidence::{EvidenceCache, HandlerPattern, CacheStats};
 pub use handler::{Handler, HandlerKind, Continuation, ResumeMode};
 pub use handler::{analyze_tail_resumptive, analyze_handler_tail_resumptive, analyze_resume_mode};
 pub use infer::{EffectInferencer, DetailedEffectInferencer, InferenceResult, infer_effects, verify_effects_subset};

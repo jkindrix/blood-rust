@@ -51,6 +51,8 @@
 use super::row::EffectRef;
 use crate::hir::DefId;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 /// An evidence entry for a single effect.
 ///
@@ -260,6 +262,206 @@ impl Default for EvidenceContext {
     }
 }
 
+// ============================================================================
+// Evidence Caching
+// ============================================================================
+
+/// A pattern of handlers that uniquely identifies an evidence vector configuration.
+///
+/// Two handler patterns are equal if they map the same effects to the same handlers
+/// in the same order. This enables caching and reuse of evidence vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HandlerPattern {
+    /// Ordered pairs of (effect_id, handler_id) defining the pattern.
+    bindings: Vec<(DefId, DefId)>,
+}
+
+impl HandlerPattern {
+    /// Create a new handler pattern from an evidence vector.
+    pub fn from_evidence(ev: &EvidenceVector) -> Self {
+        let bindings: Vec<_> = ev.iter()
+            .map(|entry| (entry.effect.def_id, entry.handler_id))
+            .collect();
+        Self { bindings }
+    }
+
+    /// Create a new empty handler pattern.
+    pub fn empty() -> Self {
+        Self { bindings: Vec::new() }
+    }
+
+    /// Add a handler binding to the pattern.
+    pub fn add(&mut self, effect_id: DefId, handler_id: DefId) {
+        self.bindings.push((effect_id, handler_id));
+    }
+
+    /// Get the number of bindings in the pattern.
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// Check if the pattern is empty.
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+
+    /// Compute a hash of this pattern for cache lookup.
+    pub fn hash_value(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Cache for evidence vectors, enabling reuse of identical handler patterns.
+///
+/// This optimization detects when the same set of handlers is used multiple times
+/// and reuses the cached evidence vector instead of creating a new one.
+///
+/// ## Benefits
+///
+/// - Reduced memory allocation in loops with repeated handler installation
+/// - Faster evidence lookup when patterns are recognized
+/// - Better cache locality from evidence vector reuse
+///
+/// ## Usage
+///
+/// ```ignore
+/// let mut cache = EvidenceCache::new();
+///
+/// // First time: creates and caches evidence
+/// let ev1 = cache.get_or_create(&pattern, || create_evidence());
+///
+/// // Second time: returns cached evidence
+/// let ev2 = cache.get_or_create(&pattern, || unreachable!());
+///
+/// assert!(Arc::ptr_eq(&ev1, &ev2));  // Same instance
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct EvidenceCache {
+    /// Map from pattern hash to cached evidence vectors.
+    cache: HashMap<u64, EvidenceVector>,
+    /// Statistics for cache performance monitoring.
+    stats: CacheStats,
+}
+
+/// Statistics about evidence cache usage.
+#[derive(Debug, Clone, Default)]
+pub struct CacheStats {
+    /// Number of cache hits (reused evidence).
+    pub hits: u64,
+    /// Number of cache misses (new evidence created).
+    pub misses: u64,
+    /// Number of patterns currently cached.
+    pub cached_patterns: usize,
+}
+
+impl CacheStats {
+    /// Calculate the cache hit rate as a percentage.
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            0.0
+        } else {
+            (self.hits as f64 / total as f64) * 100.0
+        }
+    }
+
+    /// Reset all statistics.
+    pub fn reset(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
+        // cached_patterns is updated separately
+    }
+}
+
+impl EvidenceCache {
+    /// Create a new empty evidence cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a cache with a specified initial capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            cache: HashMap::with_capacity(capacity),
+            stats: CacheStats::default(),
+        }
+    }
+
+    /// Look up or create an evidence vector for a handler pattern.
+    ///
+    /// If an evidence vector for this pattern exists in the cache, returns it.
+    /// Otherwise, calls the factory function to create a new one, caches it,
+    /// and returns it.
+    pub fn get_or_create<F>(&mut self, pattern: &HandlerPattern, factory: F) -> EvidenceVector
+    where
+        F: FnOnce() -> EvidenceVector,
+    {
+        let hash = pattern.hash_value();
+
+        if let Some(cached) = self.cache.get(&hash) {
+            self.stats.hits += 1;
+            return cached.clone();
+        }
+
+        // Cache miss - create new evidence
+        self.stats.misses += 1;
+        let evidence = factory();
+        self.cache.insert(hash, evidence.clone());
+        self.stats.cached_patterns = self.cache.len();
+        evidence
+    }
+
+    /// Check if a pattern is already cached.
+    pub fn contains(&self, pattern: &HandlerPattern) -> bool {
+        let hash = pattern.hash_value();
+        self.cache.contains_key(&hash)
+    }
+
+    /// Get the cached evidence for a pattern, if it exists.
+    pub fn get(&self, pattern: &HandlerPattern) -> Option<&EvidenceVector> {
+        let hash = pattern.hash_value();
+        self.cache.get(&hash)
+    }
+
+    /// Insert an evidence vector for a pattern.
+    ///
+    /// Returns the previous evidence vector if one was cached for this pattern.
+    pub fn insert(&mut self, pattern: &HandlerPattern, evidence: EvidenceVector) -> Option<EvidenceVector> {
+        let hash = pattern.hash_value();
+        let prev = self.cache.insert(hash, evidence);
+        self.stats.cached_patterns = self.cache.len();
+        prev
+    }
+
+    /// Clear all cached evidence vectors.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+        self.stats.cached_patterns = 0;
+    }
+
+    /// Get the number of cached patterns.
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Check if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
+    /// Get cache statistics.
+    pub fn stats(&self) -> &CacheStats {
+        &self.stats
+    }
+
+    /// Get mutable cache statistics (for resetting).
+    pub fn stats_mut(&mut self) -> &mut CacheStats {
+        &mut self.stats
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +557,184 @@ mod tests {
         assert_eq!(op.evidence_index, 0);
         assert_eq!(op.operation_index, 1);
         assert_eq!(op.handler_id, DefId::new(42));
+    }
+
+    // ========================================================================
+    // Evidence Caching Tests
+    // ========================================================================
+
+    #[test]
+    fn test_handler_pattern_empty() {
+        let pattern = HandlerPattern::empty();
+        assert!(pattern.is_empty());
+        assert_eq!(pattern.len(), 0);
+    }
+
+    #[test]
+    fn test_handler_pattern_add() {
+        let mut pattern = HandlerPattern::empty();
+        pattern.add(DefId::new(1), DefId::new(10));
+        pattern.add(DefId::new(2), DefId::new(20));
+
+        assert!(!pattern.is_empty());
+        assert_eq!(pattern.len(), 2);
+    }
+
+    #[test]
+    fn test_handler_pattern_from_evidence() {
+        let mut ev = EvidenceVector::new();
+        ev.add(EffectRef::new(DefId::new(1)), DefId::new(10));
+        ev.add(EffectRef::new(DefId::new(2)), DefId::new(20));
+
+        let pattern = HandlerPattern::from_evidence(&ev);
+        assert_eq!(pattern.len(), 2);
+    }
+
+    #[test]
+    fn test_handler_pattern_equality() {
+        let mut pattern1 = HandlerPattern::empty();
+        pattern1.add(DefId::new(1), DefId::new(10));
+        pattern1.add(DefId::new(2), DefId::new(20));
+
+        let mut pattern2 = HandlerPattern::empty();
+        pattern2.add(DefId::new(1), DefId::new(10));
+        pattern2.add(DefId::new(2), DefId::new(20));
+
+        // Same bindings in same order should be equal
+        assert_eq!(pattern1, pattern2);
+        assert_eq!(pattern1.hash_value(), pattern2.hash_value());
+    }
+
+    #[test]
+    fn test_handler_pattern_inequality() {
+        let mut pattern1 = HandlerPattern::empty();
+        pattern1.add(DefId::new(1), DefId::new(10));
+
+        let mut pattern2 = HandlerPattern::empty();
+        pattern2.add(DefId::new(1), DefId::new(20)); // Different handler
+
+        assert_ne!(pattern1, pattern2);
+        // Different patterns should have different hashes (usually)
+        assert_ne!(pattern1.hash_value(), pattern2.hash_value());
+    }
+
+    #[test]
+    fn test_cache_stats_default() {
+        let stats = CacheStats::default();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.cached_patterns, 0);
+        assert_eq!(stats.hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_cache_stats_hit_rate() {
+        let mut stats = CacheStats::default();
+        stats.hits = 75;
+        stats.misses = 25;
+        assert!((stats.hit_rate() - 75.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_evidence_cache_new() {
+        let cache = EvidenceCache::new();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_evidence_cache_get_or_create_miss() {
+        let mut cache = EvidenceCache::new();
+        let mut pattern = HandlerPattern::empty();
+        pattern.add(DefId::new(1), DefId::new(10));
+
+        let ev = cache.get_or_create(&pattern, || {
+            let mut ev = EvidenceVector::new();
+            ev.add(EffectRef::new(DefId::new(1)), DefId::new(10));
+            ev
+        });
+
+        assert_eq!(ev.len(), 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 0);
+    }
+
+    #[test]
+    fn test_evidence_cache_get_or_create_hit() {
+        let mut cache = EvidenceCache::new();
+        let mut pattern = HandlerPattern::empty();
+        pattern.add(DefId::new(1), DefId::new(10));
+
+        // First call - cache miss
+        let _ev1 = cache.get_or_create(&pattern, || {
+            let mut ev = EvidenceVector::new();
+            ev.add(EffectRef::new(DefId::new(1)), DefId::new(10));
+            ev
+        });
+
+        // Second call - cache hit
+        let ev2 = cache.get_or_create(&pattern, || {
+            panic!("factory should not be called on cache hit");
+        });
+
+        assert_eq!(ev2.len(), 1);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().hit_rate(), 50.0);
+    }
+
+    #[test]
+    fn test_evidence_cache_contains() {
+        let mut cache = EvidenceCache::new();
+        let mut pattern = HandlerPattern::empty();
+        pattern.add(DefId::new(1), DefId::new(10));
+
+        assert!(!cache.contains(&pattern));
+
+        let _ = cache.get_or_create(&pattern, || EvidenceVector::new());
+
+        assert!(cache.contains(&pattern));
+    }
+
+    #[test]
+    fn test_evidence_cache_clear() {
+        let mut cache = EvidenceCache::new();
+        let mut pattern = HandlerPattern::empty();
+        pattern.add(DefId::new(1), DefId::new(10));
+
+        let _ = cache.get_or_create(&pattern, || EvidenceVector::new());
+        assert_eq!(cache.len(), 1);
+
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.stats().cached_patterns, 0);
+    }
+
+    #[test]
+    fn test_evidence_cache_multiple_patterns() {
+        let mut cache = EvidenceCache::new();
+
+        let mut pattern1 = HandlerPattern::empty();
+        pattern1.add(DefId::new(1), DefId::new(10));
+
+        let mut pattern2 = HandlerPattern::empty();
+        pattern2.add(DefId::new(2), DefId::new(20));
+
+        let _ = cache.get_or_create(&pattern1, || {
+            let mut ev = EvidenceVector::new();
+            ev.add(EffectRef::new(DefId::new(1)), DefId::new(10));
+            ev
+        });
+
+        let _ = cache.get_or_create(&pattern2, || {
+            let mut ev = EvidenceVector::new();
+            ev.add(EffectRef::new(DefId::new(2)), DefId::new(20));
+            ev
+        });
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains(&pattern1));
+        assert!(cache.contains(&pattern2));
     }
 }
