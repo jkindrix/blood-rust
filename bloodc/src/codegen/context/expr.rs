@@ -181,6 +181,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Creates a function for the body and a struct for captures.
                 self.compile_closure(*body_id, captures, &expr.ty, expr.span)
             }
+            Unsafe(inner) => {
+                // Unsafe block: @unsafe { ... }
+                // Compiles the inner expression without generation checks.
+                // The type system ensures that only appropriate operations
+                // are allowed in unsafe blocks (e.g., raw pointer dereference,
+                // FFI calls).
+                self.compile_expr(inner)
+            }
             _ => {
                 self.errors.push(Diagnostic::error(
                     format!("Unsupported expression kind: {:?}", std::mem::discriminant(&expr.kind)),

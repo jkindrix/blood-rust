@@ -291,6 +291,17 @@ pub fn generate_c_runtime() -> String {
 #define MAX_SNAPSHOT_ENTRIES 256
 
 // ============================================================================
+// BloodStr - Fat Pointer String Type
+// ============================================================================
+
+// Blood's str type is a fat pointer: {ptr, len}
+// This struct must match the LLVM type {i8*, i64}
+typedef struct {
+    char* ptr;
+    int64_t len;
+} BloodStr;
+
+// ============================================================================
 // Generation Tracking - Slot Registry
 // ============================================================================
 
@@ -357,13 +368,18 @@ void println_i64(int64_t n) {
     printf("%ld\n", n);
 }
 
-void print_str(const char* s) {
-    if (s) printf("%s", s);
+void print_str(BloodStr s) {
+    if (s.ptr && s.len > 0) {
+        fwrite(s.ptr, 1, (size_t)s.len, stdout);
+    }
     fflush(stdout);
 }
 
-void println_str(const char* s) {
-    if (s) printf("%s\n", s);
+void println_str(BloodStr s) {
+    if (s.ptr && s.len > 0) {
+        fwrite(s.ptr, 1, (size_t)s.len, stdout);
+    }
+    printf("\n");
 }
 
 void print_bool(int32_t b) {
@@ -382,6 +398,75 @@ void println(void) {
 void print_char(int32_t c) {
     printf("%c", (char)c);
     fflush(stdout);
+}
+
+void println_char(int32_t c) {
+    printf("%c\n", (char)c);
+}
+
+// ============================================================================
+// String Operations
+// ============================================================================
+
+int64_t str_len(BloodStr s) {
+    return s.len;
+}
+
+int32_t str_eq(BloodStr a, BloodStr b) {
+    if (a.len != b.len) return 0;
+    if (a.len == 0) return 1;
+    if (!a.ptr || !b.ptr) return a.ptr == b.ptr;
+    return memcmp(a.ptr, b.ptr, (size_t)a.len) == 0 ? 1 : 0;
+}
+
+BloodStr blood_str_concat(BloodStr a, BloodStr b) {
+    BloodStr result;
+    result.len = a.len + b.len;
+    if (result.len == 0) {
+        result.ptr = NULL;
+        return result;
+    }
+    result.ptr = (char*)malloc((size_t)result.len);
+    if (!result.ptr) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: String allocation failed\n");
+        abort();
+    }
+    if (a.ptr && a.len > 0) {
+        memcpy(result.ptr, a.ptr, (size_t)a.len);
+    }
+    if (b.ptr && b.len > 0) {
+        memcpy(result.ptr + a.len, b.ptr, (size_t)b.len);
+    }
+    return result;
+}
+
+BloodStr int_to_string(int32_t n) {
+    BloodStr result;
+    // Max int32 is ~10 digits + sign + null
+    char* buf = (char*)malloc(16);
+    if (!buf) {
+        fprintf(stderr, "BLOOD RUNTIME ERROR: String allocation failed\n");
+        abort();
+    }
+    result.len = (int64_t)sprintf(buf, "%d", n);
+    result.ptr = buf;
+    return result;
+}
+
+BloodStr bool_to_string(int32_t b) {
+    BloodStr result;
+    if (b) {
+        result.ptr = (char*)malloc(5);
+        if (!result.ptr) abort();
+        memcpy(result.ptr, "true", 4);
+        result.len = 4;
+    } else {
+        result.ptr = (char*)malloc(6);
+        if (!result.ptr) abort();
+        memcpy(result.ptr, "false", 5);
+        result.len = 5;
+    }
+    return result;
 }
 
 // ============================================================================
@@ -902,9 +987,20 @@ void blood_stale_reference_panic(uint32_t expected, uint32_t actual) {
     abort();
 }
 
-void blood_panic(const char* msg) {
-    fprintf(stderr, "BLOOD RUNTIME PANIC: %s\n", msg ? msg : "unknown error");
+void blood_panic(BloodStr msg) {
+    fprintf(stderr, "BLOOD RUNTIME PANIC: ");
+    if (msg.ptr && msg.len > 0) {
+        fwrite(msg.ptr, 1, (size_t)msg.len, stderr);
+    } else {
+        fprintf(stderr, "unknown error");
+    }
+    fprintf(stderr, "\n");
     abort();
+}
+
+// Also provide legacy panic that takes a C string pointer
+void panic(BloodStr msg) {
+    blood_panic(msg);
 }
 
 // ============================================================================

@@ -91,17 +91,33 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
             Rvalue::Discriminant(place) => {
                 let ptr = self.compile_mir_place(place, body)?;
-                // Load discriminant from first field (field 0 is the tag/discriminant)
-                // The enum is represented as a struct where field 0 is i32 discriminant
-                let discr_ptr = self.builder.build_struct_gep(ptr, 0, "discr_ptr")
-                    .map_err(|e| vec![Diagnostic::error(
-                        format!("LLVM struct gep error: {}", e), Span::dummy()
-                    )])?;
-                let discr = self.builder.build_load(discr_ptr, "discr")
-                    .map_err(|e| vec![Diagnostic::error(
-                        format!("LLVM load error: {}", e), Span::dummy()
-                    )])?;
-                Ok(discr)
+
+                // Get the Blood type of the enum to determine its LLVM representation
+                let base_ty = &body.locals[place.local.index() as usize].ty;
+                let llvm_ty = self.lower_type(base_ty);
+
+                // Check if the enum is represented as a struct (has payload) or bare i32 (tag-only)
+                if llvm_ty.is_struct_type() {
+                    // Enum with payload: { i32 tag, payload... }
+                    // Load discriminant from first field (field 0 is the tag/discriminant)
+                    let discr_ptr = self.builder.build_struct_gep(ptr, 0, "discr_ptr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM struct gep error: {}", e), Span::dummy()
+                        )])?;
+                    let discr = self.builder.build_load(discr_ptr, "discr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), Span::dummy()
+                        )])?;
+                    Ok(discr)
+                } else {
+                    // Tag-only enum: represented as bare i32
+                    // Just load the value directly
+                    let discr = self.builder.build_load(ptr, "discr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), Span::dummy()
+                        )])?;
+                    Ok(discr)
+                }
             }
 
             Rvalue::Len(place) => {
@@ -622,16 +638,40 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         op: UnOp,
         val: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
-        let val_int = val.into_int_value();
-
-        let result = match op {
-            UnOp::Not => self.builder.build_not(val_int, "not"),
-            UnOp::Neg => self.builder.build_int_neg(val_int, "neg"),
-        }.map_err(|e| vec![Diagnostic::error(
-            format!("LLVM unary op error: {}", e), Span::dummy()
-        )])?;
-
-        Ok(result.into())
+        match op {
+            UnOp::Not => {
+                // Not only applies to integers (booleans)
+                let val_int = val.into_int_value();
+                let result = self.builder.build_not(val_int, "not")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM not error: {}", e), Span::dummy()
+                    )])?;
+                Ok(result.into())
+            }
+            UnOp::Neg => {
+                // Neg applies to both integers and floats
+                match val {
+                    BasicValueEnum::IntValue(int_val) => {
+                        let result = self.builder.build_int_neg(int_val, "neg")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM int neg error: {}", e), Span::dummy()
+                            )])?;
+                        Ok(result.into())
+                    }
+                    BasicValueEnum::FloatValue(float_val) => {
+                        let result = self.builder.build_float_neg(float_val, "fneg")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM float neg error: {}", e), Span::dummy()
+                            )])?;
+                        Ok(result.into())
+                    }
+                    _ => Err(vec![Diagnostic::error(
+                        format!("Cannot negate value of type {:?}", val.get_type()),
+                        Span::dummy()
+                    )])
+                }
+            }
+        }
     }
 
     /// Compile a type cast from MIR.
