@@ -258,8 +258,8 @@ impl Parser {
 
 /// Effect for parse errors
 effect ParseError {
-    fn error(msg: String, line: i32, column: i32) -> !;
-    fn warning(msg: String, line: i32, column: i32) -> ();
+    op error(msg: String, line: i32, column: i32) -> !;
+    op warning(msg: String, line: i32, column: i32) -> ();
 }
 
 // ============================================================================
@@ -268,7 +268,7 @@ effect ParseError {
 
 impl Parser {
     /// Parse the entire document
-    fn parse_document(mut self) -> Document with ParseError {
+    fn parse_document(mut self) -> Document / {ParseError} {
         let mut blocks = Vec::new();
 
         self.skip_blank_lines();
@@ -289,7 +289,7 @@ impl Parser {
     }
 
     /// Parse a single block element
-    fn parse_block(mut self) -> Option<Block> with ParseError {
+    fn parse_block(mut self) -> Option<Block> / {ParseError} {
         // Try each block type in order of precedence
 
         // ATX Header: # Header
@@ -337,7 +337,7 @@ impl Parser {
     }
 
     /// Try to parse ATX-style header (# Header)
-    fn try_parse_atx_header(mut self) -> Option<Block> with ParseError {
+    fn try_parse_atx_header(mut self) -> Option<Block> / {ParseError} {
         if self.peek() != Some('#') {
             return None;
         }
@@ -376,7 +376,7 @@ impl Parser {
     }
 
     /// Try to parse fenced code block
-    fn try_parse_fenced_code(mut self) -> Option<Block> with ParseError {
+    fn try_parse_fenced_code(mut self) -> Option<Block> / {ParseError} {
         // Check for ``` or ~~~
         let fence_char = match self.peek() {
             Some('`') => '`',
@@ -441,7 +441,7 @@ impl Parser {
     }
 
     /// Try to parse horizontal rule
-    fn try_parse_horizontal_rule(mut self) -> Option<Block> with ParseError {
+    fn try_parse_horizontal_rule(mut self) -> Option<Block> / {ParseError} {
         let rule_char = match self.peek() {
             Some('-') => '-',
             Some('*') => '*',
@@ -481,7 +481,7 @@ impl Parser {
     }
 
     /// Try to parse block quote
-    fn try_parse_block_quote(mut self) -> Option<Block> with ParseError {
+    fn try_parse_block_quote(mut self) -> Option<Block> / {ParseError} {
         if self.peek() != Some('>') {
             return None;
         }
@@ -513,7 +513,7 @@ impl Parser {
     }
 
     /// Try to parse unordered list
-    fn try_parse_unordered_list(mut self) -> Option<Block> with ParseError {
+    fn try_parse_unordered_list(mut self) -> Option<Block> / {ParseError} {
         let marker = match self.peek() {
             Some('-') => '-',
             Some('*') => '*',
@@ -599,7 +599,7 @@ impl Parser {
     }
 
     /// Try to parse ordered list
-    fn try_parse_ordered_list(mut self) -> Option<Block> with ParseError {
+    fn try_parse_ordered_list(mut self) -> Option<Block> / {ParseError} {
         // Check for digit
         let first_char = match self.peek() {
             Some(ch) if ch.is_digit(10) => ch,
@@ -695,7 +695,7 @@ impl Parser {
     }
 
     /// Try to parse indented code block
-    fn try_parse_indented_code(mut self) -> Option<Block> with ParseError {
+    fn try_parse_indented_code(mut self) -> Option<Block> / {ParseError} {
         // Must start with 4 spaces or tab
         let has_indent = match (self.peek(), self.peek_at(1), self.peek_at(2), self.peek_at(3)) {
             (Some(' '), Some(' '), Some(' '), Some(' ')) => true,
@@ -748,7 +748,7 @@ impl Parser {
     }
 
     /// Try to parse HTML block
-    fn try_parse_html_block(mut self) -> Option<Block> with ParseError {
+    fn try_parse_html_block(mut self) -> Option<Block> / {ParseError} {
         if self.peek() != Some('<') {
             return None;
         }
@@ -797,7 +797,7 @@ impl Parser {
     }
 
     /// Try to parse paragraph
-    fn try_parse_paragraph(mut self) -> Option<Block> with ParseError {
+    fn try_parse_paragraph(mut self) -> Option<Block> / {ParseError} {
         if self.is_eof() || self.is_blank_line() {
             return None;
         }
@@ -869,7 +869,7 @@ impl Parser {
 
 impl Parser {
     /// Parse inline elements from a string
-    fn parse_inline_string(self, input: String) -> Vec<Inline> with ParseError {
+    fn parse_inline_string(self, input: String) -> Vec<Inline> / {ParseError} {
         let mut inline_parser = InlineParser::new(input);
         inline_parser.parse()
     }
@@ -941,7 +941,7 @@ impl InlineParser {
     }
 
     /// Parse all inline elements
-    fn parse(mut self) -> Vec<Inline> with ParseError {
+    fn parse(mut self) -> Vec<Inline> / {ParseError} {
         let mut result = Vec::new();
         let mut text_buffer = String::new();
 
@@ -1069,7 +1069,7 @@ impl InlineParser {
     }
 
     /// Try to parse emphasis (*text* or _text_ or **text** or ***text***)
-    fn try_parse_emphasis(mut self) -> Option<Inline> with ParseError {
+    fn try_parse_emphasis(mut self) -> Option<Inline> / {ParseError} {
         let marker = match self.peek() {
             Some('*') => '*',
             Some('_') => '_',
@@ -1140,7 +1140,7 @@ impl InlineParser {
     }
 
     /// Try to parse inline code (`code`)
-    fn try_parse_inline_code(mut self) -> Option<Inline> with ParseError {
+    fn try_parse_inline_code(mut self) -> Option<Inline> / {ParseError} {
         if self.peek() != Some('`') {
             return None;
         }
@@ -1194,7 +1194,7 @@ impl InlineParser {
     }
 
     /// Try to parse link [text](url)
-    fn try_parse_link(mut self) -> Option<Inline> with ParseError {
+    fn try_parse_link(mut self) -> Option<Inline> / {ParseError} {
         if self.peek() != Some('[') {
             return None;
         }
@@ -1316,7 +1316,7 @@ impl InlineParser {
     }
 
     /// Try to parse image ![alt](url)
-    fn try_parse_image(mut self) -> Option<Inline> with ParseError {
+    fn try_parse_image(mut self) -> Option<Inline> / {ParseError} {
         if !self.matches("![") {
             return None;
         }
@@ -1420,7 +1420,7 @@ impl InlineParser {
     }
 
     /// Try to parse autolink <url> or <email>
-    fn try_parse_autolink(mut self) -> Option<Inline> with ParseError {
+    fn try_parse_autolink(mut self) -> Option<Inline> / {ParseError} {
         if self.peek() != Some('<') {
             return None;
         }
@@ -1453,7 +1453,7 @@ impl InlineParser {
     }
 
     /// Try to parse inline HTML
-    fn try_parse_inline_html(mut self) -> Option<Inline> with ParseError {
+    fn try_parse_inline_html(mut self) -> Option<Inline> / {ParseError} {
         if self.peek() != Some('<') {
             return None;
         }
@@ -1673,7 +1673,7 @@ fn escape_html(s: &str) -> String {
 // Example Usage
 // ============================================================================
 
-fn main() -> i32 with IO, ParseError {
+fn main() -> i32 / {IO, ParseError} {
     // Example markdown document
     let markdown = "# Welcome to Blood
 
@@ -1766,13 +1766,13 @@ Ordered:
 }
 
 /// Pretty print the document structure
-fn print_document(doc: &Document) with IO {
+fn print_document(doc: &Document) / {IO} {
     for block in &doc.blocks {
         print_block(block, 0);
     }
 }
 
-fn print_block(block: &Block, indent: i32) with IO {
+fn print_block(block: &Block, indent: i32) / {IO} {
     let prefix = "  ".repeat(indent as usize);
 
     match block {
@@ -1831,7 +1831,7 @@ fn print_block(block: &Block, indent: i32) with IO {
     }
 }
 
-fn print_inlines(inlines: &[Inline], indent: i32) with IO {
+fn print_inlines(inlines: &[Inline], indent: i32) / {IO} {
     let prefix = "  ".repeat(indent as usize);
 
     for inline in inlines {

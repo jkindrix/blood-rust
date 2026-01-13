@@ -395,7 +395,7 @@ impl OrderBook {
         quantity: Quantity,
         order_type: OrderType,
         time_in_force: TimeInForce,
-    ) -> (OrderId, Vec<Trade>) with OrderBookEvent {
+    ) -> (OrderId, Vec<Trade>) / {OrderBookEvent} {
         let order_id = self.generate_order_id();
 
         let mut order = Order::new(
@@ -419,16 +419,16 @@ impl OrderBook {
                         // FOK: cancel all fills if not fully filled
                         // In real implementation, would reverse the trades
                     }
-                    do OrderBookEvent::order_cancelled(order_id, "Not fully filled".to_string());
+                    perform OrderBookEvent.order_cancelled(order_id, "Not fully filled".to_string());
                 },
                 _ => {
                     // Add remaining to book
                     self.insert_order(order);
-                    do OrderBookEvent::order_added(order_id, side, price, quantity);
+                    perform OrderBookEvent.order_added(order_id, side, price, quantity);
                 }
             }
         } else {
-            do OrderBookEvent::order_filled(order_id);
+            perform OrderBookEvent.order_filled(order_id);
         }
 
         (order_id, trades)
@@ -454,7 +454,7 @@ impl OrderBook {
     }
 
     /// Match an incoming order against the book
-    fn match_order(&mut self, order: &mut Order) -> Vec<Trade> with OrderBookEvent {
+    fn match_order(&mut self, order: &mut Order) -> Vec<Trade> / {OrderBookEvent} {
         let mut trades = Vec::new();
 
         // Get the opposite side's orders
@@ -526,7 +526,7 @@ impl OrderBook {
                 order.filled = Quantity::new(order.filled.raw() + fill_qty.raw());
                 resting_order.filled = Quantity::new(resting_order.filled.raw() + fill_qty.raw());
 
-                do OrderBookEvent::trade_executed(
+                perform OrderBookEvent.trade_executed(
                     trade.buyer_order,
                     trade.seller_order,
                     best_price,
@@ -543,7 +543,7 @@ impl OrderBook {
                         level.total_quantity.raw().saturating_sub(fill_qty.raw())
                     );
                     self.orders.remove(&filled_order_id);
-                    do OrderBookEvent::order_filled(filled_order_id);
+                    perform OrderBookEvent.order_filled(filled_order_id);
                 } else {
                     level.total_quantity = Quantity::new(
                         level.total_quantity.raw().saturating_sub(fill_qty.raw())
@@ -561,7 +561,7 @@ impl OrderBook {
     }
 
     /// Cancel an order
-    fn cancel_order(&mut self, order_id: OrderId) -> bool with OrderBookEvent {
+    fn cancel_order(&mut self, order_id: OrderId) -> bool / {OrderBookEvent} {
         let (side, price) = match self.orders.remove(&order_id) {
             Some(info) => info,
             None => return false,
@@ -580,12 +580,12 @@ impl OrderBook {
             }
         }
 
-        do OrderBookEvent::order_cancelled(order_id, "User requested".to_string());
+        perform OrderBookEvent.order_cancelled(order_id, "User requested".to_string());
         true
     }
 
     /// Modify an order's quantity
-    fn modify_order(&mut self, order_id: OrderId, new_quantity: Quantity) -> bool with OrderBookEvent {
+    fn modify_order(&mut self, order_id: OrderId, new_quantity: Quantity) -> bool / {OrderBookEvent} {
         let (side, price) = match self.orders.get(&order_id) {
             Some(info) => *info,
             None => return false,
@@ -610,7 +610,7 @@ impl OrderBook {
                             + new_remaining.raw()
                     );
 
-                    do OrderBookEvent::order_modified(order_id, new_quantity);
+                    perform OrderBookEvent.order_modified(order_id, new_quantity);
                     return true;
                 }
             }
@@ -686,11 +686,11 @@ struct BookDepth {
 
 /// Effect for order book events
 effect OrderBookEvent {
-    fn order_added(id: OrderId, side: Side, price: Price, quantity: Quantity) -> ();
-    fn order_filled(id: OrderId) -> ();
-    fn order_cancelled(id: OrderId, reason: String) -> ();
-    fn order_modified(id: OrderId, new_quantity: Quantity) -> ();
-    fn trade_executed(buyer: OrderId, seller: OrderId, price: Price, quantity: Quantity) -> ();
+    op order_added(id: OrderId, side: Side, price: Price, quantity: Quantity) -> ();
+    op order_filled(id: OrderId) -> ();
+    op order_cancelled(id: OrderId, reason: String) -> ();
+    op order_modified(id: OrderId, new_quantity: Quantity) -> ();
+    op trade_executed(buyer: OrderId, seller: OrderId, price: Price, quantity: Quantity) -> ();
 }
 
 // ============================================================================
@@ -835,7 +835,7 @@ fn estimate_market_impact(
 // Example Usage
 // ============================================================================
 
-fn main() -> i32 with IO, OrderBookEvent {
+fn main() -> i32 / {IO, OrderBookEvent} {
     print("=== Blood Order Book Implementation ===\n");
 
     // Create order book
@@ -1007,7 +1007,7 @@ fn main() -> i32 with IO, OrderBookEvent {
 // Event Handler
 // ============================================================================
 
-fn main_with_handler() -> i32 with IO {
+fn main_with_handler() -> i32 / {IO} {
     try {
         main()
     } with {

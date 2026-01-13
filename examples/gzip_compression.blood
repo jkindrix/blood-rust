@@ -157,8 +157,8 @@ impl CompressionLevel {
 
 /// Effect for compression errors
 effect CompressionError {
-    fn error(msg: String) -> !;
-    fn warning(msg: String) -> ();
+    op error(msg: String) -> !;
+    op warning(msg: String) -> ();
 }
 
 /// Convert zlib error code to string
@@ -260,7 +260,7 @@ impl Deflater {
     }
 
     /// Compress data using deflate algorithm
-    fn compress(&self, data: &[u8]) -> Vec<u8> with CompressionError {
+    fn compress(&self, data: &[u8]) -> Vec<u8> / {CompressionError} {
         if data.is_empty() {
             return Vec::new();
         }
@@ -269,7 +269,7 @@ impl Deflater {
         let mut output = Vec::new();
 
         // Initialize deflate
-        let ret = unsafe {
+        let ret = @unsafe {
             deflateInit_(
                 &mut stream,
                 self.level.to_zlib_level(),
@@ -279,7 +279,7 @@ impl Deflater {
         };
 
         if ret != Z_OK {
-            do CompressionError::error(format!("deflateInit failed: {}", zlib_error_string(ret)));
+            perform CompressionError.error(format!("deflateInit failed: {}", zlib_error_string(ret)));
         }
 
         // Allocate output buffer
@@ -294,7 +294,7 @@ impl Deflater {
             stream.next_out = out_buffer.as_mut_ptr();
             stream.avail_out = out_buffer.len() as u32;
 
-            let ret = unsafe { deflate(&mut stream, Z_FINISH) };
+            let ret = @unsafe { deflate(&mut stream, Z_FINISH) };
 
             // Copy output
             let have = out_buffer.len() - stream.avail_out as usize;
@@ -305,13 +305,13 @@ impl Deflater {
             }
 
             if ret != Z_OK {
-                unsafe { deflateEnd(&mut stream) };
-                do CompressionError::error(format!("deflate failed: {}", zlib_error_string(ret)));
+                @unsafe { deflateEnd(&mut stream) };
+                perform CompressionError.error(format!("deflate failed: {}", zlib_error_string(ret)));
             }
         }
 
         // Clean up
-        unsafe { deflateEnd(&mut stream) };
+        @unsafe { deflateEnd(&mut stream) };
 
         output
     }
@@ -339,7 +339,7 @@ impl Inflater {
     }
 
     /// Decompress deflate data
-    fn decompress(&self, data: &[u8]) -> Vec<u8> with CompressionError {
+    fn decompress(&self, data: &[u8]) -> Vec<u8> / {CompressionError} {
         if data.is_empty() {
             return Vec::new();
         }
@@ -348,7 +348,7 @@ impl Inflater {
         let mut output = Vec::new();
 
         // Initialize inflate
-        let ret = unsafe {
+        let ret = @unsafe {
             inflateInit_(
                 &mut stream,
                 b"1.2.11\0".as_ptr() as *const i8,
@@ -357,7 +357,7 @@ impl Inflater {
         };
 
         if ret != Z_OK {
-            do CompressionError::error(format!("inflateInit failed: {}", zlib_error_string(ret)));
+            perform CompressionError.error(format!("inflateInit failed: {}", zlib_error_string(ret)));
         }
 
         // Allocate output buffer
@@ -372,7 +372,7 @@ impl Inflater {
             stream.next_out = out_buffer.as_mut_ptr();
             stream.avail_out = out_buffer.len() as u32;
 
-            let ret = unsafe { inflate(&mut stream, Z_NO_FLUSH) };
+            let ret = @unsafe { inflate(&mut stream, Z_NO_FLUSH) };
 
             // Copy output
             let have = out_buffer.len() - stream.avail_out as usize;
@@ -383,8 +383,8 @@ impl Inflater {
             }
 
             if ret != Z_OK {
-                unsafe { inflateEnd(&mut stream) };
-                do CompressionError::error(format!("inflate failed: {}", zlib_error_string(ret)));
+                @unsafe { inflateEnd(&mut stream) };
+                perform CompressionError.error(format!("inflate failed: {}", zlib_error_string(ret)));
             }
 
             if stream.avail_in == 0 {
@@ -393,7 +393,7 @@ impl Inflater {
         }
 
         // Clean up
-        unsafe { inflateEnd(&mut stream) };
+        @unsafe { inflateEnd(&mut stream) };
 
         output
     }
@@ -497,19 +497,19 @@ impl GzipHeader {
     }
 
     /// Decode header from bytes, returns header and number of bytes consumed
-    fn decode(data: &[u8]) -> Option<(GzipHeader, usize)> with CompressionError {
+    fn decode(data: &[u8]) -> Option<(GzipHeader, usize)> / {CompressionError} {
         if data.len() < 10 {
-            do CompressionError::error("Gzip header too short".to_string());
+            perform CompressionError.error("Gzip header too short".to_string());
         }
 
         // Check magic number
         if data[0] != GZIP_MAGIC_1 || data[1] != GZIP_MAGIC_2 {
-            do CompressionError::error("Invalid gzip magic number".to_string());
+            perform CompressionError.error("Invalid gzip magic number".to_string());
         }
 
         let method = data[2];
         if method != GZIP_METHOD_DEFLATE {
-            do CompressionError::error(format!("Unsupported compression method: {}", method));
+            perform CompressionError.error(format!("Unsupported compression method: {}", method));
         }
 
         let flags = data[3];
@@ -527,7 +527,7 @@ impl GzipHeader {
         // Skip extra field if present
         if flags & GZIP_FLAG_EXTRA != 0 {
             if pos + 2 > data.len() {
-                do CompressionError::error("Invalid gzip extra field".to_string());
+                perform CompressionError.error("Invalid gzip extra field".to_string());
             }
             let xlen = (data[pos] as usize) | ((data[pos + 1] as usize) << 8);
             pos += 2 + xlen;
@@ -540,7 +540,7 @@ impl GzipHeader {
                 pos += 1;
             }
             if pos >= data.len() {
-                do CompressionError::error("Unterminated gzip filename".to_string());
+                perform CompressionError.error("Unterminated gzip filename".to_string());
             }
             let name = String::from_utf8_lossy(&data[start..pos]).to_string();
             pos += 1;  // Skip null terminator
@@ -556,7 +556,7 @@ impl GzipHeader {
                 pos += 1;
             }
             if pos >= data.len() {
-                do CompressionError::error("Unterminated gzip comment".to_string());
+                perform CompressionError.error("Unterminated gzip comment".to_string());
             }
             let cmt = String::from_utf8_lossy(&data[start..pos]).to_string();
             pos += 1;  // Skip null terminator
@@ -629,7 +629,7 @@ impl GzipCompressor {
     }
 
     /// Compress data to gzip format
-    fn compress(&self, data: &[u8]) -> Vec<u8> with CompressionError {
+    fn compress(&self, data: &[u8]) -> Vec<u8> / {CompressionError} {
         let mut output = Vec::new();
 
         // Write gzip header
@@ -659,7 +659,7 @@ impl GzipCompressor {
     }
 
     /// Raw deflate compression (no zlib header)
-    fn deflate_raw(&self, data: &[u8]) -> Vec<u8> with CompressionError {
+    fn deflate_raw(&self, data: &[u8]) -> Vec<u8> / {CompressionError} {
         if data.is_empty() {
             // Empty input produces empty deflate block
             return vec![0x03, 0x00];
@@ -669,7 +669,7 @@ impl GzipCompressor {
         let mut output = Vec::new();
 
         // Initialize with negative windowBits for raw deflate
-        let ret = unsafe {
+        let ret = @unsafe {
             deflateInit2_(
                 &mut stream,
                 self.level.to_zlib_level(),
@@ -683,7 +683,7 @@ impl GzipCompressor {
         };
 
         if ret != Z_OK {
-            do CompressionError::error(format!("deflateInit2 failed: {}", zlib_error_string(ret)));
+            perform CompressionError.error(format!("deflateInit2 failed: {}", zlib_error_string(ret)));
         }
 
         let mut out_buffer = vec![0u8; 32768];
@@ -695,7 +695,7 @@ impl GzipCompressor {
             stream.next_out = out_buffer.as_mut_ptr();
             stream.avail_out = out_buffer.len() as u32;
 
-            let ret = unsafe { deflate(&mut stream, Z_FINISH) };
+            let ret = @unsafe { deflate(&mut stream, Z_FINISH) };
 
             let have = out_buffer.len() - stream.avail_out as usize;
             output.extend_from_slice(&out_buffer[..have]);
@@ -705,12 +705,12 @@ impl GzipCompressor {
             }
 
             if ret != Z_OK {
-                unsafe { deflateEnd(&mut stream) };
-                do CompressionError::error(format!("deflate failed: {}", zlib_error_string(ret)));
+                @unsafe { deflateEnd(&mut stream) };
+                perform CompressionError.error(format!("deflate failed: {}", zlib_error_string(ret)));
             }
         }
 
-        unsafe { deflateEnd(&mut stream) };
+        @unsafe { deflateEnd(&mut stream) };
 
         output
     }
@@ -729,21 +729,21 @@ impl GzipDecompressor {
     }
 
     /// Decompress gzip data
-    fn decompress(&self, data: &[u8]) -> Vec<u8> with CompressionError {
+    fn decompress(&self, data: &[u8]) -> Vec<u8> / {CompressionError} {
         if data.len() < 18 {  // Minimum gzip file size
-            do CompressionError::error("Gzip data too short".to_string());
+            perform CompressionError.error("Gzip data too short".to_string());
         }
 
         // Parse header
         let (header, header_len) = match GzipHeader::decode(data) {
             Some((h, len)) => (h, len),
-            None => do CompressionError::error("Failed to parse gzip header".to_string()),
+            None => perform CompressionError.error("Failed to parse gzip header".to_string()),
         };
 
         // Compressed data is between header and trailer
         let trailer_start = data.len() - 8;
         if header_len >= trailer_start {
-            do CompressionError::error("Invalid gzip structure".to_string());
+            perform CompressionError.error("Invalid gzip structure".to_string());
         }
 
         let compressed = &data[header_len..trailer_start];
@@ -765,7 +765,7 @@ impl GzipDecompressor {
         // Verify CRC
         let actual_crc = crc32_checksum(&decompressed);
         if actual_crc != expected_crc {
-            do CompressionError::error(format!(
+            perform CompressionError.error(format!(
                 "CRC mismatch: expected {:08x}, got {:08x}",
                 expected_crc, actual_crc
             ));
@@ -774,7 +774,7 @@ impl GzipDecompressor {
         // Verify size (mod 2^32)
         let actual_size = (decompressed.len() as u32) & 0xFFFFFFFF;
         if actual_size != expected_size {
-            do CompressionError::warning(format!(
+            perform CompressionError.warning(format!(
                 "Size mismatch: expected {}, got {}",
                 expected_size, actual_size
             ));
@@ -784,7 +784,7 @@ impl GzipDecompressor {
     }
 
     /// Get header info without decompressing
-    fn header(&self, data: &[u8]) -> Option<GzipHeader> with CompressionError {
+    fn header(&self, data: &[u8]) -> Option<GzipHeader> / {CompressionError} {
         match GzipHeader::decode(data) {
             Some((h, _)) => Some(h),
             None => None,
@@ -792,7 +792,7 @@ impl GzipDecompressor {
     }
 
     /// Raw inflate decompression
-    fn inflate_raw(&self, data: &[u8]) -> Vec<u8> with CompressionError {
+    fn inflate_raw(&self, data: &[u8]) -> Vec<u8> / {CompressionError} {
         if data.is_empty() {
             return Vec::new();
         }
@@ -801,7 +801,7 @@ impl GzipDecompressor {
         let mut output = Vec::new();
 
         // Initialize with negative windowBits for raw inflate
-        let ret = unsafe {
+        let ret = @unsafe {
             inflateInit2_(
                 &mut stream,
                 -15,  // Negative for raw inflate
@@ -811,7 +811,7 @@ impl GzipDecompressor {
         };
 
         if ret != Z_OK {
-            do CompressionError::error(format!("inflateInit2 failed: {}", zlib_error_string(ret)));
+            perform CompressionError.error(format!("inflateInit2 failed: {}", zlib_error_string(ret)));
         }
 
         let mut out_buffer = vec![0u8; 32768];
@@ -823,7 +823,7 @@ impl GzipDecompressor {
             stream.next_out = out_buffer.as_mut_ptr();
             stream.avail_out = out_buffer.len() as u32;
 
-            let ret = unsafe { inflate(&mut stream, Z_NO_FLUSH) };
+            let ret = @unsafe { inflate(&mut stream, Z_NO_FLUSH) };
 
             let have = out_buffer.len() - stream.avail_out as usize;
             output.extend_from_slice(&out_buffer[..have]);
@@ -833,8 +833,8 @@ impl GzipDecompressor {
             }
 
             if ret != Z_OK {
-                unsafe { inflateEnd(&mut stream) };
-                do CompressionError::error(format!("inflate failed: {}", zlib_error_string(ret)));
+                @unsafe { inflateEnd(&mut stream) };
+                perform CompressionError.error(format!("inflate failed: {}", zlib_error_string(ret)));
             }
 
             if stream.avail_in == 0 {
@@ -842,7 +842,7 @@ impl GzipDecompressor {
             }
         }
 
-        unsafe { inflateEnd(&mut stream) };
+        @unsafe { inflateEnd(&mut stream) };
 
         output
     }
@@ -862,7 +862,7 @@ struct StreamingCompressor {
 }
 
 impl StreamingCompressor {
-    fn new(level: CompressionLevel) -> StreamingCompressor with CompressionError {
+    fn new(level: CompressionLevel) -> StreamingCompressor / {CompressionError} {
         let mut compressor = StreamingCompressor {
             level: level,
             stream: None,
@@ -875,10 +875,10 @@ impl StreamingCompressor {
         compressor
     }
 
-    fn init(mut self) with CompressionError {
+    fn init(mut self) / {CompressionError} {
         let mut stream = ZStream::zeroed();
 
-        let ret = unsafe {
+        let ret = @unsafe {
             deflateInit2_(
                 &mut stream,
                 self.level.to_zlib_level(),
@@ -892,7 +892,7 @@ impl StreamingCompressor {
         };
 
         if ret != Z_OK {
-            do CompressionError::error(format!("deflateInit2 failed: {}", zlib_error_string(ret)));
+            perform CompressionError.error(format!("deflateInit2 failed: {}", zlib_error_string(ret)));
         }
 
         self.stream = Some(stream);
@@ -911,10 +911,10 @@ impl StreamingCompressor {
     }
 
     /// Compress a chunk of data
-    fn compress_chunk(&mut self, data: &[u8], finish: bool) -> Vec<u8> with CompressionError {
+    fn compress_chunk(&mut self, data: &[u8], finish: bool) -> Vec<u8> / {CompressionError} {
         let stream = match &mut self.stream {
             Some(s) => s,
-            None => do CompressionError::error("Compressor not initialized".to_string()),
+            None => perform CompressionError.error("Compressor not initialized".to_string()),
         };
 
         // Update CRC and total
@@ -935,7 +935,7 @@ impl StreamingCompressor {
             stream.next_out = out_buffer.as_mut_ptr();
             stream.avail_out = out_buffer.len() as u32;
 
-            let ret = unsafe { deflate(stream, flush) };
+            let ret = @unsafe { deflate(stream, flush) };
 
             let have = out_buffer.len() - stream.avail_out as usize;
             output.extend_from_slice(&out_buffer[..have]);
@@ -945,7 +945,7 @@ impl StreamingCompressor {
             }
 
             if ret != Z_OK && ret != Z_BUF_ERROR {
-                do CompressionError::error(format!("deflate failed: {}", zlib_error_string(ret)));
+                perform CompressionError.error(format!("deflate failed: {}", zlib_error_string(ret)));
             }
 
             if stream.avail_out != 0 {
@@ -957,13 +957,13 @@ impl StreamingCompressor {
     }
 
     /// Finish compression and return trailer
-    fn finish(&mut self) -> Vec<u8> with CompressionError {
+    fn finish(&mut self) -> Vec<u8> / {CompressionError} {
         // Compress remaining with finish flag
         let final_data = self.compress_chunk(&[], true)?;
 
         // Clean up zlib
         if let Some(ref mut stream) = self.stream {
-            unsafe { deflateEnd(stream) };
+            @unsafe { deflateEnd(stream) };
         }
         self.stream = None;
 
@@ -990,7 +990,7 @@ impl StreamingCompressor {
 impl Drop for StreamingCompressor {
     fn drop(&mut self) {
         if let Some(ref mut stream) = self.stream {
-            unsafe { deflateEnd(stream) };
+            @unsafe { deflateEnd(stream) };
         }
     }
 }
@@ -1000,7 +1000,7 @@ impl Drop for StreamingCompressor {
 // ============================================================================
 
 /// Compress data to gzip format
-fn gzip_compress(data: &[u8]) -> Vec<u8> with CompressionError {
+fn gzip_compress(data: &[u8]) -> Vec<u8> / {CompressionError} {
     GzipCompressor::new().compress(data)
 }
 
@@ -1009,7 +1009,7 @@ fn gzip_compress_with(
     data: &[u8],
     level: CompressionLevel,
     filename: Option<&str>
-) -> Vec<u8> with CompressionError {
+) -> Vec<u8> / {CompressionError} {
     let mut compressor = GzipCompressor::new().with_level(level);
 
     if let Some(name) = filename {
@@ -1020,17 +1020,17 @@ fn gzip_compress_with(
 }
 
 /// Decompress gzip data
-fn gzip_decompress(data: &[u8]) -> Vec<u8> with CompressionError {
+fn gzip_decompress(data: &[u8]) -> Vec<u8> / {CompressionError} {
     GzipDecompressor::new().decompress(data)
 }
 
 /// Compress data using deflate
-fn deflate_compress(data: &[u8]) -> Vec<u8> with CompressionError {
+fn deflate_compress(data: &[u8]) -> Vec<u8> / {CompressionError} {
     Deflater::new().compress(data)
 }
 
 /// Decompress deflate data
-fn deflate_decompress(data: &[u8]) -> Vec<u8> with CompressionError {
+fn deflate_decompress(data: &[u8]) -> Vec<u8> / {CompressionError} {
     Inflater::new().decompress(data)
 }
 
@@ -1063,7 +1063,7 @@ impl ZStream {
 // Example Usage
 // ============================================================================
 
-fn main() -> i32 with IO, CompressionError {
+fn main() -> i32 / {IO, CompressionError} {
     print("=== Blood Gzip Compression Library ===\n");
 
     // Test data

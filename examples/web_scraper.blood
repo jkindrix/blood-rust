@@ -296,13 +296,13 @@ impl ScrapeStats {
 /// Effect for scraping operations
 effect Scrape {
     /// Called when a page is discovered
-    fn on_page_discovered(url: &str, depth: u32);
+    op on_page_discovered(url: &str, depth: u32);
 
     /// Called when a page is scraped
-    fn on_page_scraped(result: &ScrapeResult);
+    op on_page_scraped(result: &ScrapeResult);
 
     /// Check if URL should be scraped
-    fn should_scrape(url: &str) -> bool;
+    op should_scrape(url: &str) -> bool;
 }
 
 // ===========================================================================

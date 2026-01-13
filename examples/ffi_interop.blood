@@ -177,7 +177,7 @@ fn c_null_ptr() -> i32 { 0 }
 // In real Blood: @unsafe fn raw_write(ptr: *mut i32, value: i32)
 fn unsafe_write_simulated(ptr: RawPointer, value: i32) -> FfiResult {
     // In real code, this would be:
-    // @unsafe {
+    // @@unsafe {
     //     *ptr = value;
     // }
 
@@ -196,7 +196,7 @@ fn unsafe_write_simulated(ptr: RawPointer, value: i32) -> FfiResult {
 
 // Unsafe function for raw memory read (simulation)
 fn unsafe_read_simulated(ptr: RawPointer) -> FfiResult {
-    // In real code: @unsafe { *ptr }
+    // In real code: @@unsafe { *ptr }
 
     if !ptr_is_valid(ptr) {
         ffi_error(1)
@@ -244,7 +244,7 @@ fn safe_alloc(size: i32) -> BufferDesc {
         }
     } else {
         // In real code:
-        // @unsafe {
+        // @@unsafe {
         //     let ptr = libc::malloc(size as usize);
         //     if ptr.is_null() {
         //         panic!("malloc failed");
@@ -280,7 +280,7 @@ fn safe_free(buf: BufferDesc) -> FfiResult {
         ffi_success(0)
     } else {
         // In real code:
-        // @unsafe {
+        // @@unsafe {
         //     libc::free(ptr);
         // }
 
@@ -328,7 +328,7 @@ fn cstring_from_blood(s: i32) -> CString {
     //         panic!("String contains interior null byte");
     //     }
     //     let len = s.len();
-    //     @unsafe {
+    //     @@unsafe {
     //         let ptr = libc::malloc(len + 1);
     //         libc::memcpy(ptr, s.as_ptr(), len);
     //         *(ptr.add(len)) = 0;  // Null terminator
@@ -425,7 +425,7 @@ fn safe_open(path: i32, mode: i32) -> FfiResult {
         ffi_error(13)
     } else {
         // In real code:
-        // @unsafe {
+        // @@unsafe {
         //     let fd = libc::open(cpath.as_ptr(), flags);
         //     if fd < 0 {
         //         Err(IoError::from_errno())
@@ -491,7 +491,7 @@ fn transfer_to_c(data: OwnedBuffer) -> i32 {
         println_int(data.ptr);
 
         // In real code:
-        // @unsafe {
+        // @@unsafe {
         //     c_library::take_buffer(data.ptr, data.len);
         //     std::mem::forget(data);  // Don't run Blood's destructor
         // }
@@ -511,7 +511,7 @@ fn receive_from_c(ptr: i32, len: i32) -> OwnedBuffer {
     println_int(len);
 
     // In real code:
-    // @unsafe {
+    // @@unsafe {
     //     Vec::from_raw_parts(ptr, len, len)
     // }
 
@@ -538,7 +538,7 @@ fn receive_from_c(ptr: i32, len: i32) -> OwnedBuffer {
 //
 // // Blood callback (must be pure or #[no_unwind])
 // fn my_compare(a: *const u8, b: *const u8) -> i32 / pure {
-//     @unsafe {
+//     @@unsafe {
 //         let a_val = *(a as *const i32);
 //         let b_val = *(b as *const i32);
 //         a_val - b_val

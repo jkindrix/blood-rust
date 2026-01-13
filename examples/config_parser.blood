@@ -292,18 +292,18 @@ fn merge_tables(target: &mut HashMap<String, Value>, source: &HashMap<String, Va
 
 /// Effect for parse errors
 effect ParseError {
-    fn error(msg: String, line: i32, column: i32) -> !;
-    fn warning(msg: String, line: i32, column: i32) -> ();
+    op error(msg: String, line: i32, column: i32) -> !;
+    op warning(msg: String, line: i32, column: i32) -> ();
 }
 
 /// Effect for environment variable access
 effect Env {
-    fn get_var(name: &str) -> Option<String>;
+    op get_var(name: &str) -> Option<String>;
 }
 
 /// Effect for file inclusion
 effect FileSystem {
-    fn read_file(path: &str) -> Option<String>;
+    op read_file(path: &str) -> Option<String>;
 }
 
 // ============================================================================
@@ -420,7 +420,7 @@ impl Lexer {
     }
 
     /// Get next token
-    fn next_token(&mut self) -> Token with ParseError {
+    fn next_token(&mut self) -> Token / {ParseError} {
         self.skip_whitespace_and_comments();
 
         let line = self.line;
@@ -486,13 +486,13 @@ impl Lexer {
             return self.scan_identifier();
         }
 
-        do ParseError::error(
+        perform ParseError.error(
             format!("Unexpected character: '{}'", ch),
             line, column
         )
     }
 
-    fn scan_string(&mut self, quote: char) -> Token with ParseError {
+    fn scan_string(&mut self, quote: char) -> Token / {ParseError} {
         let line = self.line;
         let column = self.column;
 
@@ -549,7 +549,7 @@ impl Lexer {
         Token { kind: TokenKind::String(value), line: line, column: column }
     }
 
-    fn scan_number(&mut self) -> Token with ParseError {
+    fn scan_number(&mut self) -> Token / {ParseError} {
         let line = self.line;
         let column = self.column;
 
@@ -617,7 +617,7 @@ impl Lexer {
         if is_float {
             match num_str.parse::<f64>() {
                 Ok(f) => Token { kind: TokenKind::Float(f), line: line, column: column },
-                Err(_) => do ParseError::error(
+                Err(_) => perform ParseError.error(
                     format!("Invalid float: {}", num_str),
                     line, column
                 ),
@@ -625,7 +625,7 @@ impl Lexer {
         } else {
             match num_str.parse::<i64>() {
                 Ok(i) => Token { kind: TokenKind::Integer(i), line: line, column: column },
-                Err(_) => do ParseError::error(
+                Err(_) => perform ParseError.error(
                     format!("Invalid integer: {}", num_str),
                     line, column
                 ),
@@ -633,7 +633,7 @@ impl Lexer {
         }
     }
 
-    fn scan_identifier(&mut self) -> Token with ParseError {
+    fn scan_identifier(&mut self) -> Token / {ParseError} {
         let line = self.line;
         let column = self.column;
 
@@ -676,7 +676,7 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(input: String) -> Parser with ParseError {
+    fn new(input: String) -> Parser / {ParseError} {
         let mut lexer = Lexer::new(input);
         let current = lexer.next_token();
         Parser {
@@ -686,7 +686,7 @@ impl Parser {
         }
     }
 
-    fn advance(&mut self) with ParseError {
+    fn advance(&mut self) / {ParseError} {
         if let Some(token) = self.peeked.take() {
             self.current = token;
         } else {
@@ -694,25 +694,25 @@ impl Parser {
         }
     }
 
-    fn peek(&mut self) -> &Token with ParseError {
+    fn peek(&mut self) -> &Token / {ParseError} {
         if self.peeked.is_none() {
             self.peeked = Some(self.lexer.next_token());
         }
         self.peeked.as_ref().unwrap()
     }
 
-    fn skip_newlines(&mut self) with ParseError {
+    fn skip_newlines(&mut self) / {ParseError} {
         while matches!(self.current.kind, TokenKind::Newline) {
             self.advance();
         }
     }
 
-    fn expect_newline_or_eof(&mut self) with ParseError {
+    fn expect_newline_or_eof(&mut self) / {ParseError} {
         match &self.current.kind {
             TokenKind::Newline => { self.advance(); },
             TokenKind::Eof => {},
             _ => {
-                do ParseError::error(
+                perform ParseError.error(
                     format!("Expected newline, got {:?}", self.current.kind),
                     self.current.line,
                     self.current.column
@@ -722,7 +722,7 @@ impl Parser {
     }
 
     /// Parse the configuration file
-    fn parse(&mut self) -> Config with ParseError, Env, FileSystem {
+    fn parse(&mut self) -> Config / {ParseError, Env, FileSystem} {
         let mut config = Config::new();
         let mut current_section: Option<String> = None;
 
@@ -742,7 +742,7 @@ impl Parser {
 
                     let path = match &self.current.kind {
                         TokenKind::String(s) => s.clone(),
-                        _ => do ParseError::error(
+                        _ => perform ParseError.error(
                             "Expected file path after @include".to_string(),
                             self.current.line,
                             self.current.column
@@ -751,12 +751,12 @@ impl Parser {
                     self.advance();
 
                     // Load and parse included file
-                    if let Some(content) = do FileSystem::read_file(&path) {
+                    if let Some(content) = perform FileSystem.read_file(&path) {
                         let mut included_parser = Parser::new(content)?;
                         let included_config = included_parser.parse()?;
                         config.merge(&included_config);
                     } else {
-                        do ParseError::warning(
+                        perform ParseError.warning(
                             format!("Could not include file: {}", path),
                             self.current.line,
                             self.current.column
@@ -781,7 +781,7 @@ impl Parser {
                 },
 
                 _ => {
-                    do ParseError::error(
+                    perform ParseError.error(
                         format!("Unexpected token: {:?}", self.current.kind),
                         self.current.line,
                         self.current.column
@@ -793,7 +793,7 @@ impl Parser {
         config
     }
 
-    fn parse_section_header(&mut self) -> String with ParseError {
+    fn parse_section_header(&mut self) -> String / {ParseError} {
         // Skip [
         self.advance();
 
@@ -814,7 +814,7 @@ impl Parser {
                     break;
                 },
                 _ => {
-                    do ParseError::error(
+                    perform ParseError.error(
                         "Invalid section header".to_string(),
                         self.current.line,
                         self.current.column
@@ -828,7 +828,7 @@ impl Parser {
         section_name
     }
 
-    fn parse_key_value(&mut self) -> (String, Value) with ParseError, Env {
+    fn parse_key_value(&mut self) -> (String, Value) / {ParseError, Env} {
         // Parse key (possibly dotted)
         let mut key = String::new();
 
@@ -847,7 +847,7 @@ impl Parser {
                     break;
                 },
                 _ => {
-                    do ParseError::error(
+                    perform ParseError.error(
                         "Expected '=' after key".to_string(),
                         self.current.line,
                         self.current.column
@@ -868,7 +868,7 @@ impl Parser {
         (key, value)
     }
 
-    fn parse_value(&mut self) -> Value with ParseError, Env {
+    fn parse_value(&mut self) -> Value / {ParseError, Env} {
         match &self.current.kind {
             TokenKind::String(s) => {
                 let value = self.interpolate_string(s)?;
@@ -897,7 +897,7 @@ impl Parser {
                 self.parse_inline_table()
             },
             _ => {
-                do ParseError::error(
+                perform ParseError.error(
                     format!("Expected value, got {:?}", self.current.kind),
                     self.current.line,
                     self.current.column
@@ -906,7 +906,7 @@ impl Parser {
         }
     }
 
-    fn parse_array(&mut self) -> Value with ParseError, Env {
+    fn parse_array(&mut self) -> Value / {ParseError, Env} {
         // Skip [
         self.advance();
         self.skip_newlines();
@@ -933,7 +933,7 @@ impl Parser {
         Value::Array(values)
     }
 
-    fn parse_inline_table(&mut self) -> Value with ParseError, Env {
+    fn parse_inline_table(&mut self) -> Value / {ParseError, Env} {
         // Skip {
         self.advance();
         self.skip_newlines();
@@ -960,7 +960,7 @@ impl Parser {
     }
 
     /// Interpolate environment variables in string
-    fn interpolate_string(&self, s: &str) -> String with Env {
+    fn interpolate_string(&self, s: &str) -> String / {Env} {
         let mut result = String::new();
         let mut chars = s.chars().peekable();
 
@@ -995,7 +995,7 @@ impl Parser {
                 }
 
                 // Look up environment variable
-                if let Some(value) = do Env::get_var(&var_name) {
+                if let Some(value) = perform Env.get_var(&var_name) {
                     result.push_str(&value);
                 } else if let Some(dv) = default_value {
                     result.push_str(&dv);
@@ -1173,7 +1173,7 @@ fn serialize_value(value: &Value) -> String {
 // ============================================================================
 
 /// Parse configuration from string
-fn parse_config(input: &str) -> Config with ParseError, Env, FileSystem {
+fn parse_config(input: &str) -> Config / {ParseError, Env, FileSystem} {
     let mut parser = Parser::new(input.to_string())?;
     parser.parse()
 }
@@ -1204,7 +1204,7 @@ fn parse_config_simple(input: &str) -> Result<Config, String> {
 // Example Usage
 // ============================================================================
 
-fn main() -> i32 with IO {
+fn main() -> i32 / {IO} {
     print("=== Blood Configuration Parser ===\n");
 
     // Example configuration

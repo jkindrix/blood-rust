@@ -83,7 +83,7 @@ mod door {
     }
 
     /// Demonstrate the door typestate
-    fn demo() with IO {
+    fn demo() / {IO} {
         print("=== Door Typestate Demo ===\n");
 
         // Create a closed door
@@ -145,9 +145,9 @@ mod connection {
         }
 
         /// Start connecting - transitions to Connecting state
-        fn connect(self) -> Connection<Connecting> with Net {
+        fn connect(self) -> Connection<Connecting> / {Net} {
             print("[{}] Initiating connection to {}", self.id, self.address);
-            do Net::connect(&self.address);
+            perform Net.connect(&self.address);
             Connection {
                 id: self.id,
                 address: self.address,
@@ -158,10 +158,10 @@ mod connection {
 
     impl Connection<Connecting> {
         /// Wait for connection to be established
-        fn wait_connected(self) -> Result<Connection<Connected>, ConnectionError> with Net {
+        fn wait_connected(self) -> Result<Connection<Connected>, ConnectionError> / {Net} {
             print("[{}] Waiting for connection...", self.id);
 
-            match do Net::wait_connected() {
+            match perform Net.wait_connected() {
                 Ok(()) => {
                     print("[{}] Connected!", self.id);
                     Ok(Connection {
@@ -175,9 +175,9 @@ mod connection {
         }
 
         /// Cancel connection attempt
-        fn cancel(self) -> Connection<Disconnected> with Net {
+        fn cancel(self) -> Connection<Disconnected> / {Net} {
             print("[{}] Cancelling connection attempt", self.id);
-            do Net::cancel();
+            perform Net.cancel();
             Connection {
                 id: self.id,
                 address: self.address,
@@ -188,10 +188,10 @@ mod connection {
 
     impl Connection<Connected> {
         /// Authenticate the connection
-        fn authenticate(self, credentials: &str) -> Result<Connection<Authenticated>, ConnectionError> with Net {
+        fn authenticate(self, credentials: &str) -> Result<Connection<Authenticated>, ConnectionError> / {Net} {
             print("[{}] Authenticating...", self.id);
 
-            match do Net::authenticate(credentials) {
+            match perform Net.authenticate(credentials) {
                 Ok(()) => {
                     print("[{}] Authenticated!", self.id);
                     Ok(Connection {
@@ -205,9 +205,9 @@ mod connection {
         }
 
         /// Disconnect without authenticating
-        fn disconnect(self) -> Connection<Closing> with Net {
+        fn disconnect(self) -> Connection<Closing> / {Net} {
             print("[{}] Disconnecting...", self.id);
-            do Net::close();
+            perform Net.close();
             Connection {
                 id: self.id,
                 address: self.address,
@@ -218,21 +218,21 @@ mod connection {
 
     impl Connection<Authenticated> {
         /// Send data on authenticated connection
-        fn send(&self, data: &[u8]) -> Result<usize, ConnectionError> with Net {
+        fn send(&self, data: &[u8]) -> Result<usize, ConnectionError> / {Net} {
             print("[{}] Sending {} bytes", self.id, data.len());
-            do Net::send(data)
+            perform Net.send(data)
         }
 
         /// Receive data on authenticated connection
-        fn recv(&self, buffer: &mut [u8]) -> Result<usize, ConnectionError> with Net {
+        fn recv(&self, buffer: &mut [u8]) -> Result<usize, ConnectionError> / {Net} {
             print("[{}] Receiving data...", self.id);
-            do Net::recv(buffer)
+            perform Net.recv(buffer)
         }
 
         /// Disconnect
-        fn disconnect(self) -> Connection<Closing> with Net {
+        fn disconnect(self) -> Connection<Closing> / {Net} {
             print("[{}] Disconnecting...", self.id);
-            do Net::close();
+            perform Net.close();
             Connection {
                 id: self.id,
                 address: self.address,
@@ -243,9 +243,9 @@ mod connection {
 
     impl Connection<Closing> {
         /// Wait for graceful close
-        fn wait_closed(self) -> () with Net {
+        fn wait_closed(self) -> () / {Net} {
             print("[{}] Waiting for close...", self.id);
-            do Net::wait_closed();
+            perform Net.wait_closed();
             print("[{}] Connection closed.", self.id);
             // Connection is consumed, can't be used again
         }
@@ -261,18 +261,18 @@ mod connection {
 
     /// Network effect for connection operations
     effect Net {
-        fn connect(address: &str) -> ();
-        fn wait_connected() -> Result<(), String>;
-        fn cancel() -> ();
-        fn authenticate(credentials: &str) -> Result<(), String>;
-        fn send(data: &[u8]) -> Result<usize, ConnectionError>;
-        fn recv(buffer: &mut [u8]) -> Result<usize, ConnectionError>;
-        fn close() -> ();
-        fn wait_closed() -> ();
+        op connect(address: &str) -> ();
+        op wait_connected() -> Result<(), String>;
+        op cancel() -> ();
+        op authenticate(credentials: &str) -> Result<(), String>;
+        op send(data: &[u8]) -> Result<usize, ConnectionError>;
+        op recv(buffer: &mut [u8]) -> Result<usize, ConnectionError>;
+        op close() -> ();
+        op wait_closed() -> ();
     }
 
     /// Demonstrate the connection protocol
-    fn demo() with IO, Net {
+    fn demo() / {IO, Net} {
         print("=== Connection Protocol Demo ===\n");
 
         // Create disconnected connection
@@ -351,8 +351,8 @@ mod traffic_light {
         }
 
         /// Red can only transition to Green
-        fn to_green(self) -> GreenLight with Timer {
-            do Timer::wait(self.duration);
+        fn to_green(self) -> GreenLight / {Timer} {
+            perform Timer.wait(self.duration);
             print("Light: RED -> GREEN");
             GreenLight { duration: Duration::from_secs(30) }
         }
@@ -364,8 +364,8 @@ mod traffic_light {
         }
 
         /// Green can only transition to Yellow
-        fn to_yellow(self) -> YellowLight with Timer {
-            do Timer::wait(self.duration);
+        fn to_yellow(self) -> YellowLight / {Timer} {
+            perform Timer.wait(self.duration);
             print("Light: GREEN -> YELLOW");
             YellowLight { duration: Duration::from_secs(5) }
         }
@@ -377,8 +377,8 @@ mod traffic_light {
         }
 
         /// Yellow can only transition to Red
-        fn to_red(self) -> RedLight with Timer {
-            do Timer::wait(self.duration);
+        fn to_red(self) -> RedLight / {Timer} {
+            perform Timer.wait(self.duration);
             print("Light: YELLOW -> RED");
             RedLight { duration: Duration::from_secs(30) }
         }
@@ -386,11 +386,11 @@ mod traffic_light {
 
     /// Timer effect
     effect Timer {
-        fn wait(duration: Duration) -> ();
+        op wait(duration: Duration) -> ();
     }
 
     /// Run traffic light cycle
-    fn run_cycle(initial: RedLight) with Timer, IO {
+    fn run_cycle(initial: RedLight) / {Timer, IO} {
         print("=== Traffic Light Demo ===\n");
 
         let mut red = initial;
@@ -445,8 +445,8 @@ mod file {
         }
 
         /// Open for reading
-        fn open_read(self) -> Result<File<OpenRead>, FileError> with FileIO {
-            match do FileIO::open(&self.path, OpenMode::Read) {
+        fn open_read(self) -> Result<File<OpenRead>, FileError> / {FileIO} {
+            match perform FileIO.open(&self.path, OpenMode::Read) {
                 Ok(handle) => Ok(File {
                     path: self.path,
                     handle: handle,
@@ -457,8 +457,8 @@ mod file {
         }
 
         /// Open for writing
-        fn open_write(self) -> Result<File<OpenWrite>, FileError> with FileIO {
-            match do FileIO::open(&self.path, OpenMode::Write) {
+        fn open_write(self) -> Result<File<OpenWrite>, FileError> / {FileIO} {
+            match perform FileIO.open(&self.path, OpenMode::Write) {
                 Ok(handle) => Ok(File {
                     path: self.path,
                     handle: handle,
@@ -469,8 +469,8 @@ mod file {
         }
 
         /// Open for read-write
-        fn open_read_write(self) -> Result<File<OpenReadWrite>, FileError> with FileIO {
-            match do FileIO::open(&self.path, OpenMode::ReadWrite) {
+        fn open_read_write(self) -> Result<File<OpenReadWrite>, FileError> / {FileIO} {
+            match perform FileIO.open(&self.path, OpenMode::ReadWrite) {
                 Ok(handle) => Ok(File {
                     path: self.path,
                     handle: handle,
@@ -483,13 +483,13 @@ mod file {
 
     impl File<OpenRead> {
         /// Read from file
-        fn read(&self, buffer: &mut [u8]) -> Result<usize, FileError> with FileIO {
-            do FileIO::read(self.handle, buffer)
+        fn read(&self, buffer: &mut [u8]) -> Result<usize, FileError> / {FileIO} {
+            perform FileIO.read(self.handle, buffer)
         }
 
         /// Close the file
-        fn close(self) with FileIO {
-            do FileIO::close(self.handle);
+        fn close(self) / {FileIO} {
+            perform FileIO.close(self.handle);
             // File is consumed
         }
 
@@ -498,13 +498,13 @@ mod file {
 
     impl File<OpenWrite> {
         /// Write to file
-        fn write(&self, data: &[u8]) -> Result<usize, FileError> with FileIO {
-            do FileIO::write(self.handle, data)
+        fn write(&self, data: &[u8]) -> Result<usize, FileError> / {FileIO} {
+            perform FileIO.write(self.handle, data)
         }
 
         /// Close the file
-        fn close(self) with FileIO {
-            do FileIO::close(self.handle);
+        fn close(self) / {FileIO} {
+            perform FileIO.close(self.handle);
         }
 
         // Note: No read method - would be compile error
@@ -512,18 +512,18 @@ mod file {
 
     impl File<OpenReadWrite> {
         /// Read from file
-        fn read(&self, buffer: &mut [u8]) -> Result<usize, FileError> with FileIO {
-            do FileIO::read(self.handle, buffer)
+        fn read(&self, buffer: &mut [u8]) -> Result<usize, FileError> / {FileIO} {
+            perform FileIO.read(self.handle, buffer)
         }
 
         /// Write to file
-        fn write(&self, data: &[u8]) -> Result<usize, FileError> with FileIO {
-            do FileIO::write(self.handle, data)
+        fn write(&self, data: &[u8]) -> Result<usize, FileError> / {FileIO} {
+            perform FileIO.write(self.handle, data)
         }
 
         /// Close the file
-        fn close(self) with FileIO {
-            do FileIO::close(self.handle);
+        fn close(self) / {FileIO} {
+            perform FileIO.close(self.handle);
         }
     }
 
@@ -536,10 +536,10 @@ mod file {
 
     /// File I/O effect
     effect FileIO {
-        fn open(path: &str, mode: OpenMode) -> Result<i32, FileError>;
-        fn read(handle: i32, buffer: &mut [u8]) -> Result<usize, FileError>;
-        fn write(handle: i32, data: &[u8]) -> Result<usize, FileError>;
-        fn close(handle: i32) -> ();
+        op open(path: &str, mode: OpenMode) -> Result<i32, FileError>;
+        op read(handle: i32, buffer: &mut [u8]) -> Result<usize, FileError>;
+        op write(handle: i32, data: &[u8]) -> Result<usize, FileError>;
+        op close(handle: i32) -> ();
     }
 }
 
@@ -654,7 +654,7 @@ mod builder {
     }
 
     /// Demonstrate builder pattern
-    fn demo() with IO {
+    fn demo() / {IO} {
         print("=== Builder Pattern Demo ===\n");
 
         // This works - all required fields set
@@ -699,7 +699,7 @@ mod fsm {
 
     /// Effect for state transitions
     effect Transition<From, To> {
-        fn transition(from: From) -> To;
+        op transition(from: From) -> To;
     }
 
     /// Order processing state machine
@@ -812,7 +812,7 @@ mod fsm {
                 self.context.items.push(item.to_string());
             }
 
-            fn dispatch(&mut self, event: OrderEvent) -> bool with IO {
+            fn dispatch(&mut self, event: OrderEvent) -> bool / {IO} {
                 let from_state = self.state.clone();
                 let event_name = format!("{:?}", event);
 
@@ -837,7 +837,7 @@ mod fsm {
             }
         }
 
-        fn demo() with IO {
+        fn demo() / {IO} {
             print("=== Order State Machine Demo ===\n");
 
             let mut order = OrderMachine::new("ORD-001", "CUST-123", 99.99);
@@ -875,7 +875,7 @@ mod fsm {
 // Main Example
 // ============================================================================
 
-fn main() -> i32 with IO {
+fn main() -> i32 / {IO} {
     print("=== Blood State Machine Examples ===\n");
     print("Demonstrating type-safe state machines with formal invariants.\n");
 

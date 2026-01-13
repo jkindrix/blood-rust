@@ -786,7 +786,7 @@ fn base64_encode(data: &[u8]) -> String / pure {
 /// Effect for HTTP operations
 effect Http {
     /// Perform an HTTP request
-    fn request(req: HttpRequest) -> Result<HttpResponse, HttpError>;
+    op request(req: HttpRequest) -> Result<HttpResponse, HttpError>;
 }
 
 /// Main function demonstrating HTTP client usage

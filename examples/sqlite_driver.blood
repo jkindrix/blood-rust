@@ -386,7 +386,7 @@ struct Statement {
 impl Statement {
     /// Bind an integer parameter
     fn bind_int(&mut self, index: i32, value: i64) -> Result<(), DbError> / pure {
-        let rc = unsafe { sqlite3_bind_int64(self.stmt, index, value) };
+        let rc = @unsafe { sqlite3_bind_int64(self.stmt, index, value) };
         if rc != SQLITE_OK {
             Err(DbError::BindFailed(format!("index {}", index)))
         } else {
@@ -396,7 +396,7 @@ impl Statement {
 
     /// Bind a float parameter
     fn bind_float(&mut self, index: i32, value: f64) -> Result<(), DbError> / pure {
-        let rc = unsafe { sqlite3_bind_double(self.stmt, index, value) };
+        let rc = @unsafe { sqlite3_bind_double(self.stmt, index, value) };
         if rc != SQLITE_OK {
             Err(DbError::BindFailed(format!("index {}", index)))
         } else {
@@ -407,7 +407,7 @@ impl Statement {
     /// Bind a text parameter
     fn bind_text(&mut self, index: i32, value: &str) -> Result<(), DbError> / pure {
         let cstr = CString::new(value).unwrap();
-        let rc = unsafe {
+        let rc = @unsafe {
             sqlite3_bind_text(self.stmt, index, cstr.as_ptr(), -1, SQLITE_TRANSIENT)
         };
         if rc != SQLITE_OK {
@@ -419,7 +419,7 @@ impl Statement {
 
     /// Bind a blob parameter
     fn bind_blob(&mut self, index: i32, value: &[u8]) -> Result<(), DbError> / pure {
-        let rc = unsafe {
+        let rc = @unsafe {
             sqlite3_bind_blob(
                 self.stmt,
                 index,
@@ -437,7 +437,7 @@ impl Statement {
 
     /// Bind a null parameter
     fn bind_null(&mut self, index: i32) -> Result<(), DbError> / pure {
-        let rc = unsafe { sqlite3_bind_null(self.stmt, index) };
+        let rc = @unsafe { sqlite3_bind_null(self.stmt, index) };
         if rc != SQLITE_OK {
             Err(DbError::BindFailed(format!("index {}", index)))
         } else {
@@ -458,10 +458,10 @@ impl Statement {
 
     /// Execute the statement (for INSERT/UPDATE/DELETE)
     fn execute(&mut self) -> Result<i32, DbError> / pure {
-        let rc = unsafe { sqlite3_step(self.stmt) };
+        let rc = @unsafe { sqlite3_step(self.stmt) };
         match rc {
             SQLITE_DONE => {
-                let changes = unsafe { sqlite3_changes(self.db) };
+                let changes = @unsafe { sqlite3_changes(self.db) };
                 Ok(changes)
             }
             SQLITE_ROW => {
@@ -469,7 +469,7 @@ impl Statement {
                 Ok(0)
             }
             _ => {
-                let errmsg = unsafe {
+                let errmsg = @unsafe {
                     let msg = sqlite3_errmsg(self.db);
                     CStr::from_ptr(msg).to_string_lossy().to_string()
                 };
@@ -481,12 +481,12 @@ impl Statement {
     /// Query and return rows
     fn query(&mut self) -> Result<Rows, DbError> / pure {
         let mut rows = Rows::new();
-        let col_count = unsafe { sqlite3_column_count(self.stmt) };
+        let col_count = @unsafe { sqlite3_column_count(self.stmt) };
 
         // Get column names
         let mut column_names = Vec::new();
         for i in 0..col_count {
-            let name = unsafe {
+            let name = @unsafe {
                 let ptr = sqlite3_column_name(self.stmt, i);
                 CStr::from_ptr(ptr).to_string_lossy().to_string()
             };
@@ -495,7 +495,7 @@ impl Statement {
 
         // Fetch rows
         loop {
-            let rc = unsafe { sqlite3_step(self.stmt) };
+            let rc = @unsafe { sqlite3_step(self.stmt) };
             match rc {
                 SQLITE_ROW => {
                     let mut row = Row {
@@ -504,25 +504,25 @@ impl Statement {
                     };
 
                     for i in 0..col_count {
-                        let col_type = unsafe { sqlite3_column_type(self.stmt, i) };
+                        let col_type = @unsafe { sqlite3_column_type(self.stmt, i) };
                         let value = match col_type {
                             SQLITE_INTEGER => {
-                                let n = unsafe { sqlite3_column_int64(self.stmt, i) };
+                                let n = @unsafe { sqlite3_column_int64(self.stmt, i) };
                                 SqlValue::Integer(n)
                             }
                             SQLITE_FLOAT => {
-                                let f = unsafe { sqlite3_column_double(self.stmt, i) };
+                                let f = @unsafe { sqlite3_column_double(self.stmt, i) };
                                 SqlValue::Real(f)
                             }
                             SQLITE_TEXT => {
-                                let ptr = unsafe { sqlite3_column_text(self.stmt, i) };
-                                let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().to_string() };
+                                let ptr = @unsafe { sqlite3_column_text(self.stmt, i) };
+                                let s = @unsafe { CStr::from_ptr(ptr).to_string_lossy().to_string() };
                                 SqlValue::Text(s)
                             }
                             SQLITE_BLOB => {
-                                let ptr = unsafe { sqlite3_column_blob(self.stmt, i) };
-                                let len = unsafe { sqlite3_column_bytes(self.stmt, i) };
-                                let slice = unsafe {
+                                let ptr = @unsafe { sqlite3_column_blob(self.stmt, i) };
+                                let len = @unsafe { sqlite3_column_bytes(self.stmt, i) };
+                                let slice = @unsafe {
                                     std::slice::from_raw_parts(ptr as *const u8, len as usize)
                                 };
                                 SqlValue::Blob(slice.to_vec())
@@ -536,7 +536,7 @@ impl Statement {
                 }
                 SQLITE_DONE => break,
                 _ => {
-                    let errmsg = unsafe {
+                    let errmsg = @unsafe {
                         let msg = sqlite3_errmsg(self.db);
                         CStr::from_ptr(msg).to_string_lossy().to_string()
                     };
@@ -550,9 +550,9 @@ impl Statement {
 
     /// Reset the statement for reuse
     fn reset(&mut self) -> Result<(), DbError> / pure {
-        let rc = unsafe { sqlite3_reset(self.stmt) };
+        let rc = @unsafe { sqlite3_reset(self.stmt) };
         if rc != SQLITE_OK {
-            let errmsg = unsafe {
+            let errmsg = @unsafe {
                 let msg = sqlite3_errmsg(self.db);
                 CStr::from_ptr(msg).to_string_lossy().to_string()
             };
@@ -565,7 +565,7 @@ impl Statement {
 
 impl Drop for Statement {
     fn drop(&mut self) {
-        unsafe { sqlite3_finalize(self.stmt) };
+        @unsafe { sqlite3_finalize(self.stmt) };
     }
 }
 
@@ -585,11 +585,11 @@ impl Connection {
         let cpath = CString::new(path).unwrap();
         let mut db: SqliteDb = std::ptr::null_mut();
 
-        let rc = unsafe { sqlite3_open(cpath.as_ptr(), &mut db) };
+        let rc = @unsafe { sqlite3_open(cpath.as_ptr(), &mut db) };
 
         if rc != SQLITE_OK {
             let errmsg = if !db.is_null() {
-                unsafe {
+                @unsafe {
                     let msg = sqlite3_errmsg(db);
                     let s = CStr::from_ptr(msg).to_string_lossy().to_string();
                     sqlite3_close(db);
@@ -617,14 +617,14 @@ impl Connection {
         let csql = CString::new(sql).unwrap();
         let mut errmsg: *mut c_char = std::ptr::null_mut();
 
-        let rc = unsafe {
+        let rc = @unsafe {
             sqlite3_exec(self.db, csql.as_ptr(), std::ptr::null(), std::ptr::null_mut(), &mut errmsg)
         };
 
         if rc != SQLITE_OK {
             let msg = if !errmsg.is_null() {
-                let s = unsafe { CStr::from_ptr(errmsg).to_string_lossy().to_string() };
-                unsafe { sqlite3_free(errmsg as *mut c_void) };
+                let s = @unsafe { CStr::from_ptr(errmsg).to_string_lossy().to_string() };
+                @unsafe { sqlite3_free(errmsg as *mut c_void) };
                 s
             } else {
                 "Unknown error".to_string()
@@ -632,7 +632,7 @@ impl Connection {
             return Err(DbError::from_sqlite_error(rc, &msg));
         }
 
-        let changes = unsafe { sqlite3_changes(self.db) };
+        let changes = @unsafe { sqlite3_changes(self.db) };
         Ok(changes)
     }
 
@@ -642,12 +642,12 @@ impl Connection {
         let mut stmt: SqliteStmt = std::ptr::null_mut();
         let mut tail: *const c_char = std::ptr::null();
 
-        let rc = unsafe {
+        let rc = @unsafe {
             sqlite3_prepare_v2(self.db, csql.as_ptr(), -1, &mut stmt, &mut tail)
         };
 
         if rc != SQLITE_OK {
-            let errmsg = unsafe {
+            let errmsg = @unsafe {
                 let msg = sqlite3_errmsg(self.db);
                 CStr::from_ptr(msg).to_string_lossy().to_string()
             };
@@ -688,7 +688,7 @@ impl Connection {
 
     /// Get the last inserted row ID
     fn last_insert_rowid(&self) -> i64 / pure {
-        unsafe { sqlite3_last_insert_rowid(self.db) }
+        @unsafe { sqlite3_last_insert_rowid(self.db) }
     }
 
     /// Begin a transaction
@@ -709,7 +709,7 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         if !self.db.is_null() {
-            unsafe { sqlite3_close(self.db) };
+            @unsafe { sqlite3_close(self.db) };
         }
     }
 }

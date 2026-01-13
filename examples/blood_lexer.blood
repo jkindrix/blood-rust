@@ -420,8 +420,8 @@ impl Token {
 
 /// Effect for lexer diagnostics
 effect LexerDiagnostic {
-    fn error(msg: String, span: Span) -> ();
-    fn warning(msg: String, span: Span) -> ();
+    op error(msg: String, span: Span) -> ();
+    op warning(msg: String, span: Span) -> ();
 }
 
 // ============================================================================
@@ -552,7 +552,7 @@ impl Lexer {
     }
 
     /// Skip block comment (/* ... */), handles nesting
-    fn skip_block_comment(&mut self) with LexerDiagnostic {
+    fn skip_block_comment(&mut self) / {LexerDiagnostic} {
         let start = self.current_pos();
 
         // Skip /*
@@ -563,7 +563,7 @@ impl Lexer {
 
         while depth > 0 {
             if self.is_eof() {
-                do LexerDiagnostic::error(
+                perform LexerDiagnostic.error(
                     "Unterminated block comment".to_string(),
                     Span::single(start)
                 );
@@ -600,7 +600,7 @@ impl Lexer {
     }
 
     /// Get next token
-    fn next_token(&mut self) -> Token with LexerDiagnostic {
+    fn next_token(&mut self) -> Token / {LexerDiagnostic} {
         self.skip_trivia();
         self.start_token();
 
@@ -664,7 +664,7 @@ impl Lexer {
     }
 
     /// Scan a number literal
-    fn scan_number(&mut self) -> Token with LexerDiagnostic {
+    fn scan_number(&mut self) -> Token / {LexerDiagnostic} {
         let start_pos = self.pos;
 
         // Check for base prefix
@@ -741,7 +741,7 @@ impl Lexer {
             match num_str.parse::<f64>() {
                 Ok(f) => TokenKind::FloatLiteral(f),
                 Err(_) => {
-                    do LexerDiagnostic::error(
+                    perform LexerDiagnostic.error(
                         format!("Invalid float literal: {}", num_str),
                         self.make_span()
                     );
@@ -752,7 +752,7 @@ impl Lexer {
             match i64::from_str_radix(&num_str, base) {
                 Ok(i) => TokenKind::IntLiteral(i),
                 Err(_) => {
-                    do LexerDiagnostic::error(
+                    perform LexerDiagnostic.error(
                         format!("Invalid integer literal: {}", num_str),
                         self.make_span()
                     );
@@ -765,7 +765,7 @@ impl Lexer {
     }
 
     /// Scan a string literal
-    fn scan_string(&mut self) -> Token with LexerDiagnostic {
+    fn scan_string(&mut self) -> Token / {LexerDiagnostic} {
         self.advance(); // Skip opening "
 
         let mut value = String::new();
@@ -784,7 +784,7 @@ impl Lexer {
                     value.push(escaped);
                 }
             } else if ch == '\n' {
-                do LexerDiagnostic::error(
+                perform LexerDiagnostic.error(
                     "Newline in string literal".to_string(),
                     self.make_span()
                 );
@@ -796,7 +796,7 @@ impl Lexer {
         }
 
         if !closed {
-            do LexerDiagnostic::error(
+            perform LexerDiagnostic.error(
                 "Unterminated string literal".to_string(),
                 self.make_span()
             );
@@ -806,7 +806,7 @@ impl Lexer {
     }
 
     /// Scan a raw string literal (r"..." or r#"..."#)
-    fn scan_raw_string(&mut self) -> Token with LexerDiagnostic {
+    fn scan_raw_string(&mut self) -> Token / {LexerDiagnostic} {
         self.advance(); // Skip r
 
         // Count hash marks
@@ -817,7 +817,7 @@ impl Lexer {
         }
 
         if !self.check('"') {
-            do LexerDiagnostic::error(
+            perform LexerDiagnostic.error(
                 "Expected '\"' after raw string prefix".to_string(),
                 self.make_span()
             );
@@ -859,7 +859,7 @@ impl Lexer {
         }
 
         if !closed {
-            do LexerDiagnostic::error(
+            perform LexerDiagnostic.error(
                 "Unterminated raw string literal".to_string(),
                 self.make_span()
             );
@@ -869,14 +869,14 @@ impl Lexer {
     }
 
     /// Scan a character literal
-    fn scan_char(&mut self) -> Token with LexerDiagnostic {
+    fn scan_char(&mut self) -> Token / {LexerDiagnostic} {
         self.advance(); // Skip opening '
 
         let value = if self.check('\\') {
             self.advance();
             self.scan_escape_sequence()
         } else if self.check('\'') {
-            do LexerDiagnostic::error(
+            perform LexerDiagnostic.error(
                 "Empty character literal".to_string(),
                 self.make_span()
             );
@@ -887,7 +887,7 @@ impl Lexer {
         };
 
         if !self.consume('\'') {
-            do LexerDiagnostic::error(
+            perform LexerDiagnostic.error(
                 "Unterminated character literal".to_string(),
                 self.make_span()
             );
@@ -902,7 +902,7 @@ impl Lexer {
     }
 
     /// Scan an escape sequence
-    fn scan_escape_sequence(&mut self) -> Option<char> with LexerDiagnostic {
+    fn scan_escape_sequence(&mut self) -> Option<char> / {LexerDiagnostic} {
         let ch = self.advance()?;
 
         match ch {
@@ -929,7 +929,7 @@ impl Lexer {
             'u' => {
                 // \u{NNNN}
                 if !self.consume('{') {
-                    do LexerDiagnostic::error(
+                    perform LexerDiagnostic.error(
                         "Expected '{' in unicode escape".to_string(),
                         self.make_span()
                     );
@@ -950,7 +950,7 @@ impl Lexer {
                 }
 
                 if !self.consume('}') {
-                    do LexerDiagnostic::error(
+                    perform LexerDiagnostic.error(
                         "Expected '}' in unicode escape".to_string(),
                         self.make_span()
                     );
@@ -962,7 +962,7 @@ impl Lexer {
                     .and_then(char::from_u32)
             },
             _ => {
-                do LexerDiagnostic::warning(
+                perform LexerDiagnostic.warning(
                     format!("Unknown escape sequence: \\{}", ch),
                     self.make_span()
                 );
@@ -972,7 +972,7 @@ impl Lexer {
     }
 
     /// Scan operator or punctuation
-    fn scan_operator_or_punctuation(&mut self) -> Token with LexerDiagnostic {
+    fn scan_operator_or_punctuation(&mut self) -> Token / {LexerDiagnostic} {
         let ch = self.advance().unwrap();
 
         let kind = match ch {
@@ -1059,7 +1059,7 @@ impl Lexer {
             '#' => TokenKind::Hash,
             '$' => TokenKind::Dollar,
             _ => {
-                do LexerDiagnostic::error(
+                perform LexerDiagnostic.error(
                     format!("Unexpected character: '{}'", ch),
                     self.make_span()
                 );
@@ -1071,7 +1071,7 @@ impl Lexer {
     }
 
     /// Tokenize the entire source and return all tokens
-    fn tokenize(&mut self) -> Vec<Token> with LexerDiagnostic {
+    fn tokenize(&mut self) -> Vec<Token> / {LexerDiagnostic} {
         let mut tokens = Vec::new();
 
         loop {
@@ -1189,14 +1189,14 @@ impl TokenKind {
 // Example Usage
 // ============================================================================
 
-fn main() -> i32 with IO, LexerDiagnostic {
+fn main() -> i32 / {IO, LexerDiagnostic} {
     print("=== Blood Lexer in Blood ===\n");
     print("Self-hosting milestone: Lexer implementation\n");
 
     // Example Blood source code to tokenize
     let source = r#"
 // A simple Blood program
-fn main() -> i32 with IO {
+fn main() -> i32 / {IO} {
     let message = "Hello, World!";
     let count: i32 = 42;
     let pi = 3.14159;
@@ -1204,7 +1204,7 @@ fn main() -> i32 with IO {
     let binary = 0b1010_1010;
 
     // Effect invocation
-    do IO::print(message);
+    perform IO.print(message);
 
     // Control flow
     if count > 0 {
@@ -1230,7 +1230,7 @@ fn main() -> i32 with IO {
 }
 
 effect Log {
-    fn log(msg: String) -> ();
+    op log(msg: String) -> ();
 }
 
 struct Point<T> {
@@ -1312,7 +1312,7 @@ impl<T: Add> Point<T> {
 }
 
 // Error handler for diagnostics
-fn main_with_handler() -> i32 with IO {
+fn main_with_handler() -> i32 / {IO} {
     try {
         main()
     } with {

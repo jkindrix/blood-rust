@@ -587,8 +587,8 @@ enum TypeError {
 
 /// Type checking diagnostics effect
 effect TypeDiag {
-    fn error(err: TypeError);
-    fn warning(msg: String, span: Span);
+    op error(err: TypeError);
+    op warning(msg: String, span: Span);
 }
 
 // ============================================================================
@@ -647,7 +647,7 @@ impl TypeChecker {
 // ============================================================================
 
 /// Unify two types, updating the substitution
-fn unify(tc: &mut TypeChecker, ty1: &Ty, ty2: &Ty, span: Span) with TypeDiag {
+fn unify(tc: &mut TypeChecker, ty1: &Ty, ty2: &Ty, span: Span) / {TypeDiag} {
     let t1 = tc.apply(ty1);
     let t2 = tc.apply(ty2);
 
@@ -849,7 +849,7 @@ fn occurs_check(var: TypeVarId, ty: &Ty) -> bool {
 }
 
 /// Unify effect sets
-fn unify_effects(tc: &mut TypeChecker, e1: &EffectSet, e2: &EffectSet, span: Span) with TypeDiag {
+fn unify_effects(tc: &mut TypeChecker, e1: &EffectSet, e2: &EffectSet, span: Span) / {TypeDiag} {
     let eff1 = tc.apply_effects(e1);
     let eff2 = tc.apply_effects(e2);
 
@@ -1111,7 +1111,7 @@ fn infer_expr(
     env: &TypeEnv,
     expr: &Expr,
     span: Span,
-) -> Ty with TypeDiag {
+) -> Ty / {TypeDiag} {
     match expr {
         // Literals have known types
         Expr::IntLit(_) => Ty::I64,
@@ -1513,7 +1513,7 @@ fn infer_block(
     env: &TypeEnv,
     stmts: &Vec<Stmt>,
     span: Span,
-) -> Ty with TypeDiag {
+) -> Ty / {TypeDiag} {
     if stmts.is_empty() {
         return Ty::Unit;
     }
@@ -1560,7 +1560,7 @@ fn check_pattern(
     pattern: &Pattern,
     expected_ty: &Ty,
     span: Span,
-) -> Vec<(String, Ty)> with TypeDiag {
+) -> Vec<(String, Ty)> / {TypeDiag} {
     match pattern {
         Pattern::Wildcard => Vec::new(),
 
@@ -1739,7 +1739,7 @@ fn check_function(
     ret_ty: &Ty,
     body: &Expr,
     span: Span,
-) with TypeDiag {
+) / {TypeDiag} {
     // Create environment with parameters
     let mut fn_env = TypeEnv::with_parent(env.clone());
     for (param_name, param_ty) in params.iter() {
@@ -1845,7 +1845,7 @@ enum ItemDef {
 }
 
 /// Type check a complete program
-fn check_program(items: &Vec<ItemDef>, span: Span) with TypeDiag {
+fn check_program(items: &Vec<ItemDef>, span: Span) / {TypeDiag} {
     // Collect type definitions
     let defs = collect_type_defs(items);
     let mut tc = TypeChecker::new(defs);
@@ -2045,7 +2045,7 @@ fn format_error(err: &TypeError) -> String {
 // Example Usage
 // ============================================================================
 
-fn main() with IO {
+fn main() / {IO} {
     // Example: type check a simple program
     let span = Span { start_line: 1, start_col: 1, end_line: 1, end_col: 1 };
 
