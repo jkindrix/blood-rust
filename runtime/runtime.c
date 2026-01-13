@@ -86,29 +86,8 @@ void blood_str_free(char* s) {
     free(s);
 }
 
-// Convert integer to BloodStr fat pointer
-BloodStr int_to_string(int32_t n) {
-    BloodStr result;
-    char* buf = (char*)string_alloc(16);  // Max i32 is ~10 digits + sign
-    result.len = (int64_t)sprintf(buf, "%d", n);
-    result.ptr = buf;
-    return result;
-}
-
-// Convert boolean to BloodStr fat pointer
-BloodStr bool_to_string(int32_t b) {
-    BloodStr result;
-    if (b) {
-        result.ptr = (char*)string_alloc(5);
-        memcpy(result.ptr, "true", 4);
-        result.len = 4;
-    } else {
-        result.ptr = (char*)string_alloc(6);
-        memcpy(result.ptr, "false", 5);
-        result.len = 5;
-    }
-    return result;
-}
+// NOTE: int_to_string and bool_to_string are now implemented in the Rust runtime
+// (ffi_exports.rs) to return BloodStr fat pointers.
 
 // ============================================================================
 // Additional I/O Functions (supplements to Rust runtime)

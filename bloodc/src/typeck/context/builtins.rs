@@ -174,8 +174,23 @@ impl<'a> TypeContext<'a> {
         // int_to_string(i32) -> str - convert integer to string
         self.register_builtin_fn("int_to_string", vec![i32_ty.clone()], str_ty.clone());
 
+        // i64_to_string(i64) -> str - convert 64-bit integer to string
+        self.register_builtin_fn("i64_to_string", vec![i64_ty.clone()], str_ty.clone());
+
+        // u64_to_string(u64) -> str - convert unsigned 64-bit integer to string
+        self.register_builtin_fn("u64_to_string", vec![u64_ty.clone()], str_ty.clone());
+
         // bool_to_string(bool) -> str - convert boolean to string
         self.register_builtin_fn("bool_to_string", vec![bool_ty.clone()], str_ty.clone());
+
+        // char_to_string(char) -> str - convert character to string
+        self.register_builtin_fn("char_to_string", vec![char_ty.clone()], str_ty.clone());
+
+        // f32_to_string(f32) -> str - convert f32 to string
+        self.register_builtin_fn("f32_to_string", vec![f32_ty.clone()], str_ty.clone());
+
+        // f64_to_string(f64) -> str - convert f64 to string
+        self.register_builtin_fn("f64_to_string", vec![f64_ty.clone()], str_ty.clone());
 
         // i32_to_i64(i32) -> i64
         self.register_builtin_fn("i32_to_i64", vec![i32_ty.clone()], i64_ty.clone());

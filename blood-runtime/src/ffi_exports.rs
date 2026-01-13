@@ -265,6 +265,107 @@ pub extern "C" fn size_of_bool() -> i64 {
 }
 
 // ============================================================================
+// Type Conversion Functions
+// ============================================================================
+
+/// Convert an i32 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn int_to_string(n: i32) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert an i64 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn i64_to_string(n: i64) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert a u64 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn u64_to_string(n: u64) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert a bool to a string ("true" or "false").
+///
+/// Returns a newly allocated BloodStr.
+#[no_mangle]
+pub extern "C" fn bool_to_string(b: bool) -> BloodStr {
+    let s = if b { "true" } else { "false" };
+    string_to_blood_str(s.to_string())
+}
+
+/// Convert a char to a string.
+///
+/// Returns a newly allocated BloodStr.
+#[no_mangle]
+pub extern "C" fn char_to_string(c: u32) -> BloodStr {
+    if let Some(ch) = char::from_u32(c) {
+        string_to_blood_str(ch.to_string())
+    } else {
+        // Invalid unicode codepoint - return replacement character
+        string_to_blood_str('\u{FFFD}'.to_string())
+    }
+}
+
+/// Convert an f32 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn f32_to_string(n: f32) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert an f64 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn f64_to_string(n: f64) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Helper function to convert a Rust String to a BloodStr.
+///
+/// Allocates memory for the string and returns a BloodStr pointing to it.
+fn string_to_blood_str(s: String) -> BloodStr {
+    let bytes = s.into_bytes();
+    let len = bytes.len();
+
+    if len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    // Allocate buffer for the string
+    let layout = std::alloc::Layout::from_size_align(len, 1).unwrap();
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    if ptr.is_null() {
+        eprintln!("blood: out of memory in string_to_blood_str");
+        std::process::exit(1);
+    }
+
+    // Copy the string bytes into the allocated buffer
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len);
+    }
+
+    BloodStr {
+        ptr: ptr as *const u8,
+        len: len as u64,
+    }
+}
+
+// ============================================================================
 // Memory Management (Generational References)
 // ============================================================================
 

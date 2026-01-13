@@ -2223,6 +2223,29 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // bool_to_string(i32) -> {*i8, i64} - convert boolean to string (bool passed as i32)
         self.module.add_function("bool_to_string", int_to_string_type, None);
 
+        // i64_to_string(i64) -> {*i8, i64} - convert 64-bit integer to string
+        let i64_to_string_type = str_slice_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("i64_to_string", i64_to_string_type, None);
+
+        // u64_to_string(u64) -> {*i8, i64} - convert unsigned 64-bit integer to string
+        let u64_type = self.context.i64_type(); // u64 has same LLVM type as i64
+        let u64_to_string_type = str_slice_type.fn_type(&[u64_type.into()], false);
+        self.module.add_function("u64_to_string", u64_to_string_type, None);
+
+        // char_to_string(i32) -> {*i8, i64} - convert character to string (char passed as u32/i32)
+        let char_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false);
+        self.module.add_function("char_to_string", char_to_string_type, None);
+
+        // f32_to_string(f32) -> {*i8, i64} - convert f32 to string
+        let f32_type = self.context.f32_type();
+        let f32_to_string_type = str_slice_type.fn_type(&[f32_type.into()], false);
+        self.module.add_function("f32_to_string", f32_to_string_type, None);
+
+        // f64_to_string(f64) -> {*i8, i64} - convert f64 to string
+        let f64_type_def = self.context.f64_type();
+        let f64_to_string_type = str_slice_type.fn_type(&[f64_type_def.into()], false);
+        self.module.add_function("f64_to_string", f64_to_string_type, None);
+
         // read_line() -> {*i8, i64} - read a line from stdin
         let read_line_type = str_slice_type.fn_type(&[], false);
         self.module.add_function("read_line", read_line_type, None);
