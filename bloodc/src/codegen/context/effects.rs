@@ -518,7 +518,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                             .into_int_value()
                     }
-                    _ => i64_type.const_zero(),
+                    BasicValueEnum::ArrayValue(_) | BasicValueEnum::VectorValue(_) => {
+                        // Arrays and vectors cannot be directly converted to i64 for resume
+                        return Err(vec![Diagnostic::error(
+                            "cannot resume with array or vector value".to_string(),
+                            Span::dummy(),
+                        )]);
+                    }
                 }
             } else {
                 i64_type.const_zero()
@@ -756,7 +762,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                         .into()
                 }
-                _ => i8_ptr_type.const_null().into()
+                BasicValueEnum::IntValue(_)
+                | BasicValueEnum::FloatValue(_)
+                | BasicValueEnum::ArrayValue(_)
+                | BasicValueEnum::VectorValue(_)
+                | BasicValueEnum::StructValue(_) => {
+                    // Non-pointer values use null state (e.g., stateless handlers)
+                    // This is a valid pattern for handlers without captured state
+                    i8_ptr_type.const_null().into()
+                }
             }
         } else {
             i8_ptr_type.const_null().into()
@@ -816,7 +830,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .build_ptr_to_int(pv, i64_type, "result_ptr_int")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                     }
-                    _ => i64_type.const_zero(),
+                    BasicValueEnum::FloatValue(fv) => {
+                        self.builder
+                            .build_bit_cast(fv, i64_type, "result_float_bits")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .into_int_value()
+                    }
+                    BasicValueEnum::StructValue(_) => {
+                        // Unit type (empty struct) returns 0
+                        i64_type.const_zero()
+                    }
+                    BasicValueEnum::ArrayValue(_) | BasicValueEnum::VectorValue(_) => {
+                        // Arrays and vectors cannot be directly converted to i64
+                        return Err(vec![Diagnostic::error(
+                            "effect handler body returned array or vector value which cannot be converted to result".to_string(),
+                            Span::dummy(),
+                        )]);
+                    }
                 }
             } else {
                 i64_type.const_zero()

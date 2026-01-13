@@ -948,14 +948,41 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
                 Ok(Some(result.into()))
             }
-            _ => {
-                // Unsupported cast - return value unchanged
-                self.errors.push(Diagnostic::warning(
-                    "Unsupported cast, returning value unchanged",
+            (val, target_llvm) => {
+                // Unsupported cast - this is an error, not just a warning
+                Err(vec![Diagnostic::error(
+                    format!(
+                        "unsupported cast: cannot cast {} to {}",
+                        self.format_basic_value_kind(&val),
+                        self.format_basic_type_kind(&target_llvm)
+                    ),
                     expr.span,
-                ));
-                Ok(Some(val))
+                )])
             }
+        }
+    }
+
+    /// Format a BasicValueEnum kind for error messages.
+    fn format_basic_value_kind(&self, val: &BasicValueEnum<'ctx>) -> &'static str {
+        match val {
+            BasicValueEnum::IntValue(_) => "integer",
+            BasicValueEnum::FloatValue(_) => "float",
+            BasicValueEnum::PointerValue(_) => "pointer",
+            BasicValueEnum::ArrayValue(_) => "array",
+            BasicValueEnum::VectorValue(_) => "vector",
+            BasicValueEnum::StructValue(_) => "struct",
+        }
+    }
+
+    /// Format a BasicTypeEnum kind for error messages.
+    fn format_basic_type_kind(&self, ty: &BasicTypeEnum<'ctx>) -> &'static str {
+        match ty {
+            BasicTypeEnum::IntType(_) => "integer",
+            BasicTypeEnum::FloatType(_) => "float",
+            BasicTypeEnum::PointerType(_) => "pointer",
+            BasicTypeEnum::ArrayType(_) => "array",
+            BasicTypeEnum::VectorType(_) => "vector",
+            BasicTypeEnum::StructType(_) => "struct",
         }
     }
 
