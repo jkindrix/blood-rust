@@ -175,7 +175,8 @@ pub fn format_suggestions(suggestions: &[String]) -> Option<String> {
             suggestions[0], suggestions[1]
         )),
         _ => {
-            let last = suggestions.last().unwrap();
+            // SAFETY: This arm only matches when len >= 3, so last() always returns Some
+            let last = suggestions.last().expect("len >= 3 in this match arm");
             let rest: Vec<_> = suggestions[..suggestions.len() - 1]
                 .iter()
                 .map(|s| format!("`{}`", s))

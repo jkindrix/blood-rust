@@ -1,15 +1,15 @@
 // Multiple Dispatch in Blood
 //
-// This example demonstrates Blood's multiple dispatch concepts as they
-// currently work in the compiler. Blood's dispatch system provides:
+// This example demonstrates Blood's multiple dispatch system:
 //
 // - Open methods: New implementations can be added without modifying originals
 // - Type-stable dispatch: Return type determined by input types at compile time
 // - Ambiguity detection: Conflicting methods caught at compile time
+// - SAME FUNCTION NAME: Functions can have the same name but dispatch on types
 //
-// NOTE: The full multiple dispatch syntax (multiple functions with the same
-// name dispatching on parameter types) is designed and partially implemented.
-// This example demonstrates the CONCEPTS using the current compiler capabilities.
+// Blood supports Julia-style multiple dispatch where the same function name
+// can be defined multiple times with different parameter types. The compiler
+// selects the most specific implementation at compile time.
 //
 // See DISPATCH.md for the full specification.
 
@@ -48,37 +48,38 @@ struct Point3D {
 }
 
 // ===========================================================================
-// Part 2: Type-Specific Operations
+// Part 2: Multiple Dispatch with Same Function Name
 // ===========================================================================
 
-// These functions demonstrate what multiple dispatch enables:
-// A single conceptual operation ("compute area") with type-specific
-// implementations.
+// Blood supports ACTUAL multiple dispatch - the same function name
+// can be defined multiple times with different parameter types.
+// The compiler dispatches to the correct implementation based on
+// the argument types at compile time.
 
 // Area for Rectangle: width * height
-fn area_rect(r: Rectangle) -> i32 {
+fn area(r: Rectangle) -> i32 {
     r.width * r.height
 }
 
 // Area for Circle: pi * r^2 (approximated as 3 * r^2 for integers)
-fn area_circle(c: Circle) -> i32 {
+fn area(c: Circle) -> i32 {
     3 * c.radius * c.radius
 }
 
 // Area for Triangle: (base * height) / 2
-fn area_triangle(t: Triangle) -> i32 {
+fn area(t: Triangle) -> i32 {
     (t.base * t.height) / 2
 }
 
 // ===========================================================================
-// Part 3: Multi-Argument Operations
+// Part 3: Multi-Argument Dispatch
 // ===========================================================================
 
 // Blood's multiple dispatch considers ALL argument types, not just the first.
-// These demonstrate dispatch on two arguments of the same type.
+// Same function name dispatches based on dimensionality of points.
 
 // Manhattan distance for 2D points
-fn manhattan_2d(p: Point2D) -> i32 {
+fn manhattan(p: Point2D) -> i32 {
     let mut dx: i32 = p.x;
     let mut dy: i32 = p.y;
     if dx < 0 { dx = 0 - dx; }
@@ -86,8 +87,8 @@ fn manhattan_2d(p: Point2D) -> i32 {
     dx + dy
 }
 
-// Manhattan distance for 3D points
-fn manhattan_3d(p: Point3D) -> i32 {
+// Manhattan distance for 3D points - same function name, different type
+fn manhattan(p: Point3D) -> i32 {
     let mut dx: i32 = p.x;
     let mut dy: i32 = p.y;
     let mut dz: i32 = p.z;
@@ -98,7 +99,7 @@ fn manhattan_3d(p: Point3D) -> i32 {
 }
 
 // Distance between two 2D points
-fn distance_2d(p1: Point2D, p2: Point2D) -> i32 {
+fn distance(p1: Point2D, p2: Point2D) -> i32 {
     let mut dx: i32 = p2.x - p1.x;
     let mut dy: i32 = p2.y - p1.y;
     if dx < 0 { dx = 0 - dx; }
@@ -106,8 +107,8 @@ fn distance_2d(p1: Point2D, p2: Point2D) -> i32 {
     dx + dy
 }
 
-// Distance between two 3D points
-fn distance_3d(p1: Point3D, p2: Point3D) -> i32 {
+// Distance between two 3D points - same function name, different types
+fn distance(p1: Point3D, p2: Point3D) -> i32 {
     let mut dx: i32 = p2.x - p1.x;
     let mut dy: i32 = p2.y - p1.y;
     let mut dz: i32 = p2.z - p1.z;
@@ -139,20 +140,19 @@ struct Cat {
     lives: i32,
 }
 
-// More specific types get priority over less specific ones.
-// With full dispatch, calling `legs(dog_instance)` would select
-// the Dog-specific implementation over the generic Animal one.
+// Multiple dispatch automatically selects the correct implementation
+// based on the actual type of the argument.
 
-fn legs_animal(a: Animal) -> i32 {
+fn legs(a: Animal) -> i32 {
     a.legs
 }
 
-fn legs_dog(d: Dog) -> i32 {
+fn legs(d: Dog) -> i32 {
     // Dogs: return legs plus breed code marker
     d.legs + d.breed_code
 }
 
-fn legs_cat(c: Cat) -> i32 {
+fn legs(c: Cat) -> i32 {
     // Cats: return legs times lives
     c.legs * c.lives
 }
@@ -190,11 +190,12 @@ fn abs_value(x: i32) -> i32 {
 }
 
 // Type-stable: return type determined by parameter type
-fn identity_i32(x: i32) -> i32 {
+// Same function name, different types - dispatch selects the right one
+fn identity(x: i32) -> i32 {
     x
 }
 
-fn identity_bool(x: bool) -> bool {
+fn identity(x: bool) -> bool {
     x
 }
 
@@ -203,14 +204,15 @@ fn identity_bool(x: bool) -> bool {
 // ===========================================================================
 
 // Operations that dispatch on TWO or more argument types.
+// Blood dispatches based on ALL argument types, not just the first.
 
 // Add two i32 values
-fn add_i32_i32(a: i32, b: i32) -> i32 {
+fn add(a: i32, b: i32) -> i32 {
     a + b
 }
 
-// Boolean combination (count of true values)
-fn combine_bool_bool(a: bool, b: bool) -> i32 {
+// Boolean combination (count of true values) - same name as int add, different types
+fn combine(a: bool, b: bool) -> i32 {
     let mut count: i32 = 0;
     if a { count = count + 1; }
     if b { count = count + 1; }
@@ -218,11 +220,12 @@ fn combine_bool_bool(a: bool, b: bool) -> i32 {
 }
 
 // Mixed types: int + bool (treat bool as 0/1)
-fn add_i32_bool(a: i32, b: bool) -> i32 {
+// Dispatch selects based on both argument types
+fn add(a: i32, b: bool) -> i32 {
     if b { a + 1 } else { a }
 }
 
-fn add_bool_i32(a: bool, b: i32) -> i32 {
+fn add(a: bool, b: i32) -> i32 {
     if a { b + 1 } else { b }
 }
 
@@ -232,36 +235,36 @@ fn add_bool_i32(a: bool, b: i32) -> i32 {
 
 fn test_area_dispatch() {
     println_str("=== Area Dispatch Tests ===");
-    println_str("(Simulating dispatch on shape type)");
+    println_str("(Same function name 'area' dispatches by shape type)");
 
     let rect: Rectangle = Rectangle { width: 4, height: 5 };
     let circ: Circle = Circle { radius: 3 };
     let tri: Triangle = Triangle { base: 6, height: 4 };
 
     print_str("area(Rectangle{4,5}) = ");
-    println_int(area_rect(rect));  // 20
+    println_int(area(rect));  // 20
 
     print_str("area(Circle{r=3}) ~ ");
-    println_int(area_circle(circ));  // 27
+    println_int(area(circ));  // 27
 
     print_str("area(Triangle{6,4}) = ");
-    println_int(area_triangle(tri));  // 12
+    println_int(area(tri));  // 12
 
     println_str("");
 }
 
 fn test_point_dispatch() {
     println_str("=== Point Dimension Dispatch Tests ===");
-    println_str("(Simulating dispatch on point dimensionality)");
+    println_str("(Same 'manhattan' and 'distance' names dispatch by point type)");
 
     let p2: Point2D = Point2D { x: 3, y: 4 };
     let p3: Point3D = Point3D { x: 1, y: 2, z: 3 };
 
     print_str("manhattan(Point2D{3,4}) = ");
-    println_int(manhattan_2d(p2));  // 7
+    println_int(manhattan(p2));  // 7
 
     print_str("manhattan(Point3D{1,2,3}) = ");
-    println_int(manhattan_3d(p3));  // 6
+    println_int(manhattan(p3));  // 6
 
     let a2: Point2D = Point2D { x: 0, y: 0 };
     let b2: Point2D = Point2D { x: 3, y: 4 };
@@ -269,30 +272,30 @@ fn test_point_dispatch() {
     let b3: Point3D = Point3D { x: 1, y: 2, z: 3 };
 
     print_str("distance(2D: origin to (3,4)) = ");
-    println_int(distance_2d(a2, b2));  // 7
+    println_int(distance(a2, b2));  // 7
 
     print_str("distance(3D: origin to (1,2,3)) = ");
-    println_int(distance_3d(a3, b3));  // 6
+    println_int(distance(a3, b3));  // 6
 
     println_str("");
 }
 
 fn test_specificity() {
     println_str("=== Specificity Ordering Tests ===");
-    println_str("(More specific types preferred in dispatch)");
+    println_str("(Same 'legs' function dispatches by animal type)");
 
     let animal: Animal = Animal { legs: 4 };
     let dog: Dog = Dog { legs: 4, breed_code: 100 };
     let cat: Cat = Cat { legs: 4, lives: 9 };
 
     print_str("legs(Animal{4}) = ");
-    println_int(legs_animal(animal));  // 4
+    println_int(legs(animal));  // 4
 
     print_str("legs(Dog{4, breed=100}) = ");
-    println_int(legs_dog(dog));  // 104
+    println_int(legs(dog));  // 104
 
     print_str("legs(Cat{4, lives=9}) = ");
-    println_int(legs_cat(cat));  // 36
+    println_int(legs(cat));  // 36
 
     println_str("");
 }
@@ -301,7 +304,7 @@ fn test_numeric_dispatch() {
     println_str("=== Numeric Type Dispatch Tests ===");
 
     print_str("double(21: i32) = ");
-    println_int(double_i32(21));  // 42
+    println_int(double_i32(21));  // 42  (kept as single impl)
 
     print_str("clamp(150, 0, 100) = ");
     println_int(clamp_i32(150, 0, 100));  // 100
@@ -317,28 +320,29 @@ fn test_numeric_dispatch() {
 
 fn test_binary_dispatch() {
     println_str("=== Binary (Two-Argument) Dispatch Tests ===");
+    println_str("(Same 'add' function dispatches based on BOTH argument types)");
 
     print_str("add(10, 20) = ");
-    println_int(add_i32_i32(10, 20));  // 30
+    println_int(add(10, 20));  // 30
 
     print_str("combine(true, true) = ");
-    println_int(combine_bool_bool(true, true));  // 2
+    println_int(combine(true, true));  // 2
 
     print_str("combine(true, false) = ");
-    println_int(combine_bool_bool(true, false));  // 1
+    println_int(combine(true, false));  // 1
 
     print_str("add(5, true) = ");
-    println_int(add_i32_bool(5, true));  // 6
+    println_int(add(5, true));  // 6
 
     print_str("add(false, 7) = ");
-    println_int(add_bool_i32(false, 7));  // 7
+    println_int(add(false, 7));  // 7
 
     println_str("");
 }
 
 fn test_type_stability() {
     println_str("=== Type Stability Tests ===");
-    println_str("(Return type determined by input type, not value)");
+    println_str("(Same 'identity' name, return type matches argument type)");
 
     print_str("abs_value(5) = ");
     println_int(abs_value(5));  // 5
@@ -346,11 +350,11 @@ fn test_type_stability() {
     print_str("abs_value(-5) = ");
     println_int(abs_value(-5));  // 5 (same return TYPE)
 
-    print_str("identity(42) = ");
-    println_int(identity_i32(42));  // 42
+    print_str("identity(42: i32) = ");
+    println_int(identity(42));  // 42 - dispatches to i32 version
 
-    print_str("identity(true) = ");
-    if identity_bool(true) { println_str("true"); } else { println_str("false"); }
+    print_str("identity(true: bool) = ");
+    if identity(true) { println_str("true"); } else { println_str("false"); }
 
     println_str("");
 }
@@ -361,12 +365,12 @@ fn test_type_stability() {
 
 fn main() {
     println_str("======================================================");
-    println_str("  Blood Multiple Dispatch Concepts");
+    println_str("  Blood Multiple Dispatch (ACTUAL, Not Simulated!)");
     println_str("======================================================");
     println_str("");
-    println_str("This example demonstrates multiple dispatch concepts:");
-    println_str("- Dispatch based on argument types");
-    println_str("- Multi-argument dispatch");
+    println_str("This example demonstrates REAL multiple dispatch:");
+    println_str("- SAME function name dispatches to type-specific code");
+    println_str("- Dispatch based on ALL argument types");
     println_str("- Specificity ordering (most specific type wins)");
     println_str("- Type stability (return type from input types)");
     println_str("");

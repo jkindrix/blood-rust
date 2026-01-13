@@ -80,42 +80,218 @@ impl SyncPlan {
 
 /// Synchronization engine.
 pub struct SyncEngine<'a> {
-    _local: &'a mut Codebase,
+    local: &'a mut Codebase,
 }
 
 impl<'a> SyncEngine<'a> {
     /// Creates a new sync engine for the given codebase.
     pub fn new(local: &'a mut Codebase) -> Self {
-        Self { _local: local }
+        Self { local }
     }
 
-    /// Computes the sync plan between local and remote.
-    pub fn plan(&self, _remote: &Remote) -> UcmResult<SyncPlan> {
-        // TODO: Fetch remote codebase state and compare
-        // For now, return an empty plan
-        Ok(SyncPlan::new())
+    /// Computes the sync plan between local and a remote export file.
+    ///
+    /// For file-based remotes (file:// URLs), reads the remote export and compares.
+    pub fn plan(&self, remote: &Remote) -> UcmResult<SyncPlan> {
+        let mut plan = SyncPlan::new();
+
+        // Load remote data if it's a file-based remote
+        if remote.url.starts_with("file://") {
+            let remote_path = std::path::Path::new(&remote.url[7..]);
+            if remote_path.exists() {
+                let remote_data = self.load_remote_data(remote_path)?;
+                self.compute_plan_from_data(&remote_data, &mut plan)?;
+            }
+        }
+        // HTTP remotes would fetch from URL here
+
+        Ok(plan)
     }
 
-    /// Executes a sync plan.
-    pub fn execute(&mut self, _plan: &SyncPlan) -> UcmResult<()> {
-        // TODO: Apply sync operations
+    /// Loads remote export data from a file path.
+    fn load_remote_data(&self, path: &std::path::Path) -> UcmResult<ExportData> {
+        let format = if path.extension().map_or(false, |e| e == "json") {
+            ExportFormat::Json
+        } else {
+            ExportFormat::Binary
+        };
+
+        let file = std::fs::File::open(path)?;
+        let data: ExportData = match format {
+            ExportFormat::Json => {
+                serde_json::from_reader(file)
+                    .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
+            }
+            ExportFormat::Binary => {
+                bincode::deserialize_from(file)
+                    .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
+            }
+        };
+
+        Ok(data)
+    }
+
+    /// Computes sync operations by comparing local state with remote data.
+    fn compute_plan_from_data(&self, remote_data: &ExportData, plan: &mut SyncPlan) -> UcmResult<()> {
+        // Build sets of remote definitions and names
+        let remote_hashes: std::collections::HashSet<String> = remote_data.definitions
+            .iter()
+            .map(|(h, _, _)| h.clone())
+            .collect();
+
+        let remote_names: std::collections::HashMap<String, String> = remote_data.names
+            .iter()
+            .cloned()
+            .collect();
+
+        // Get local names and check what's missing from remote
+        let local_names = self.local.list_names(None)?;
+        for (name, hash) in &local_names {
+            let hash_str = hash.to_string();
+
+            // Check if remote has this hash
+            if !remote_hashes.contains(&hash_str) {
+                // Remote doesn't have this definition - need to push
+                if let Some(info) = self.local.find(&crate::DefRef::Hash(hash.clone()))? {
+                    plan.add(SyncOp::AddRemote(
+                        name.clone(),
+                        info.source.clone(),
+                        info.kind,
+                    ));
+                }
+            } else {
+                // Check if name mapping differs
+                let name_str = name.to_string();
+                if let Some(remote_hash) = remote_names.get(&name_str) {
+                    if remote_hash != &hash_str {
+                        // Same name points to different hash - conflict
+                        let remote_hash_parsed: Hash = remote_hash.parse()
+                            .map_err(|_| UcmError::ParseError(format!("Invalid hash: {}", remote_hash)))?;
+                        plan.add(SyncOp::Conflict {
+                            name: name.clone(),
+                            local_hash: hash.clone(),
+                            remote_hash: remote_hash_parsed,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check what remote has that local doesn't
+        for (name_str, hash_str) in &remote_names {
+            let name = Name::new(name_str);
+            if self.local.resolve(&name)?.is_none() {
+                // Local doesn't have this name - need to pull
+                if let Some((_, kind_str, source)) = remote_data.definitions
+                    .iter()
+                    .find(|(h, _, _)| h == hash_str)
+                {
+                    let kind = DefKind::from_str(kind_str);
+                    plan.add(SyncOp::AddLocal(name, source.clone(), kind));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Executes a sync plan, applying all operations.
+    pub fn execute(&mut self, plan: &SyncPlan) -> UcmResult<()> {
+        for op in &plan.operations {
+            match op {
+                SyncOp::AddLocal(name, source, kind) => {
+                    let hash = match kind {
+                        DefKind::Term => self.local.add_term(source)?,
+                        DefKind::Type => self.local.add_type(source)?,
+                        DefKind::Effect => self.local.add_effect(source)?,
+                        DefKind::Handler => self.local.add_handler(source)?,
+                        DefKind::Test => self.local.add_test(source)?,
+                        DefKind::Doc => self.local.add_term(source)?, // Treat docs as terms
+                    };
+                    self.local.add_name(name.clone(), hash)?;
+                }
+                SyncOp::AddRemote(_name, _source, _kind) => {
+                    // Remote operations are handled by push()
+                }
+                SyncOp::RemoveLocal(hash) => {
+                    // Find and remove names pointing to this hash
+                    let names = self.local.list_names(None)?;
+                    for (name, h) in names {
+                        if &h == hash {
+                            self.local.remove_name(&name)?;
+                        }
+                    }
+                }
+                SyncOp::RemoveRemote(_hash) => {
+                    // Remote operations are handled by push()
+                }
+                SyncOp::Conflict { .. } => {
+                    // Conflicts require manual resolution
+                }
+            }
+        }
         Ok(())
     }
 
     /// Pushes local changes to remote.
+    ///
+    /// For file-based remotes, exports local codebase to the remote path.
+    /// For HTTP remotes, would POST data to the URL.
     pub fn push(&mut self, remote: &Remote) -> UcmResult<PushResult> {
-        // TODO: Implement push
+        let plan = self.plan(remote)?;
+
+        // Count operations that would push to remote
+        let push_ops: Vec<_> = plan.operations.iter()
+            .filter(|op| matches!(op, SyncOp::AddRemote(_, _, _)))
+            .collect();
+        let pushed = push_ops.len();
+
+        if remote.url.starts_with("file://") {
+            let remote_path = std::path::Path::new(&remote.url[7..]);
+
+            // Export current state to remote
+            let format = if remote_path.extension().map_or(false, |e| e == "json") {
+                ExportFormat::Json
+            } else {
+                ExportFormat::Binary
+            };
+
+            export_codebase(self.local, remote_path, format)?;
+        }
+        // HTTP push would POST to URL here
+
         Ok(PushResult {
-            pushed: 0,
+            pushed,
             remote: remote.clone(),
         })
     }
 
     /// Pulls remote changes to local.
+    ///
+    /// For file-based remotes, imports from the remote path.
+    /// For HTTP remotes, would GET data from the URL.
     pub fn pull(&mut self, remote: &Remote) -> UcmResult<PullResult> {
-        // TODO: Implement pull
+        let plan = self.plan(remote)?;
+
+        // Execute only the local additions (pull operations)
+        let mut pulled = 0;
+        for op in &plan.operations {
+            if let SyncOp::AddLocal(name, source, kind) = op {
+                let hash = match kind {
+                    DefKind::Term => self.local.add_term(source)?,
+                    DefKind::Type => self.local.add_type(source)?,
+                    DefKind::Effect => self.local.add_effect(source)?,
+                    DefKind::Handler => self.local.add_handler(source)?,
+                    DefKind::Test => self.local.add_test(source)?,
+                    DefKind::Doc => self.local.add_term(source)?,
+                };
+                self.local.add_name(name.clone(), hash)?;
+                pulled += 1;
+            }
+        }
+
         Ok(PullResult {
-            pulled: 0,
+            pulled,
             remote: remote.clone(),
         })
     }

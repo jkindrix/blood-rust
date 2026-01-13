@@ -11,10 +11,8 @@
 // 2. Raw pointers (*const T, *mut T) are used for C interop
 // 3. @unsafe blocks mark regions where safety is the programmer's responsibility
 // 4. Safe wrappers convert between Blood and C conventions
-//
-// Note: Bridge block syntax (bridge "C" libc { ... }) is designed but not yet
-// implemented in the parser. This example demonstrates the concepts using
-// currently supported syntax, with bridge blocks shown in comments.
+// 5. Bridge blocks declare C library interfaces: bridge "C" libc { ... }
+// 6. Bridge functions are called as: libc::abs(-42)
 
 // ===========================================================================
 // Part 1: FFI-Compatible Data Structures
@@ -112,31 +110,35 @@ fn ffi_error(code: i32) -> FfiResult {
 }
 
 // ===========================================================================
-// Part 4: Bridge Block Concept (Future Syntax)
+// Part 4: Bridge Blocks - Foreign Function Declarations
 // ===========================================================================
 
-// Bridge blocks declare foreign interfaces. The syntax is designed as:
-//
-// bridge "C" libc {
-//     #[link(name = "c")]
-//
-//     // Function declarations
-//     fn malloc(size: usize) -> *mut u8;
-//     fn free(ptr: *mut u8);
-//     fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8;
-//     fn strlen(s: *const u8) -> usize;
-//
-//     // Constants
-//     const STDIN_FILENO: i32 = 0;
-//     const STDOUT_FILENO: i32 = 1;
-//
-//     // Opaque types (size unknown to Blood)
-//     type FILE;
-// }
-//
-// Until bridge blocks are implemented, we simulate with regular functions.
+// Bridge blocks declare foreign interfaces. They create a namespace for
+// calling external C functions.
 
-// Simulated C library constants
+// Declare C library functions for absolute value and type limits
+bridge "C" libc {
+    fn abs(x: i32) -> i32;
+}
+
+// The bridge functions can be called using namespace syntax:
+//   let result = libc::abs(-42);  // Returns 42
+//
+// Additional syntax supported:
+//   #[repr(C)] - Ensure C-compatible struct layout
+//   #[repr(packed)] - Packed struct layout
+//   #[repr(align(N))] - Alignment requirement
+//
+// Example of a comprehensive bridge block (commented for reference):
+//
+// bridge "C" stdlib {
+//     fn malloc(size: i64) -> i64;   // Returns pointer as i64
+//     fn free(ptr: i64);
+//     fn memcpy(dest: i64, src: i64, n: i64) -> i64;
+//     fn strlen(s: i64) -> i64;
+// }
+
+// Helper constants (can also be in bridge blocks as const declarations)
 fn c_stdin() -> i32 { 0 }
 fn c_stdout() -> i32 { 1 }
 fn c_stderr() -> i32 { 2 }
@@ -564,6 +566,31 @@ fn register_callback(id: i32, callback_id: i32) -> FfiResult {
 // Part 11: Demonstration Functions
 // ===========================================================================
 
+fn demo_bridge_blocks() {
+    println_str("=== Demo: Bridge Blocks (Actual FFI Calls) ===");
+    println_str("");
+
+    // Call C library abs() function through the bridge block
+    println_str("Calling libc::abs(-42)...");
+    let result: i32 = libc::abs(-42);
+    print_str("Result: ");
+    println_int(result);
+    println_str("");
+
+    // More abs() examples
+    println_str("Calling libc::abs(100)...");
+    let result2: i32 = libc::abs(100);
+    print_str("Result: ");
+    println_int(result2);
+    println_str("");
+
+    println_str("Calling libc::abs(-1)...");
+    let result3: i32 = libc::abs(-1);
+    print_str("Result: ");
+    println_int(result3);
+    println_str("");
+}
+
 fn demo_memory_operations() {
     println_str("=== Demo: Memory Operations ===");
     println_str("");
@@ -750,6 +777,7 @@ fn main() {
     println_str("================================================================");
     println_str("");
 
+    demo_bridge_blocks();
     demo_memory_operations();
     demo_pointer_operations();
     demo_string_marshalling();

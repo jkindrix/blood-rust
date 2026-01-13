@@ -380,7 +380,9 @@ impl<'a> DispatchResolver<'a> {
 
         // Step 4: Check for unique winner
         if maximal.len() == 1 {
-            return DispatchResult::Resolved(maximal.into_iter().next().unwrap());
+            // SAFETY: We just checked that len == 1, so next() always returns Some
+            return DispatchResult::Resolved(maximal.into_iter().next()
+                .expect("checked: maximal.len() == 1"));
         }
 
         // Step 5: Ambiguity error

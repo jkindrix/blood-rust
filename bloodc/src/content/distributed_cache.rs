@@ -23,6 +23,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -226,19 +227,48 @@ impl DistributedCache {
         }
     }
 
-    /// Perform an HTTP GET request.
-    ///
-    /// This is a stub implementation. In a real implementation, this would use
-    /// an HTTP client like `reqwest` or `ureq`.
+    /// Perform an HTTP GET request using ureq.
     fn http_get(&self, url: &str, config: &RemoteCacheConfig) -> Result<Vec<u8>, CacheError> {
-        // For now, this is a stub that always fails
-        // A real implementation would use an async HTTP client
-        let _ = (url, config);
+        let mut request = ureq::get(url)
+            .timeout(config.timeout);
 
-        Err(CacheError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "HTTP client not implemented - configure with ureq or reqwest feature",
-        )))
+        // Add auth header if configured
+        if let Some(ref token) = config.auth_token {
+            request = request.set("Authorization", &format!("Bearer {}", token));
+        }
+
+        let response = request.call().map_err(|e| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("HTTP GET failed: {}", e),
+            ))
+        })?;
+
+        // Check status code
+        if response.status() == 404 {
+            return Err(CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Object not found in remote cache",
+            )));
+        }
+
+        if response.status() >= 400 {
+            return Err(CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("HTTP error: status {}", response.status()),
+            )));
+        }
+
+        // Read response body
+        let mut data = Vec::new();
+        response.into_reader().read_to_end(&mut data).map_err(|e| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to read response body: {}", e),
+            ))
+        })?;
+
+        Ok(data)
     }
 
     /// Publish an object to remote caches.
@@ -278,17 +308,33 @@ impl DistributedCache {
         self.http_put(&url, data, config)
     }
 
-    /// Perform an HTTP PUT request.
-    ///
-    /// This is a stub implementation.
+    /// Perform an HTTP PUT request using ureq.
     fn http_put(&self, url: &str, data: &[u8], config: &RemoteCacheConfig) -> Result<(), CacheError> {
-        // For now, this is a stub
-        let _ = (url, data, config);
+        let mut request = ureq::put(url)
+            .timeout(config.timeout)
+            .set("Content-Type", "application/octet-stream");
 
-        Err(CacheError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "HTTP client not implemented",
-        )))
+        // Add auth header if configured
+        if let Some(ref token) = config.auth_token {
+            request = request.set("Authorization", &format!("Bearer {}", token));
+        }
+
+        let response = request.send_bytes(data).map_err(|e| {
+            CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("HTTP PUT failed: {}", e),
+            ))
+        })?;
+
+        // Check status code
+        if response.status() >= 400 {
+            return Err(CacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("HTTP PUT error: status {}", response.status()),
+            )));
+        }
+
+        Ok(())
     }
 
     /// Check if an object exists in any cache (local or remote).

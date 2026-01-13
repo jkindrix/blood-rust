@@ -24,6 +24,7 @@ bitflags.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
 sled.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

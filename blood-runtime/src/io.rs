@@ -1734,8 +1734,10 @@ pub mod windows {
 
     use super::*;
     use std::collections::HashMap;
+    use std::os::windows::io::AsRawHandle;
     use std::time::Duration;
-    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Foundation::{HANDLE, ERROR_IO_PENDING, GetLastError};
+    use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows::Win32::System::IO::{
         CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus,
         OVERLAPPED,
@@ -1746,10 +1748,49 @@ pub mod windows {
         true
     }
 
+    /// Extended OVERLAPPED structure with operation context.
+    /// This must be heap-allocated and pinned for the duration of the I/O operation.
+    #[repr(C)]
+    struct OverlappedContext {
+        /// The base OVERLAPPED structure (must be first field for Windows API compatibility)
+        overlapped: OVERLAPPED,
+        /// Operation ID for correlation
+        op_id: u64,
+        /// Buffer for read operations (owned to ensure lifetime)
+        buffer: Option<Vec<u8>>,
+    }
+
+    impl OverlappedContext {
+        fn new(op_id: IoOpId) -> Box<Self> {
+            Box::new(Self {
+                overlapped: OVERLAPPED::default(),
+                op_id: op_id.as_u64(),
+                buffer: None,
+            })
+        }
+
+        fn with_buffer(op_id: IoOpId, size: usize) -> Box<Self> {
+            Box::new(Self {
+                overlapped: OVERLAPPED::default(),
+                op_id: op_id.as_u64(),
+                buffer: Some(vec![0u8; size]),
+            })
+        }
+    }
+
+    /// Pending operation info for completion tracking.
+    struct PendingOp {
+        op: IoOp,
+        /// Boxed overlapped context (kept alive until completion)
+        context: Option<Box<OverlappedContext>>,
+    }
+
     /// IOCP-based I/O driver for Windows.
     pub struct IocpDriver {
         iocp_handle: HANDLE,
-        pending: parking_lot::Mutex<HashMap<IoOpId, IoOp>>,
+        pending: parking_lot::Mutex<HashMap<IoOpId, PendingOp>>,
+        /// Handles that have been associated with the IOCP
+        associated_handles: parking_lot::Mutex<std::collections::HashSet<isize>>,
     }
 
     impl IocpDriver {
@@ -1767,7 +1808,102 @@ pub mod windows {
             Ok(Self {
                 iocp_handle,
                 pending: parking_lot::Mutex::new(HashMap::new()),
+                associated_handles: parking_lot::Mutex::new(std::collections::HashSet::new()),
             })
+        }
+
+        /// Associate a file/socket handle with this IOCP.
+        fn associate_handle(&self, handle: HANDLE, completion_key: usize) -> io::Result<()> {
+            let raw = handle.0 as isize;
+            let mut associated = self.associated_handles.lock();
+
+            // Only associate once per handle
+            if associated.contains(&raw) {
+                return Ok(());
+            }
+
+            unsafe {
+                CreateIoCompletionPort(
+                    handle,
+                    self.iocp_handle,
+                    completion_key,
+                    0,
+                )?;
+            }
+
+            associated.insert(raw);
+            Ok(())
+        }
+
+        /// Start an overlapped read operation.
+        fn start_read(&self, op_id: IoOpId, fd: RawFd, buf_ptr: *mut u8, len: usize) -> io::Result<Box<OverlappedContext>> {
+            let handle = HANDLE(fd as isize as *mut std::ffi::c_void);
+
+            // Associate handle with IOCP
+            self.associate_handle(handle, op_id.as_u64() as usize)?;
+
+            // Create overlapped context with buffer
+            let mut context = OverlappedContext::with_buffer(op_id, len);
+
+            let mut bytes_read: u32 = 0;
+            let overlapped_ptr = &mut context.overlapped as *mut OVERLAPPED;
+
+            // Get buffer pointer from context
+            let buffer = context.buffer.as_mut().unwrap();
+
+            let result = unsafe {
+                ReadFile(
+                    handle,
+                    Some(buffer.as_mut_ptr() as *mut std::ffi::c_void),
+                    len as u32,
+                    Some(&mut bytes_read),
+                    Some(overlapped_ptr),
+                )
+            };
+
+            if result.is_err() {
+                let error = unsafe { GetLastError() };
+                if error != ERROR_IO_PENDING {
+                    return Err(io::Error::from_raw_os_error(error.0 as i32));
+                }
+                // ERROR_IO_PENDING is expected for async I/O
+            }
+
+            Ok(context)
+        }
+
+        /// Start an overlapped write operation.
+        fn start_write(&self, op_id: IoOpId, fd: RawFd, data: &[u8]) -> io::Result<Box<OverlappedContext>> {
+            let handle = HANDLE(fd as isize as *mut std::ffi::c_void);
+
+            // Associate handle with IOCP
+            self.associate_handle(handle, op_id.as_u64() as usize)?;
+
+            // Create overlapped context
+            let mut context = OverlappedContext::new(op_id);
+
+            let mut bytes_written: u32 = 0;
+            let overlapped_ptr = &mut context.overlapped as *mut OVERLAPPED;
+
+            let result = unsafe {
+                WriteFile(
+                    handle,
+                    Some(data.as_ptr() as *const std::ffi::c_void),
+                    data.len() as u32,
+                    Some(&mut bytes_written),
+                    Some(overlapped_ptr),
+                )
+            };
+
+            if result.is_err() {
+                let error = unsafe { GetLastError() };
+                if error != ERROR_IO_PENDING {
+                    return Err(io::Error::from_raw_os_error(error.0 as i32));
+                }
+                // ERROR_IO_PENDING is expected for async I/O
+            }
+
+            Ok(context)
         }
     }
 
@@ -1787,11 +1923,12 @@ pub mod windows {
 
     impl IoDriver for IocpDriver {
         fn submit(&self, op_id: IoOpId, op: IoOp) -> io::Result<()> {
-            self.pending.lock().insert(op_id, op.clone());
-
-            // For simple operations, post completion immediately
+            // Handle each operation type
             match &op {
                 IoOp::Timeout { duration } => {
+                    // Store pending op without context
+                    self.pending.lock().insert(op_id, PendingOp { op: op.clone(), context: None });
+
                     // Spawn a thread to handle the timeout
                     let handle = self.iocp_handle;
                     let duration = *duration;
@@ -1809,6 +1946,9 @@ pub mod windows {
                     });
                 }
                 IoOp::Close { .. } | IoOp::Connect { .. } => {
+                    // Store pending op without context
+                    self.pending.lock().insert(op_id, PendingOp { op: op.clone(), context: None });
+
                     // Post immediate completion for these simple ops
                     unsafe {
                         PostQueuedCompletionStatus(
@@ -1819,15 +1959,30 @@ pub mod windows {
                         )?;
                     }
                 }
-                IoOp::Read { .. } | IoOp::Write { .. } | IoOp::Accept { .. } | IoOp::Poll { .. } => {
-                    // These operations require proper overlapped I/O with:
-                    // - OVERLAPPED structures with completion keys
-                    // - File/socket handles associated with IOCP
-                    // - ReadFile/WriteFile/AcceptEx with overlapped parameter
-                    // Return not-implemented error to avoid silent placeholder behavior.
+                IoOp::Read { fd, buf, len } => {
+                    // Start overlapped read operation
+                    let context = self.start_read(op_id, *fd, *buf, *len)?;
+                    self.pending.lock().insert(op_id, PendingOp { op: op.clone(), context: Some(context) });
+                }
+                IoOp::Write { fd, buf, len } => {
+                    // For write, we need to read from the buffer pointer
+                    let data = unsafe { std::slice::from_raw_parts(*buf, *len) };
+                    let context = self.start_write(op_id, *fd, data)?;
+                    self.pending.lock().insert(op_id, PendingOp { op: op.clone(), context: Some(context) });
+                }
+                IoOp::Accept { .. } => {
+                    // Accept requires AcceptEx which needs more setup (listening socket, etc.)
+                    // For now, return unsupported - a full implementation would use AcceptEx
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
-                        format!("IocpDriver: operation {:?} requires proper overlapped I/O setup (not yet implemented)", op),
+                        "IocpDriver: Accept requires AcceptEx setup (not yet implemented)",
+                    ));
+                }
+                IoOp::Poll { .. } => {
+                    // Poll on Windows would typically use WSAPoll or associate with IOCP differently
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "IocpDriver: Poll requires WSAPoll setup (not yet implemented)",
                     ));
                 }
             }
@@ -1858,18 +2013,42 @@ pub mod windows {
                 let op_id = IoOpId(completion_key as u64);
                 let mut pending = self.pending.lock();
 
-                if let Some(op) = pending.remove(&op_id) {
-                    let io_result = match op {
-                        // These should never reach here since submit() returns error for them
-                        IoOp::Read { .. } => IoResult::Error(IoError::new(-1, "read requires proper overlapped I/O setup")),
-                        IoOp::Write { .. } => IoResult::Error(IoError::new(-1, "write requires proper overlapped I/O setup")),
-                        IoOp::Accept { .. } => IoResult::Error(IoError::new(-1, "accept requires proper overlapped I/O setup")),
-                        IoOp::Poll { .. } => IoResult::Error(IoError::new(-1, "poll requires proper overlapped I/O setup")),
-                        // These are properly handled
+                if let Some(pending_op) = pending.remove(&op_id) {
+                    let io_result = match &pending_op.op {
+                        IoOp::Read { buf, .. } => {
+                            // Copy data from context buffer to user buffer if successful
+                            if let Some(ref context) = pending_op.context {
+                                if let Some(ref read_buf) = context.buffer {
+                                    let copy_len = (bytes_transferred as usize).min(read_buf.len());
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            read_buf.as_ptr(),
+                                            *buf,
+                                            copy_len,
+                                        );
+                                    }
+                                }
+                            }
+                            IoResult::Read(bytes_transferred as i64)
+                        }
+                        IoOp::Write { .. } => {
+                            IoResult::Written(bytes_transferred as i64)
+                        }
+                        IoOp::Accept { .. } => {
+                            // AcceptEx not yet implemented
+                            IoResult::Error(IoError::new(-1, "accept not implemented"))
+                        }
+                        IoOp::Poll { .. } => {
+                            // WSAPoll not yet implemented
+                            IoResult::Error(IoError::new(-1, "poll not implemented"))
+                        }
                         IoOp::Connect { .. } => IoResult::Connected,
                         IoOp::Close { .. } => IoResult::Closed,
                         IoOp::Timeout { .. } => IoResult::TimedOut,
                     };
+
+                    // The context is dropped here, freeing the overlapped structure
+                    drop(pending_op.context);
 
                     completions.push(IoCompletion { op_id, result: io_result });
                 }

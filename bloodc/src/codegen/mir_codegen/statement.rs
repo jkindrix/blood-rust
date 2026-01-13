@@ -328,7 +328,10 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM error: {}", e), stmt.span
                     )])?;
-                let create_block_end = self.builder.get_insert_block().unwrap();
+                let create_block_end = self.builder.get_insert_block()
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "LLVM builder state invalid after branch".to_string(), stmt.span
+                    )])?;
 
                 // Use block: evidence exists, use it directly
                 self.builder.position_at_end(use_block);
@@ -336,7 +339,10 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM error: {}", e), stmt.span
                     )])?;
-                let use_block_end = self.builder.get_insert_block().unwrap();
+                let use_block_end = self.builder.get_insert_block()
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "LLVM builder state invalid after branch".to_string(), stmt.span
+                    )])?;
 
                 // Merge block: phi to select the evidence pointer
                 self.builder.position_at_end(merge_block);

@@ -114,6 +114,19 @@ impl DefKind {
             DefKind::Doc => "doc",
         }
     }
+
+    /// Parses a DefKind from a string.
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "term" => DefKind::Term,
+            "type" => DefKind::Type,
+            "effect" => DefKind::Effect,
+            "handler" => DefKind::Handler,
+            "test" => DefKind::Test,
+            "doc" => DefKind::Doc,
+            _ => DefKind::Term, // Default fallback
+        }
+    }
 }
 
 /// A reference to a definition, either by name or hash.

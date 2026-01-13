@@ -680,9 +680,17 @@ impl PersistentCodebase {
         let hash = ContentHash::from_bytes(hash_bytes);
         pos += 32;
 
-        // AST
-        let ast_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        // AST length
+        let ast_len = u32::from_le_bytes(
+            data[pos..pos + 4].try_into()
+                .map_err(|_| StorageError::InvalidFormat("Invalid AST length bytes".to_string()))?
+        ) as usize;
         pos += 4;
+
+        // Validate AST data bounds before reading
+        if data.len() < pos + ast_len {
+            return Err(StorageError::InvalidFormat("AST data truncated".to_string()));
+        }
         let _ast_str = String::from_utf8_lossy(&data[pos..pos + ast_len]);
         pos += ast_len;
 
@@ -694,7 +702,9 @@ impl PersistentCodebase {
         let has_type = data.get(pos).copied().unwrap_or(0) == 1;
         pos += 1;
         let type_hash = if has_type && data.len() >= pos + 32 {
-            let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+            // SAFETY: Bounds check above guarantees exactly 32 bytes available
+            let bytes: [u8; 32] = data[pos..pos + 32].try_into()
+                .expect("bounds checked: 32 bytes available");
             pos += 32;
             Some(ContentHash::from_bytes(bytes))
         } else {
@@ -705,7 +715,9 @@ impl PersistentCodebase {
         let has_effect = data.get(pos).copied().unwrap_or(0) == 1;
         pos += 1;
         let effect_hash = if has_effect && data.len() >= pos + 32 {
-            let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+            // SAFETY: Bounds check above guarantees exactly 32 bytes available
+            let bytes: [u8; 32] = data[pos..pos + 32].try_into()
+                .expect("bounds checked: 32 bytes available");
             pos += 32;
             Some(ContentHash::from_bytes(bytes))
         } else {
@@ -714,16 +726,20 @@ impl PersistentCodebase {
 
         // References
         let ref_count = if data.len() >= pos + 4 {
-            u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize
+            // SAFETY: Bounds check above guarantees exactly 4 bytes available
+            u32::from_le_bytes(data[pos..pos + 4].try_into()
+                .expect("bounds checked: 4 bytes available")) as usize
         } else {
             0
         };
         pos += 4;
 
-        let mut references = Vec::with_capacity(ref_count);
+        let mut references = Vec::with_capacity(ref_count.min(1024)); // Cap allocation
         for _ in 0..ref_count {
             if data.len() >= pos + 32 {
-                let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+                // SAFETY: Bounds check above guarantees exactly 32 bytes available
+                let bytes: [u8; 32] = data[pos..pos + 32].try_into()
+                    .expect("bounds checked: 32 bytes available");
                 references.push(ContentHash::from_bytes(bytes));
                 pos += 32;
             }
@@ -732,12 +748,16 @@ impl PersistentCodebase {
         // Names
         let mut names = Vec::new();
         if data.len() >= pos + 4 {
-            let name_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            // SAFETY: Bounds check above guarantees exactly 4 bytes available
+            let name_count = u32::from_le_bytes(data[pos..pos + 4].try_into()
+                .expect("bounds checked: 4 bytes available")) as usize;
             pos += 4;
 
-            for _ in 0..name_count {
+            for _ in 0..name_count.min(1024) { // Cap iterations for safety
                 if data.len() >= pos + 4 {
-                    let name_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                    // SAFETY: Bounds check above guarantees exactly 4 bytes available
+                    let name_len = u32::from_le_bytes(data[pos..pos + 4].try_into()
+                        .expect("bounds checked: 4 bytes available")) as usize;
                     pos += 4;
                     if data.len() >= pos + name_len {
                         names.push(String::from_utf8_lossy(&data[pos..pos + name_len]).to_string());
@@ -774,13 +794,17 @@ impl PersistentCodebase {
             return Vec::new();
         }
 
-        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        let mut hashes = Vec::with_capacity(count);
+        // SAFETY: Bounds check above guarantees at least 4 bytes available
+        let count = u32::from_le_bytes(data[0..4].try_into()
+            .expect("bounds checked: 4 bytes available")) as usize;
+        let mut hashes = Vec::with_capacity(count.min(1024)); // Cap allocation
         let mut pos = 4;
 
         for _ in 0..count {
             if data.len() >= pos + 32 {
-                let bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
+                // SAFETY: Bounds check above guarantees exactly 32 bytes available
+                let bytes: [u8; 32] = data[pos..pos + 32].try_into()
+                    .expect("bounds checked: 32 bytes available");
                 hashes.push(ContentHash::from_bytes(bytes));
                 pos += 32;
             }

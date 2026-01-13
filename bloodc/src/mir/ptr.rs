@@ -158,11 +158,22 @@ impl BloodPtr {
     }
 
     /// Create from raw bytes.
+    ///
+    /// # Panics
+    /// Never panics - slice sizes are compile-time guaranteed to match.
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        // SAFETY: These unwraps cannot fail because we're slicing a [u8; 16]
+        // into exact-sized chunks that match the target array sizes.
         Self {
-            address: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-            generation: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            metadata: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            address: u64::from_le_bytes(
+                bytes[0..8].try_into().expect("8 bytes from [u8; 16]")
+            ),
+            generation: u32::from_le_bytes(
+                bytes[8..12].try_into().expect("4 bytes from [u8; 16]")
+            ),
+            metadata: u32::from_le_bytes(
+                bytes[12..16].try_into().expect("4 bytes from [u8; 16]")
+            ),
         }
     }
 }
