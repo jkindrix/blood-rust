@@ -49,10 +49,9 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         })?;
 
         // Track the current type as we process projections
-        let local_info = body.locals.get(place.local.index as usize);
-        let base_ty = local_info
-            .map(|l| l.ty.clone())
-            .unwrap_or_else(Type::error);
+        let local_info = body.locals.get(place.local.index as usize)
+            .expect("ICE: MIR local not found in body during codegen");
+        let base_ty = local_info.ty.clone();
         let mut current_ty = base_ty.clone();
 
         let mut current_ptr = base_ptr;
@@ -60,9 +59,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
         // Check if this is a closure __env local with Field projections.
         // If so, we need to cast the i8* to the captures struct type first.
-        let is_closure_env = local_info
-            .map(|l| l.name.as_deref() == Some("__env"))
-            .unwrap_or(false);
+        let is_closure_env = local_info.name.as_deref() == Some("__env");
         let has_field_projections = place.projection.iter().any(|p| matches!(p, PlaceElem::Field(_)));
 
         if is_closure_env && has_field_projections {

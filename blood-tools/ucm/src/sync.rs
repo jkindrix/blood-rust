@@ -116,15 +116,19 @@ impl<'a> SyncEngine<'a> {
             ExportFormat::Binary
         };
 
-        let file = std::fs::File::open(path)?;
+        let mut file = std::fs::File::open(path)?;
         let data: ExportData = match format {
             ExportFormat::Json => {
-                serde_json::from_reader(file)
+                serde_json::from_reader(&file)
                     .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
             }
             ExportFormat::Binary => {
-                bincode::deserialize_from(file)
-                    .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?;
+                postcard::from_bytes(&bytes)
+                    .map_err(|e: postcard::Error| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
             }
         };
 
@@ -662,14 +666,17 @@ pub fn export_codebase(
     }
 
     // Write to file
-    let file = std::fs::File::create(path)?;
+    let mut file = std::fs::File::create(path)?;
     match format {
         ExportFormat::Json => {
-            serde_json::to_writer_pretty(file, &export_data)
+            serde_json::to_writer_pretty(&file, &export_data)
                 .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?;
         }
         ExportFormat::Binary => {
-            bincode::serialize_into(file, &export_data)
+            use std::io::Write;
+            let bytes = postcard::to_stdvec(&export_data)
+                .map_err(|e: postcard::Error| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?;
+            file.write_all(&bytes)
                 .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?;
         }
     }
@@ -684,15 +691,19 @@ pub fn import_codebase(
     format: ExportFormat,
 ) -> UcmResult<usize> {
     // Read from file
-    let file = std::fs::File::open(path)?;
+    let mut file = std::fs::File::open(path)?;
     let export_data: ExportData = match format {
         ExportFormat::Json => {
-            serde_json::from_reader(file)
+            serde_json::from_reader(&file)
                 .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
         }
         ExportFormat::Binary => {
-            bincode::deserialize_from(file)
-                .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|e| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?;
+            postcard::from_bytes(&bytes)
+                .map_err(|e: postcard::Error| UcmError::Storage(crate::storage::StorageError::Other(e.to_string())))?
         }
     };
 

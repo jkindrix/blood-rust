@@ -2081,9 +2081,10 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         if let Some(&mir_local) = self.local_map.get(&hir_local) {
             mir_local
         } else {
-            let local = self.body.get_local(hir_local);
-            let ty = local.map(|l| l.ty.clone()).unwrap_or_else(Type::error);
-            let span = local.map(|l| l.span).unwrap_or_else(Span::dummy);
+            let local = self.body.get_local(hir_local)
+                .expect("ICE: HIR local not found in closure body during MIR lowering");
+            let ty = local.ty.clone();
+            let span = local.span;
             let mir_id = self.builder.new_temp(ty, span);
             self.local_map.insert(hir_local, mir_id);
             mir_id

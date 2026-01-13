@@ -148,41 +148,44 @@ pub unsafe extern "C" fn str_eq(a: BloodStr, b: BloodStr) -> bool {
 #[no_mangle]
 pub extern "C" fn read_line() -> BloodStr {
     use std::io::BufRead;
+    use std::cell::RefCell;
 
-    // Static buffer for holding the read line
-    // This is a simple approach - more sophisticated handling would
-    // allocate memory dynamically
-    static mut LINE_BUFFER: Vec<u8> = Vec::new();
+    // Thread-local buffer for holding the read line.
+    // Using thread_local avoids the unsafety of static mut.
+    thread_local! {
+        static LINE_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
 
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
 
-    unsafe {
-        LINE_BUFFER.clear();
+    LINE_BUFFER.with(|buffer| {
+        let mut buf = buffer.borrow_mut();
+        buf.clear();
 
-        match handle.read_until(b'\n', &mut LINE_BUFFER) {
+        match handle.read_until(b'\n', &mut *buf) {
             Ok(0) => BloodStr { ptr: std::ptr::null(), len: 0 }, // EOF
             Ok(n) => {
                 // Strip trailing newline if present
-                let len = if n > 0 && LINE_BUFFER[n - 1] == b'\n' {
+                let len = if n > 0 && buf[n - 1] == b'\n' {
                     n - 1
                 } else {
                     n
                 };
                 // Also strip carriage return if present (Windows)
-                let len = if len > 0 && LINE_BUFFER[len - 1] == b'\r' {
+                let len = if len > 0 && buf[len - 1] == b'\r' {
                     len - 1
                 } else {
                     len
                 };
                 BloodStr {
-                    ptr: LINE_BUFFER.as_ptr(),
+                    ptr: buf.as_ptr(),
                     len: len as u64,
                 }
             }
             Err(_) => BloodStr { ptr: std::ptr::null(), len: 0 },
         }
-    }
+    })
 }
 
 /// Read an integer from stdin.
