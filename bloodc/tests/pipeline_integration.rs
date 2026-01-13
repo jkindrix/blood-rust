@@ -2598,10 +2598,8 @@ fn test_concurrent_fiber_scheduling() {
     }
 }
 
-// Note: perform statement parsing has known performance issues.
-// These tests are ignored by default; run with `cargo test -- --ignored` to include them.
+// Note: Effect syntax requires return type BEFORE effect row: `-> Type / {Effect}`
 #[test]
-#[ignore = "perform statement parsing performance - run with --ignored"]
 fn test_channel_communication() {
     // Test channel-based communication patterns
     let source = r#"
@@ -2617,7 +2615,7 @@ fn test_channel_communication() {
             perform Channel::send(3);
         }
 
-        fn consumer() / {Channel<i32>} -> i32 {
+        fn consumer() -> i32 / {Channel<i32>} {
             let a = perform Channel::recv();
             let b = perform Channel::recv();
             a + b
@@ -2640,7 +2638,6 @@ fn test_channel_communication() {
 }
 
 #[test]
-#[ignore = "perform statement parsing performance - run with --ignored"]
 fn test_fork_join_parallelism() {
     // Test fork-join parallel pattern
     let source = r#"
@@ -2648,7 +2645,7 @@ fn test_fork_join_parallelism() {
             op fork(left: fn() -> i32, right: fn() -> i32) -> (i32, i32);
         }
 
-        fn parallel_sum() / {Fork} -> i32 {
+        fn parallel_sum() -> i32 / {Fork} {
             let (a, b) = perform Fork::fork(
                 || { 1 + 2 + 3 },
                 || { 4 + 5 + 6 }
@@ -2676,7 +2673,6 @@ fn test_fork_join_parallelism() {
 // ============================================================
 
 #[test]
-#[ignore = "perform statement parsing performance - run with --ignored"]
 fn test_effect_composition() {
     // Test composing multiple effects in a single computation
     let source = r#"
@@ -2693,8 +2689,8 @@ fn test_effect_composition() {
             op put(s: S) -> unit;
         }
 
-        // Function with multiple effects
-        fn complex_computation() / {Reader<i32>, Writer<String>, State<bool>} -> i32 {
+        // Function with multiple effects (correct syntax: return type BEFORE effect row)
+        fn complex_computation() -> i32 / {Reader<i32>, Writer<String>, State<bool>} {
             let config = perform Reader::ask();
             perform Writer::tell("Starting computation");
 
@@ -2726,9 +2722,10 @@ fn test_effect_composition() {
 }
 
 #[test]
-#[ignore = "perform statement parsing performance - run with --ignored"]
 fn test_handler_delegation() {
     // Test handler that delegates to another effect
+    // Note: Handlers don't declare effect rows in their signature - effects used
+    // within the handler body bubble up to the enclosing handler context
     let source = r#"
         effect Log {
             op log(msg: String) -> unit;
@@ -2739,7 +2736,8 @@ fn test_handler_delegation() {
         }
 
         // Handler that delegates Log to IO
-        deep handler LogToIO for Log / {IO} {
+        // When used, this handler must be within an IO handler context
+        deep handler LogToIO for Log {
             return(x) { x }
 
             op log(msg) {
@@ -2761,4 +2759,321 @@ fn test_handler_delegation() {
                 errors.iter().map(|e| &e.message).collect::<Vec<_>>());
         }
     }
+}
+
+// ============================================================
+// Performance Diagnostic Tests
+// ============================================================
+
+#[test]
+fn test_perf_generic_effect_no_perform() {
+    // Generic effect with instantiated effect row, no perform - should be fast
+    let source = r#"
+        effect Channel<T> {
+            op send(value: T) -> unit;
+        }
+        fn test() / {Channel<i32>} {
+            ()
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Generic effect row (no perform): {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_generic_effect_with_single_perform() {
+    // Generic effect with single perform - isolate if perform is the issue
+    let source = r#"
+        effect Channel<T> {
+            op send(value: T) -> unit;
+        }
+        fn test() / {Channel<i32>} {
+            perform Channel::send(1)
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Generic effect with single perform: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_generic_effect_with_semicolon() {
+    // Generic effect with perform followed by semicolon
+    let source = r#"
+        effect Channel<T> {
+            op send(value: T) -> unit;
+        }
+        fn test() / {Channel<i32>} {
+            perform Channel::send(1);
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Generic effect with perform semicolon: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_multiple_performs() {
+    // Multiple perform statements
+    let source = r#"
+        effect Channel<T> {
+            op send(value: T) -> unit;
+        }
+        fn test() / {Channel<i32>} {
+            perform Channel::send(1);
+            perform Channel::send(2);
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Multiple performs: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_two_ops_two_functions() {
+    // Two operations and two functions - closer to slow test structure
+    let source = r#"
+        effect Channel<T> {
+            op send(value: T) -> unit;
+            op recv() -> T;
+        }
+
+        fn producer() / {Channel<i32>} {
+            perform Channel::send(1);
+            perform Channel::send(2);
+            perform Channel::send(3);
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Two ops two functions: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_let_binding_with_perform() {
+    // Let binding with perform (like the slow test)
+    // Fixed: return type must come BEFORE effect row
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+
+        fn consumer() -> i32 / {Channel<i32>} {
+            let a = perform Channel::recv();
+            a
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Let binding with perform: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_perform_with_args() {
+    // perform with arguments is fast
+    let source = r#"
+        effect Channel<T> {
+            op send(value: T) -> unit;
+        }
+
+        fn producer() / {Channel<i32>} {
+            let a = perform Channel::send(1);
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Perform with args in let: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_perform_no_args_no_let() {
+    // perform with no args but not in let binding
+    // Fixed: return type must come BEFORE effect row
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+
+        fn consumer() -> i32 / {Channel<i32>} {
+            perform Channel::recv()
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Perform no args, no let: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_regular_function_no_args_let() {
+    // Regular function call with no args in let (baseline)
+    let source = r#"
+        fn recv() -> i32 { 42 }
+        fn test() -> i32 {
+            let a = recv();
+            a
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Regular function no args let: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_simplest_let_perform_no_args() {
+    // Simplest case - minimal code
+    let source = r#"
+        fn test() {
+            let a = perform recv();
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Simplest let perform no args: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_let_perform_path_no_args() {
+    // perform with path and no args
+    let source = r#"
+        fn test() {
+            let a = perform Channel::recv();
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Let perform path no args: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_effect_row_with_let_perform() {
+    // Effect row annotation with let perform
+    let source = r#"
+        fn test() / {Channel<i32>} {
+            let a = perform Channel::recv();
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Effect row with let perform: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_effect_def_let_perform() {
+    // Effect definition + let perform (no effect row on function)
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+        fn test() {
+            let a = perform Channel::recv();
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Effect def + let perform: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_full_combo() {
+    // Full combination - effect def + effect row + let perform
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+        fn test() / {Channel<i32>} {
+            let a = perform Channel::recv();
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Full combo: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_full_combo_with_return() {
+    // Full combination with return type (correct order: -> Type / {Effect})
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+        fn test() -> i32 / {Channel<i32>} {
+            let a = perform Channel::recv();
+            a
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "Should parse with correct syntax order: {:?}", result.err());
+    eprintln!("Full combo with return: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_return_type_no_trailing() {
+    // With return type but no trailing expression (correct order)
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+        fn test() -> i32 / {Channel<i32>} {
+            let a = perform Channel::recv();
+            0
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    assert!(result.is_ok(), "Should parse: {:?}", result.err());
+    eprintln!("Return type, trailing literal: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_trailing_a_no_return_type() {
+    // No return type annotation but trailing 'a'
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+        fn test() / {Channel<i32>} {
+            let a = perform Channel::recv();
+            a
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("No return type, trailing a: {:?}", result.is_ok());
+}
+
+#[test]
+fn test_perf_return_type_no_effect_row() {
+    // Return type but NO effect row - isolating effect row parsing
+    let source = r#"
+        effect Channel<T> {
+            op recv() -> T;
+        }
+        fn test() -> i32 {
+            let a = perform Channel::recv();
+            a
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+    eprintln!("Return type, no effect row: {:?}", result.is_ok());
 }
