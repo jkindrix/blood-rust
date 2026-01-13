@@ -84,3 +84,6 @@ examples/shallow_multi_resume_error
 
 # Manual testing playground
 playground/
+
+# Task tracking (local work items)
+tasks/
