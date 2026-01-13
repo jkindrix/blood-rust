@@ -261,6 +261,176 @@ impl String {
         }
         result
     }
+
+    /// Inserts a character at a byte position
+    ///
+    /// Panics if the position is not on a char boundary
+    pub fn insert(self: &mut Self, idx: usize, ch: char) / {Panic} {
+        assert!(self.is_char_boundary(idx), "insert: not on char boundary");
+        let mut buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut buf);
+        let len = encoded.len();
+
+        // Reserve space and shift bytes
+        self.vec.reserve(len);
+        let old_len = self.vec.len();
+
+        // Extend vec to new size
+        for _ in 0..len {
+            self.vec.push(0);
+        }
+
+        // Shift existing bytes to the right
+        for i in (idx..old_len).rev() {
+            self.vec[i + len] = self.vec[i];
+        }
+
+        // Insert new bytes
+        for i in 0..len {
+            self.vec[idx + i] = buf[i];
+        }
+    }
+
+    /// Inserts a string slice at a byte position
+    ///
+    /// Panics if the position is not on a char boundary
+    pub fn insert_str(self: &mut Self, idx: usize, s: &str) / {Panic} {
+        assert!(self.is_char_boundary(idx), "insert_str: not on char boundary");
+        let len = s.len();
+
+        // Reserve space and shift bytes
+        self.vec.reserve(len);
+        let old_len = self.vec.len();
+
+        // Extend vec to new size
+        for _ in 0..len {
+            self.vec.push(0);
+        }
+
+        // Shift existing bytes to the right
+        for i in (idx..old_len).rev() {
+            self.vec[i + len] = self.vec[i];
+        }
+
+        // Insert new bytes
+        for (i, byte) in s.bytes().enumerate() {
+            self.vec[idx + i] = byte;
+        }
+    }
+
+    /// Removes a character at a byte position and returns it
+    ///
+    /// Panics if the position is not on a char boundary
+    pub fn remove(self: &mut Self, idx: usize) -> char / {Panic} {
+        assert!(self.is_char_boundary(idx), "remove: not on char boundary");
+
+        // Find the length of the character
+        let ch = self.as_str()[idx..].chars().next().unwrap();
+        let len = ch.len_utf8();
+
+        // Shift bytes to the left
+        let old_len = self.vec.len();
+        for i in idx..(old_len - len) {
+            self.vec[i] = self.vec[i + len];
+        }
+        self.vec.truncate(old_len - len);
+
+        ch
+    }
+
+    /// Returns an iterator over the lines of the string
+    pub fn lines(self: &Self) -> Lines / pure {
+        Lines { inner: self.as_str().lines() }
+    }
+
+    /// Splits the string by whitespace
+    pub fn split_whitespace(self: &Self) -> SplitWhitespace / pure {
+        SplitWhitespace { inner: self.as_str().split_whitespace() }
+    }
+
+    /// Returns an iterator over the characters with their byte indices
+    pub fn char_indices(self: &Self) -> CharIndices / pure {
+        CharIndices { inner: self.as_str().char_indices() }
+    }
+
+    /// Splits the string into two at the given byte index
+    ///
+    /// Panics if the index is not on a char boundary
+    pub fn split_at(self: &Self, mid: usize) -> (&str, &str) / {Panic} {
+        assert!(self.is_char_boundary(mid), "split_at: not on char boundary");
+        self.as_str().split_at(mid)
+    }
+
+    /// Creates a draining iterator that removes and returns characters in the given range
+    pub fn drain(self: &mut Self, range: Range<usize>) -> Drain / {Panic} {
+        assert!(self.is_char_boundary(range.start), "drain: start not on char boundary");
+        assert!(self.is_char_boundary(range.end), "drain: end not on char boundary");
+
+        let drained = self.as_str()[range.clone()].to_string();
+
+        // Remove the drained bytes
+        let len = range.end - range.start;
+        let old_len = self.vec.len();
+        for i in range.start..(old_len - len) {
+            self.vec[i] = self.vec[i + len];
+        }
+        self.vec.truncate(old_len - len);
+
+        Drain { inner: drained.chars() }
+    }
+
+    /// Retains only the characters that satisfy the predicate
+    pub fn retain<F: FnMut(char) -> bool>(self: &mut Self, mut f: F) / pure {
+        let mut result = String::with_capacity(self.len());
+        for ch in self.chars() {
+            if f(ch) {
+                result.push(ch);
+            }
+        }
+        *self = result;
+    }
+
+    /// Returns true if all characters are ASCII
+    pub fn is_ascii(self: &Self) -> bool / pure {
+        self.vec.iter().all(|&b| b < 128)
+    }
+
+    /// Converts to ASCII lowercase in-place
+    pub fn make_ascii_lowercase(self: &mut Self) / pure {
+        for byte in &mut self.vec {
+            if *byte >= b'A' && *byte <= b'Z' {
+                *byte = *byte - b'A' + b'a';
+            }
+        }
+    }
+
+    /// Converts to ASCII uppercase in-place
+    pub fn make_ascii_uppercase(self: &mut Self) / pure {
+        for byte in &mut self.vec {
+            if *byte >= b'a' && *byte <= b'z' {
+                *byte = *byte - b'a' + b'A';
+            }
+        }
+    }
+
+    /// Returns an ASCII lowercase version of the string
+    pub fn to_ascii_lowercase(self: &Self) -> String / pure {
+        let mut result = self.clone();
+        result.make_ascii_lowercase();
+        result
+    }
+
+    /// Returns an ASCII uppercase version of the string
+    pub fn to_ascii_uppercase(self: &Self) -> String / pure {
+        let mut result = self.clone();
+        result.make_ascii_uppercase();
+        result
+    }
+
+    /// Consumes the String and returns the owned string
+    pub fn into_str(self: Self) -> str / pure {
+        unsafe { str::from_utf8_unchecked(self.vec.into_boxed_slice()) }
+    }
 }
 
 impl Clone for String {
@@ -459,6 +629,58 @@ impl<'a> Iterator for Split<'a> {
     type Item = &'a str;
 
     fn next(self: &mut Self) -> Option<&'a str> / pure {
+        self.inner.next()
+    }
+}
+
+/// Iterator over the lines of a string
+pub struct Lines<'a> {
+    inner: str::Lines<'a>,
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = &'a str;
+
+    fn next(self: &mut Self) -> Option<&'a str> / pure {
+        self.inner.next()
+    }
+}
+
+/// Iterator over whitespace-separated parts of a string
+pub struct SplitWhitespace<'a> {
+    inner: str::SplitWhitespace<'a>,
+}
+
+impl<'a> Iterator for SplitWhitespace<'a> {
+    type Item = &'a str;
+
+    fn next(self: &mut Self) -> Option<&'a str> / pure {
+        self.inner.next()
+    }
+}
+
+/// Iterator over characters with their byte indices
+pub struct CharIndices<'a> {
+    inner: str::CharIndices<'a>,
+}
+
+impl<'a> Iterator for CharIndices<'a> {
+    type Item = (usize, char);
+
+    fn next(self: &mut Self) -> Option<(usize, char)> / pure {
+        self.inner.next()
+    }
+}
+
+/// Draining iterator over characters
+pub struct Drain<'a> {
+    inner: Chars<'a>,
+}
+
+impl<'a> Iterator for Drain<'a> {
+    type Item = char;
+
+    fn next(self: &mut Self) -> Option<char> / pure {
         self.inner.next()
     }
 }

@@ -77,6 +77,16 @@ where
         self.map.reserve(additional)
     }
 
+    /// Shrinks the capacity of the set as much as possible
+    pub fn shrink_to_fit(self: &mut Self) / pure {
+        self.map.shrink_to_fit()
+    }
+
+    /// Shrinks the capacity of the set with a lower limit
+    pub fn shrink_to(self: &mut Self, min_capacity: usize) / pure {
+        self.map.shrink_to(min_capacity)
+    }
+
     /// Inserts a value into the set
     ///
     /// Returns true if the value was newly inserted, false if it already existed.

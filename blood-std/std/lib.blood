@@ -47,6 +47,8 @@
 // - `sync`: Synchronization primitives (Arc, Mutex, atomics)
 // - `iter`: Iterator infrastructure
 // - `ops`: Operator traits
+// - `fs`: File system operations
+// - `net`: Networking primitives (TCP, UDP, DNS)
 
 #![no_std]
 
@@ -63,6 +65,8 @@ pub mod mem;
 pub mod sync;
 pub mod iter;
 pub mod ops;
+pub mod fs;
+pub mod net;
 
 // Re-export prelude at the crate root for convenience
 pub use prelude::*;

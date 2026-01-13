@@ -295,6 +295,42 @@ where
         }
     }
 
+    /// Tries to insert a key-value pair, returning an error if the key already exists
+    pub fn try_insert(self: &mut Self, key: K, value: V) -> Result<&mut V, OccupiedError<'_, K, V, S>> / pure {
+        match self.entry(key) {
+            Entry::Occupied(entry) => Err(OccupiedError {
+                entry,
+                value,
+            }),
+            Entry::Vacant(entry) => Ok(entry.insert(value)),
+        }
+    }
+
+    /// Shrinks the capacity of the map as much as possible
+    pub fn shrink_to_fit(self: &mut Self) / pure {
+        self.shrink_to(self.len);
+    }
+
+    /// Shrinks the capacity of the map with a lower limit
+    pub fn shrink_to(self: &mut Self, min_capacity: usize) / pure {
+        let target = min_capacity.max(self.len);
+        // Maintain ~75% load factor
+        let target_buckets = (target.saturating_mul(4) / 3).next_power_of_two().max(8);
+        if target_buckets < self.buckets.len() {
+            self.resize(target_buckets);
+        }
+    }
+
+    /// Creates a draining iterator that removes all elements
+    pub fn drain(self: &mut Self) -> Drain<'_, K, V> / pure {
+        let len = self.len;
+        self.len = 0;
+        Drain {
+            inner: self.buckets.iter_mut(),
+            remaining: len,
+        }
+    }
+
     // Private helper methods
 
     fn make_hash(self: &Self, key: &K) -> u64 / pure {
@@ -501,10 +537,81 @@ impl<K, V, S> IntoIterator for HashMap<K, V, S> {
     }
 }
 
+/// Error returned by try_insert when the key already exists
+pub struct OccupiedError<'a, K, V, S = RandomState> {
+    /// The entry for the existing key
+    pub entry: OccupiedEntry<'a, K, V>,
+    /// The value that was not inserted
+    pub value: V,
+}
+
 /// Entry for in-place manipulation
 pub enum Entry<'a, K, V> {
     Occupied(OccupiedEntry<'a, K, V>),
     Vacant(VacantEntry<'a, K, V>),
+}
+
+impl<'a, K, V> Entry<'a, K, V>
+where
+    K: Hash + Eq,
+{
+    /// Returns a reference to this entry's key
+    pub fn key(self: &Self) -> &K / pure {
+        match self {
+            Entry::Occupied(e) => e.key(),
+            Entry::Vacant(e) => e.key(),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the default if empty
+    pub fn or_insert(self: Self, default: V) -> &'a mut V / pure {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(default),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the result of the function if empty
+    pub fn or_insert_with<F: FnOnce() -> V>(self: Self, default: F) -> &'a mut V / pure {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(default()),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the result of the function
+    /// with a reference to the key if empty
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self: Self, default: F) -> &'a mut V / pure {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let value = default(e.key());
+                e.insert(value)
+            }
+        }
+    }
+
+    /// Provides in-place mutable access to an occupied entry
+    pub fn and_modify<F: FnOnce(&mut V)>(self: Self, f: F) -> Self / pure {
+        match self {
+            Entry::Occupied(mut e) => {
+                f(e.get_mut());
+                Entry::Occupied(e)
+            }
+            Entry::Vacant(e) => Entry::Vacant(e),
+        }
+    }
+}
+
+impl<'a, K, V> Entry<'a, K, V>
+where
+    K: Hash + Eq,
+    V: Default,
+{
+    /// Ensures a value is in the entry by inserting the default value if empty
+    pub fn or_default(self: Self) -> &'a mut V / pure {
+        self.or_insert_with(V::default)
+    }
 }
 
 /// An occupied entry in a HashMap
@@ -693,5 +800,48 @@ impl<'a, K, V> Iterator for ValuesMut<'a, K, V> {
 
     fn next(self: &mut Self) -> Option<&'a mut V> / pure {
         self.inner.next().map(|(_, v)| v)
+    }
+}
+
+/// Draining iterator that removes all elements
+pub struct Drain<'a, K, V> {
+    inner: vec::IterMut<'a, Bucket<K, V>>,
+    remaining: usize,
+}
+
+impl<'a, K, V> Iterator for Drain<'a, K, V> {
+    type Item = (K, V);
+
+    fn next(self: &mut Self) -> Option<(K, V)> / pure {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        loop {
+            match self.inner.next()? {
+                bucket @ Bucket::Occupied { .. } => {
+                    self.remaining -= 1;
+                    return bucket.take();
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    fn size_hint(self: &Self) -> (usize, Option<usize>) / pure {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a, K, V> ExactSizeIterator for Drain<'a, K, V> {
+    fn len(self: &Self) -> usize / pure {
+        self.remaining
+    }
+}
+
+impl<'a, K, V> Drop for Drain<'a, K, V> {
+    fn drop(self: &mut Self) / pure {
+        // Drain remaining elements to complete cleanup
+        for _ in self {}
     }
 }
