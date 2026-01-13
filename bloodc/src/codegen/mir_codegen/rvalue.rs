@@ -795,6 +795,26 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
 
+            AggregateKind::Record => {
+                // Anonymous record is like a tuple - struct with fields in order
+                if vals.is_empty() {
+                    // Empty record - use i8 placeholder
+                    Ok(self.context.i8_type().const_int(0, false).into())
+                } else {
+                    let types: Vec<_> = vals.iter().map(|v| v.get_type()).collect();
+                    let struct_ty = self.context.struct_type(&types, false);
+                    let mut agg = struct_ty.get_undef();
+                    for (i, val) in vals.iter().enumerate() {
+                        agg = self.builder.build_insert_value(agg, *val, i as u32, &format!("record_{}", i))
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM insert error: {}", e), Span::dummy()
+                            )])?
+                            .into_struct_value();
+                    }
+                    Ok(agg.into())
+                }
+            }
+
             AggregateKind::Range { element, inclusive } => {
                 // Range is a struct: { start: T, end: T } or { start: T, end: T, exhausted: bool }
                 let elem_ty = self.lower_type(element);

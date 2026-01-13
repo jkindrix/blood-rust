@@ -30,6 +30,7 @@ use std::io::{self, Read, Write as IoWrite};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use string_interner::Symbol as _;
 
 use super::hash::{ContentHash, ContentHasher};
 use crate::hir;
@@ -1045,6 +1046,15 @@ fn hash_expr(expr: &hir::Expr, hasher: &mut ContentHasher) {
                 hasher.update_u32(def_id.index);
             }
         }
+        hir::ExprKind::Record { fields } => {
+            hasher.update_u8(0x24);
+            hasher.update_u32(fields.len() as u32);
+            for field in fields {
+                // Hash the field name using lasso Symbol's to_usize method
+                hasher.update_u32(field.name.to_usize() as u32);
+                hash_expr(&field.value, hasher);
+            }
+        }
         hir::ExprKind::Error => {
             hasher.update_u8(0xFF);
         }
@@ -1584,6 +1594,11 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
             // All candidate methods are dependencies
             for def_id in candidates {
                 deps.insert(*def_id);
+            }
+        }
+        hir::ExprKind::Record { fields } => {
+            for field in fields {
+                extract_expr_deps(&field.value, deps);
             }
         }
         // Leaf expressions that don't contain dependencies

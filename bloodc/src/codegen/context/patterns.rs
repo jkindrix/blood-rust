@@ -4,6 +4,7 @@
 //! pattern testing/binding.
 
 use inkwell::values::{BasicValueEnum, IntValue};
+use inkwell::types::BasicType;
 use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 
@@ -501,23 +502,85 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                     // Handle slice binding (rest pattern)
                     // The rest pattern captures the middle portion of the array
-                    // For now, we don't support binding the rest to a variable (only wildcard)
                     if let Some(slice_pat) = slice {
-                        // If the rest pattern is a binding, we would need to create a subarray
-                        // This is complex - for now only support wildcard rest patterns
                         match &slice_pat.kind {
                             hir::PatternKind::Wildcard => {
                                 // Wildcard rest - nothing to bind
                             }
-                            hir::PatternKind::Binding { .. } => {
-                                // Binding to rest pattern not yet supported
-                                // Would need to create a slice of the middle elements
-                                return Err(vec![Diagnostic::error(
-                                    "Binding rest patterns ([first, rest @ .., last]) not yet supported",
-                                    pattern.span,
-                                )]);
+                            hir::PatternKind::Binding { local_id, .. } => {
+                                // Binding rest pattern: extract middle elements into a subarray
+                                let prefix_len = prefix.len() as u64;
+                                let rest_len = array_size - prefix_len - suffix_len;
+
+                                if rest_len > 0 {
+                                    // Get the element type from the slice pattern's type
+                                    let elem_llvm_ty = match slice_pat.ty.kind() {
+                                        hir::TypeKind::Slice { element } => {
+                                            self.lower_type(element)
+                                        }
+                                        hir::TypeKind::Array { element, .. } => {
+                                            self.lower_type(element)
+                                        }
+                                        _ => {
+                                            return Err(vec![Diagnostic::error(
+                                                "Expected slice or array type for rest pattern binding",
+                                                slice_pat.span,
+                                            )]);
+                                        }
+                                    };
+
+                                    // Create a new array type for the rest elements
+                                    let rest_array_ty = elem_llvm_ty.array_type(rest_len as u32);
+
+                                    // Allocate space for the subarray
+                                    let rest_alloca = self.builder
+                                        .build_alloca(rest_array_ty, "rest.subarray")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), slice_pat.span)])?;
+
+                                    // Copy elements from the middle of the array
+                                    for i in 0..rest_len {
+                                        let src_idx = prefix_len + i;
+                                        let elem = self.builder
+                                            .build_extract_value(*arr, src_idx as u32, "rest.elem")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), slice_pat.span)])?;
+
+                                        // Get pointer to destination element
+                                        let zero = self.context.i32_type().const_int(0, false);
+                                        let idx = self.context.i32_type().const_int(i as u64, false);
+                                        let dest_ptr = unsafe {
+                                            self.builder.build_gep(
+                                                rest_alloca,
+                                                &[zero, idx],
+                                                "rest.dest",
+                                            )
+                                        }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), slice_pat.span)])?;
+
+                                        self.builder.build_store(dest_ptr, elem)
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), slice_pat.span)])?;
+                                    }
+
+                                    // Bind the alloca to the local variable
+                                    // (locals store pointers to values, not values directly)
+                                    self.locals.insert(*local_id, rest_alloca);
+                                } else {
+                                    // Empty rest - create an empty array
+                                    let elem_llvm_ty = match slice_pat.ty.kind() {
+                                        hir::TypeKind::Slice { element } | hir::TypeKind::Array { element, .. } => {
+                                            self.lower_type(element)
+                                        }
+                                        _ => self.context.i8_type().into(),
+                                    };
+                                    let empty_array_ty = elem_llvm_ty.array_type(0);
+                                    let empty_alloca = self.builder
+                                        .build_alloca(empty_array_ty, "rest.empty")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), slice_pat.span)])?;
+                                    self.locals.insert(*local_id, empty_alloca);
+                                }
                             }
-                            _ => {}
+                            _ => {
+                                // Other pattern kinds in rest position - shouldn't happen
+                                // but handle gracefully
+                            }
                         }
                     }
 

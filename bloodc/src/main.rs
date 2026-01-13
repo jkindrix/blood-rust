@@ -35,6 +35,7 @@ use bloodc::mir;
 use bloodc::content::{ContentHash, BuildCache, hash_hir_item, extract_dependencies, VFT, VFTEntry};
 use bloodc::content::hash::ContentHasher;
 use bloodc::content::namespace::{NameRegistry, NameBinding, BindingKind};
+use bloodc::content::distributed_cache::{DistributedCache, FetchResult};
 
 /// The Blood Programming Language Compiler
 ///
@@ -516,6 +517,13 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
     }
 
+    // Wrap with distributed cache for remote caching support
+    // Enabled via BLOOD_CACHE_REMOTES environment variable
+    let mut distributed_cache = DistributedCache::from_env(build_cache);
+    if distributed_cache.is_enabled() && verbosity > 0 {
+        eprintln!("Distributed caching enabled.");
+    }
+
     // Compute content hashes for all definitions
     let mut definition_hashes: std::collections::HashMap<bloodc::hir::DefId, ContentHash> = std::collections::HashMap::new();
     let mut cache_hits = 0usize;
@@ -529,8 +537,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         let hash = hash_hir_item(item, &hir_crate.bodies);
         definition_hashes.insert(def_id, hash);
 
-        // Check if we have cached compiled code for this definition
-        let is_cached = build_cache.has_object(&hash);
+        // Check if we have cached compiled code for this definition (local cache only for stats)
+        let is_cached = distributed_cache.has_object(&hash);
         if is_cached {
             cache_hits += 1;
         } else {
@@ -562,7 +570,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 .filter_map(|dep_id| definition_hashes.get(dep_id).copied())
                 .collect();
             if !dep_hashes.is_empty() {
-                build_cache.record_dependencies(hash, dep_hashes);
+                distributed_cache.local_mut().record_dependencies(hash, dep_hashes);
                 if verbosity > 2 {
                     eprintln!("  {} depends on {} definitions", item.name, deps_set.len());
                 }
@@ -754,21 +762,40 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             hasher.finalize()
         };
 
-        // Check cache for this definition
-        if let Some(cached_path) = build_cache.get_object_path(&def_hash) {
-            if cached_path.exists() {
-                // Cache hit - use existing object file
-                object_files.push(cached_path);
-                cached_count += 1;
-                if verbosity > 2 {
-                    eprintln!("  Cache hit: {:?} ({})", def_id, def_hash.short_display());
+        // Check cache for this definition (local and remote)
+        let obj_path = obj_dir.join(format!("def_{}.o", def_id.index()));
+
+        match distributed_cache.fetch(&def_hash) {
+            FetchResult::LocalHit(data) => {
+                // Local cache hit - write to obj file and use
+                if std::fs::write(&obj_path, &data).is_ok() {
+                    object_files.push(obj_path);
+                    cached_count += 1;
+                    if verbosity > 2 {
+                        eprintln!("  Cache hit (local): {:?} ({})", def_id, def_hash.short_display());
+                    }
+                    continue;
                 }
-                continue;
+                // If write fails, fall through to compile
+            }
+            FetchResult::RemoteHit { data, source } => {
+                // Remote cache hit - already stored locally by fetch(), write to obj file
+                if std::fs::write(&obj_path, &data).is_ok() {
+                    object_files.push(obj_path);
+                    cached_count += 1;
+                    if verbosity > 1 {
+                        eprintln!("  Cache hit (remote): {:?} ({}) from {}", def_id, def_hash.short_display(), source);
+                    }
+                    continue;
+                }
+                // If write fails, fall through to compile
+            }
+            FetchResult::NotFound | FetchResult::Error(_) => {
+                // Cache miss - need to compile
             }
         }
 
         // Cache miss - compile this definition
-        let obj_path = obj_dir.join(format!("def_{}.o", def_id.index()));
         let escape_results = escape_map.get(&def_id);
 
         match codegen::compile_definition_to_object(
@@ -784,9 +811,10 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                     eprintln!("  Compiled: {:?} ({})", def_id, def_hash.short_display());
                 }
 
-                // Cache the compiled object
+                // Cache the compiled object (local and optionally remote)
                 if let Ok(obj_data) = std::fs::read(&obj_path) {
-                    if let Err(e) = build_cache.store_object(def_hash, &obj_data) {
+                    let publish_to_remote = distributed_cache.is_enabled();
+                    if let Err(e) = distributed_cache.store(def_hash, &obj_data, publish_to_remote) {
                         if verbosity > 1 {
                             eprintln!("  Warning: Failed to cache {:?}: {}", def_id, e);
                         }
@@ -810,21 +838,34 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         // Hash the handler item
         let def_hash = hash_hir_item(item, &hir_crate.bodies);
 
-        // Check cache
-        if let Some(cached_path) = build_cache.get_object_path(&def_hash) {
-            if cached_path.exists() {
-                object_files.push(cached_path);
-                cached_count += 1;
-                if verbosity > 2 {
-                    eprintln!("  Cache hit (handler): {:?} ({})", def_id, def_hash.short_display());
+        // Check cache for this handler (local and remote)
+        let obj_path = obj_dir.join(format!("handler_{}.o", def_id.index()));
+
+        match distributed_cache.fetch(&def_hash) {
+            FetchResult::LocalHit(data) => {
+                if std::fs::write(&obj_path, &data).is_ok() {
+                    object_files.push(obj_path);
+                    cached_count += 1;
+                    if verbosity > 2 {
+                        eprintln!("  Cache hit (handler, local): {:?} ({})", def_id, def_hash.short_display());
+                    }
+                    continue;
                 }
-                continue;
             }
+            FetchResult::RemoteHit { data, source } => {
+                if std::fs::write(&obj_path, &data).is_ok() {
+                    object_files.push(obj_path);
+                    cached_count += 1;
+                    if verbosity > 1 {
+                        eprintln!("  Cache hit (handler, remote): {:?} ({}) from {}", def_id, def_hash.short_display(), source);
+                    }
+                    continue;
+                }
+            }
+            FetchResult::NotFound | FetchResult::Error(_) => {}
         }
 
         // Cache miss - compile this handler
-        let obj_path = obj_dir.join(format!("handler_{}.o", def_id.index()));
-
         match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, &obj_path) {
             Ok(()) => {
                 compiled_count += 1;
@@ -832,9 +873,10 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                     eprintln!("  Compiled (handler): {:?} ({})", def_id, def_hash.short_display());
                 }
 
-                // Cache the compiled object
+                // Cache the compiled object (local and optionally remote)
                 if let Ok(obj_data) = std::fs::read(&obj_path) {
-                    if let Err(e) = build_cache.store_object(def_hash, &obj_data) {
+                    let publish_to_remote = distributed_cache.is_enabled();
+                    if let Err(e) = distributed_cache.store(def_hash, &obj_data, publish_to_remote) {
                         if verbosity > 1 {
                             eprintln!("  Warning: Failed to cache {:?}: {}", def_id, e);
                         }
@@ -899,6 +941,23 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     // Rust runtime provides all other FFI functions (memory, effects, dispatch, etc.)
     let (c_runtime, rust_runtime) = find_runtime_paths();
 
+    // Collect FFI link specifications from all bridge blocks
+    let mut ffi_link_specs: Vec<&bloodc::hir::item::LinkSpec> = Vec::new();
+    for (_def_id, item) in &hir_crate.items {
+        if let bloodc::hir::ItemKind::Bridge(bridge_def) = &item.kind {
+            for link_spec in &bridge_def.link_specs {
+                ffi_link_specs.push(link_spec);
+            }
+        }
+    }
+
+    if verbosity > 1 && !ffi_link_specs.is_empty() {
+        eprintln!("FFI link specifications: {} libraries", ffi_link_specs.len());
+        for spec in &ffi_link_specs {
+            eprintln!("  - {} ({:?})", spec.name, spec.kind);
+        }
+    }
+
     let mut link_cmd = std::process::Command::new("cc");
 
     // Strip debug symbols and enable dead code elimination for smaller binaries
@@ -949,6 +1008,36 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
     }
 
+    // Add FFI library link flags from bridge blocks
+    for link_spec in &ffi_link_specs {
+        match link_spec.kind {
+            bloodc::hir::item::LinkKind::Dylib => {
+                // Dynamic library: -l<name>
+                link_cmd.arg(format!("-l{}", link_spec.name));
+            }
+            bloodc::hir::item::LinkKind::Static => {
+                // Static library: -l<name> with -static prefix or just -l<name>
+                // Most linkers will search for lib<name>.a when -static is used
+                // For simplicity, we use -l<name> which works for both
+                link_cmd.arg(format!("-l{}", link_spec.name));
+            }
+            bloodc::hir::item::LinkKind::Framework => {
+                // macOS framework: -framework <name>
+                #[cfg(target_os = "macos")]
+                {
+                    link_cmd.arg("-framework").arg(&link_spec.name);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // On non-macOS, frameworks don't exist; warn and skip
+                    if verbosity > 0 {
+                        eprintln!("Warning: Framework '{}' ignored on non-macOS platform", link_spec.name);
+                    }
+                }
+            }
+        }
+    }
+
     link_cmd.arg("-o").arg(&output_exe);
 
     let status = link_cmd.status();
@@ -956,7 +1045,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     match status {
         Ok(s) if s.success() => {
             // Save cache index on successful build for incremental compilation
-            if let Err(e) = build_cache.save_index() {
+            if let Err(e) = distributed_cache.local_mut().save_index() {
                 if verbosity > 0 {
                     eprintln!("Warning: Failed to save build cache index: {}", e);
                 }

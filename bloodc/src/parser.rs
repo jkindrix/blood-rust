@@ -203,6 +203,17 @@ impl<'src> Parser<'src> {
         self.next.kind == kind
     }
 
+    /// Check if the token after next (2-ahead lookahead) matches the given kind.
+    /// This clones the lexer to peek ahead without mutating parser state.
+    fn check_after_next(&self, kind: TokenKind) -> bool {
+        let mut lexer_clone = self.lexer.clone();
+        if let Some(token) = lexer_clone.next() {
+            token.kind == kind
+        } else {
+            false
+        }
+    }
+
     /// Consume a token of the expected kind, or error.
     fn expect(&mut self, kind: TokenKind) -> Option<Token> {
         if self.check(kind) {
@@ -246,6 +257,16 @@ impl<'src> Parser<'src> {
     /// Take ownership of the string interner.
     pub fn take_interner(&mut self) -> DefaultStringInterner {
         std::mem::take(&mut self.interner)
+    }
+
+    /// Check if there are any parsing errors.
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// Take ownership of any accumulated errors.
+    pub fn take_errors(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.errors)
     }
 
     /// Create a spanned symbol from the previous token.

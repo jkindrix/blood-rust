@@ -657,6 +657,8 @@ pub enum AggregateKind {
         def_id: DefId,
         variant_idx: Option<u32>,
     },
+    /// Anonymous record.
+    Record,
     /// Closure (captures).
     Closure {
         def_id: DefId,

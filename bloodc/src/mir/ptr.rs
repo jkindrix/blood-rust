@@ -217,11 +217,30 @@ impl fmt::Display for BloodPtr {
 /// not be generation-checked."
 pub const PERSISTENT_MARKER: u32 = 0xFFFF_FFFF;
 
+/// Overflow guard value - triggers tier promotion before overflow.
+///
+/// From MEMORY_MODEL.md §4.5:
+/// "When a slot's generation reaches OVERFLOW_GUARD during free,
+/// promotion to Tier 3 occurs immediately."
+pub const OVERFLOW_GUARD: u32 = 0xFFFF_FFFE;
+
+/// Tombstone generation - indicates slot is freed but not yet reused.
+///
+/// From MEMORY_MODEL.md §4.5:
+/// "Indicates slot is freed but not yet reused"
+pub const TOMBSTONE_GEN: u32 = 0xFFFF_FFFD;
+
 /// Initial generation value for new allocations.
 pub const INITIAL_GENERATION: u32 = 1;
 
-/// Generation value indicating freed memory.
+/// Generation value indicating freed memory (uninitialized).
 pub const FREED_GENERATION: u32 = 0;
+
+/// Maximum valid generation value (exclusive).
+///
+/// Valid generation range is [INITIAL_GENERATION, MAX_VALID_GENERATION).
+/// Values >= TOMBSTONE_GEN are reserved.
+pub const MAX_VALID_GENERATION: u32 = TOMBSTONE_GEN;
 
 // ============================================================================
 // Memory Tiers
@@ -498,14 +517,47 @@ impl<T> MemorySlot<T> {
     }
 
     /// Increment the generation (for deallocation).
-    pub fn increment_generation(&mut self) {
-        if self.generation != PERSISTENT_MARKER {
-            self.generation = self.generation.wrapping_add(1);
-            // Skip 0 (freed marker) and PERSISTENT_MARKER
-            if self.generation == FREED_GENERATION || self.generation == PERSISTENT_MARKER {
-                self.generation = INITIAL_GENERATION;
-            }
+    ///
+    /// Returns `true` if the slot should be promoted to persistent tier
+    /// (generation has reached OVERFLOW_GUARD).
+    ///
+    /// From MEMORY_MODEL.md §4.5:
+    /// "When a slot's generation reaches OVERFLOW_GUARD during free,
+    /// promotion to Tier 3 occurs immediately."
+    pub fn increment_generation(&mut self) -> bool {
+        if self.generation == PERSISTENT_MARKER {
+            // Already persistent, no change needed
+            return false;
         }
+
+        // Check for overflow guard - promotion needed
+        if self.generation >= OVERFLOW_GUARD {
+            // Mark for promotion to persistent tier
+            self.generation = PERSISTENT_MARKER;
+            return true;
+        }
+
+        self.generation = self.generation.wrapping_add(1);
+
+        // Skip reserved values
+        if self.generation >= MAX_VALID_GENERATION {
+            // This shouldn't happen with proper OVERFLOW_GUARD check above,
+            // but handle it defensively
+            self.generation = PERSISTENT_MARKER;
+            return true;
+        }
+
+        // Skip 0 (freed marker)
+        if self.generation == FREED_GENERATION {
+            self.generation = INITIAL_GENERATION;
+        }
+
+        false
+    }
+
+    /// Check if this slot should be promoted to persistent tier.
+    pub fn needs_promotion(&self) -> bool {
+        self.generation >= OVERFLOW_GUARD && self.generation != PERSISTENT_MARKER
     }
 
     /// Mark as freed.
@@ -644,15 +696,104 @@ mod tests {
         assert_eq!(slot.value, 42);
         assert_eq!(slot.generation, INITIAL_GENERATION);
 
-        // Simulate deallocation
-        slot.increment_generation();
+        // Simulate deallocation - should not need promotion
+        let needs_promotion = slot.increment_generation();
+        assert!(!needs_promotion);
         assert_eq!(slot.generation, 2);
+    }
 
-        // Test generation wraparound
-        slot.generation = u32::MAX - 1;
-        slot.increment_generation();
-        // Should skip PERSISTENT_MARKER
-        assert_eq!(slot.generation, INITIAL_GENERATION);
+    #[test]
+    fn test_memory_slot_overflow_guard_promotion() {
+        let mut slot: MemorySlot<i32> = MemorySlot::new(42);
+
+        // Set to MAX_VALID_GENERATION - 2, which is the last valid value
+        // before we start hitting reserved values.
+        // Valid range is [1, TOMBSTONE_GEN) = [1, 0xFFFF_FFFD)
+        // So MAX_VALID_GENERATION - 1 = 0xFFFF_FFFC is the last valid value.
+        slot.generation = MAX_VALID_GENERATION - 1; // 0xFFFF_FFFC
+
+        // Increment should trigger promotion because we'd enter reserved range
+        let needs_promotion = slot.increment_generation();
+        assert!(needs_promotion, "should need promotion when entering reserved range");
+        assert_eq!(slot.generation, PERSISTENT_MARKER);
+
+        // Further increments on persistent should be no-ops
+        let needs_promotion = slot.increment_generation();
+        assert!(!needs_promotion, "persistent should not need promotion again");
+        assert_eq!(slot.generation, PERSISTENT_MARKER);
+    }
+
+    #[test]
+    fn test_memory_slot_normal_increment() {
+        let mut slot: MemorySlot<i32> = MemorySlot::new(42);
+
+        // Normal increment at low values should not trigger promotion
+        slot.generation = 100;
+        let needs_promotion = slot.increment_generation();
+        assert!(!needs_promotion);
+        assert_eq!(slot.generation, 101);
+
+        // Test at a value well below the reserved range
+        slot.generation = 0x1000_0000;
+        let needs_promotion = slot.increment_generation();
+        assert!(!needs_promotion);
+        assert_eq!(slot.generation, 0x1000_0001);
+    }
+
+    #[test]
+    fn test_memory_slot_at_overflow_guard() {
+        let mut slot: MemorySlot<i32> = MemorySlot::new(42);
+
+        // If we're already at OVERFLOW_GUARD (shouldn't happen in normal
+        // operation, but handle defensively), we should promote immediately
+        slot.generation = OVERFLOW_GUARD;
+        let needs_promotion = slot.increment_generation();
+        assert!(needs_promotion, "at OVERFLOW_GUARD should promote");
+        assert_eq!(slot.generation, PERSISTENT_MARKER);
+    }
+
+    #[test]
+    fn test_reserved_generation_values() {
+        // Verify reserved values are in correct order
+        assert_eq!(FREED_GENERATION, 0);
+        assert_eq!(INITIAL_GENERATION, 1);
+        assert_eq!(TOMBSTONE_GEN, 0xFFFF_FFFD);
+        assert_eq!(OVERFLOW_GUARD, 0xFFFF_FFFE);
+        assert_eq!(PERSISTENT_MARKER, 0xFFFF_FFFF);
+        assert_eq!(MAX_VALID_GENERATION, TOMBSTONE_GEN);
+
+        // Verify ordering: valid range is [1, TOMBSTONE_GEN)
+        assert!(INITIAL_GENERATION < TOMBSTONE_GEN);
+        assert!(TOMBSTONE_GEN < OVERFLOW_GUARD);
+        assert!(OVERFLOW_GUARD < PERSISTENT_MARKER);
+    }
+
+    #[test]
+    fn test_memory_slot_skip_freed_generation() {
+        let mut slot: MemorySlot<i32> = MemorySlot::new(42);
+
+        // Manually set to u32::MAX - some large offset to test
+        // normal increment that doesn't trigger overflow guard
+        slot.generation = 1000;
+        let needs_promotion = slot.increment_generation();
+        assert!(!needs_promotion);
+        assert_eq!(slot.generation, 1001);
+    }
+
+    #[test]
+    fn test_memory_slot_needs_promotion() {
+        let mut slot: MemorySlot<i32> = MemorySlot::new(42);
+
+        // Normal generation doesn't need promotion
+        assert!(!slot.needs_promotion());
+
+        // At overflow guard needs promotion
+        slot.generation = OVERFLOW_GUARD;
+        assert!(slot.needs_promotion());
+
+        // Persistent marker doesn't need promotion (already promoted)
+        slot.generation = PERSISTENT_MARKER;
+        assert!(!slot.needs_promotion());
     }
 
     #[test]

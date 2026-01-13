@@ -198,6 +198,9 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
         // Closures capture their environment; body is analyzed separately
         Closure { .. } => true,
 
+        // Anonymous record construction - check all field values
+        Record { fields } => fields.iter().all(|f| check_expr_tail_resumptive(&f.value, false)),
+
         // Leaf nodes - no resume inside
         Literal(_) | Local(_) | Def(_) | Continue { .. } | Error
         | MethodFamily { .. } => true,

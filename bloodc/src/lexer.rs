@@ -694,6 +694,7 @@ impl Token {
 }
 
 /// The lexer for Blood source code.
+#[derive(Clone)]
 pub struct Lexer<'src> {
     inner: logos::Lexer<'src, TokenKind>,
     source: &'src str,

@@ -254,6 +254,12 @@ impl EffectInferencer {
                 }
             }
 
+            ExprKind::Record { fields } => {
+                for field in fields {
+                    self.infer_expr(&field.value, ctx);
+                }
+            }
+
             // Return and control flow
             ExprKind::Return(Some(e)) => {
                 self.infer_expr(e, ctx);

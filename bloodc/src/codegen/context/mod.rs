@@ -733,42 +733,255 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
     /// Evaluate a const expression at compile time.
     ///
-    /// For now, this supports only literals and simple constant expressions.
-    /// More complex const evaluation (const fn calls, etc.) will be added later.
+    /// Supports literals, unary/binary ops, block expressions with let bindings,
+    /// if/else expressions, and path references to local const bindings.
     fn evaluate_const_expr(
         &self,
         expr: &hir::Expr,
         ty: &Type,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use std::collections::HashMap;
+        // Start with empty const bindings environment
+        let bindings: HashMap<hir::LocalId, inkwell::values::BasicValueEnum<'ctx>> = HashMap::new();
+        self.evaluate_const_expr_with_env(expr, ty, &bindings)
+    }
+
+    /// Evaluate a const expression with an environment of known const bindings.
+    fn evaluate_const_expr_with_env(
+        &self,
+        expr: &hir::Expr,
+        ty: &Type,
+        bindings: &std::collections::HashMap<hir::LocalId, inkwell::values::BasicValueEnum<'ctx>>,
     ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         use crate::hir::ExprKind;
 
         match &expr.kind {
             ExprKind::Literal(lit) => self.evaluate_literal(lit, ty),
             ExprKind::Unary { op, operand } => {
-                let operand_val = self.evaluate_const_expr(operand, ty)?;
+                let operand_val = self.evaluate_const_expr_with_env(operand, ty, bindings)?;
                 self.evaluate_const_unary_op(*op, operand_val, ty)
             }
             ExprKind::Binary { op, left, right } => {
-                let left_val = self.evaluate_const_expr(left, ty)?;
-                let right_val = self.evaluate_const_expr(right, ty)?;
+                let left_val = self.evaluate_const_expr_with_env(left, ty, bindings)?;
+                let right_val = self.evaluate_const_expr_with_env(right, ty, bindings)?;
                 self.evaluate_const_binary_op(*op, left_val, right_val, ty)
             }
             ExprKind::Block { stmts, expr: final_expr, .. } => {
-                // For const blocks, only the final expression matters
-                if stmts.is_empty() {
-                    if let Some(final_expr) = final_expr {
-                        return self.evaluate_const_expr(final_expr, ty);
+                // Process let statements to build up const bindings
+                let mut local_bindings = bindings.clone();
+
+                for stmt in stmts {
+                    match stmt {
+                        hir::Stmt::Let { local_id, init } => {
+                            if let Some(init_expr) = init {
+                                // Evaluate the initializer
+                                let init_val = self.evaluate_const_expr_with_env(
+                                    init_expr,
+                                    &init_expr.ty,
+                                    &local_bindings,
+                                )?;
+                                local_bindings.insert(*local_id, init_val);
+                            } else {
+                                return Err(vec![Diagnostic::error(
+                                    "Uninitialized let bindings are not allowed in const context",
+                                    expr.span,
+                                )]);
+                            }
+                        }
+                        hir::Stmt::Expr(_) => {
+                            // Expression statements in const context are side-effect free
+                            // so we can mostly ignore them (they don't produce values)
+                        }
+                        hir::Stmt::Item(_) => {
+                            // Item statements (inner functions, etc.) are ignored in const eval
+                        }
                     }
                 }
-                // Empty block or block with statements - not const evaluable yet
+
+                // Evaluate the final expression with accumulated bindings
+                if let Some(final_expr) = final_expr {
+                    self.evaluate_const_expr_with_env(final_expr, ty, &local_bindings)
+                } else {
+                    // Empty block returns unit
+                    Ok(self.context.i8_type().const_zero().into())
+                }
+            }
+            ExprKind::If { condition, then_branch, else_branch } => {
+                // Evaluate condition at compile time
+                let cond_val = self.evaluate_const_expr_with_env(
+                    condition,
+                    &Type::bool(),
+                    bindings,
+                )?;
+
+                // Extract the boolean value
+                let cond_bool = if let inkwell::values::BasicValueEnum::IntValue(int_val) = cond_val {
+                    // Get the constant value (0 = false, non-zero = true)
+                    int_val.get_zero_extended_constant().map(|v| v != 0)
+                } else {
+                    None
+                };
+
+                match cond_bool {
+                    Some(true) => {
+                        self.evaluate_const_expr_with_env(then_branch, ty, bindings)
+                    }
+                    Some(false) => {
+                        if let Some(else_branch) = else_branch {
+                            self.evaluate_const_expr_with_env(else_branch, ty, bindings)
+                        } else {
+                            // No else branch and condition is false - return unit
+                            Ok(self.context.i8_type().const_zero().into())
+                        }
+                    }
+                    None => {
+                        Err(vec![Diagnostic::error(
+                            "If condition in const context must be a compile-time constant",
+                            condition.span,
+                        )])
+                    }
+                }
+            }
+            ExprKind::Local(local_id) => {
+                // Check if this is a local binding we've evaluated
+                if let Some(value) = bindings.get(local_id) {
+                    Ok(*value)
+                } else {
+                    Err(vec![Diagnostic::error(
+                        "Local variable in const context must have been previously bound",
+                        expr.span,
+                    )])
+                }
+            }
+            ExprKind::Def(def_id) => {
+                // Check if this is a const item we've already compiled
+                if let Some(global) = self.const_globals.get(def_id) {
+                    // Get the initializer value from the global
+                    if let Some(init) = global.get_initializer() {
+                        return Ok(init);
+                    }
+                }
                 Err(vec![Diagnostic::error(
-                    "Complex block expressions in const context are not yet supported".to_string(),
+                    "Definition in const context must refer to a const item",
                     expr.span,
                 )])
+            }
+            ExprKind::Cast { expr: inner_expr, target_ty } => {
+                // Evaluate the inner expression
+                let inner_val = self.evaluate_const_expr_with_env(inner_expr, &inner_expr.ty, bindings)?;
+                // Perform the cast at compile time
+                self.evaluate_const_cast(inner_val, &inner_expr.ty, target_ty, expr.span)
+            }
+            ExprKind::Tuple(elements) => {
+                // Evaluate each element
+                let mut element_values = Vec::new();
+                if let hir::TypeKind::Tuple(element_types) = ty.kind() {
+                    for (elem, elem_ty) in elements.iter().zip(element_types.iter()) {
+                        let val = self.evaluate_const_expr_with_env(elem, elem_ty, bindings)?;
+                        element_values.push(val);
+                    }
+                } else {
+                    return Err(vec![Diagnostic::error(
+                        "Expected tuple type for tuple expression",
+                        expr.span,
+                    )]);
+                }
+
+                // Create a constant struct for the tuple
+                let llvm_types: Vec<inkwell::types::BasicTypeEnum> = element_values.iter()
+                    .map(|v| v.get_type())
+                    .collect();
+                let struct_type = self.context.struct_type(&llvm_types, false);
+                let const_values: Vec<inkwell::values::BasicValueEnum> = element_values;
+                Ok(struct_type.const_named_struct(&const_values).into())
+            }
+            ExprKind::Array(elements) => {
+                if let hir::TypeKind::Array { element: elem_ty, .. } = ty.kind() {
+                    let mut element_values = Vec::new();
+                    for elem in elements {
+                        let val = self.evaluate_const_expr_with_env(elem, elem_ty, bindings)?;
+                        element_values.push(val);
+                    }
+
+                    // Create a constant array
+                    if element_values.is_empty() {
+                        let elem_llvm_ty = self.lower_type(elem_ty);
+                        return Ok(elem_llvm_ty.array_type(0).const_zero().into());
+                    }
+
+                    // All elements must be the same type
+                    let first = element_values[0];
+                    let array_vals: Result<Vec<_>, _> = element_values.iter()
+                        .map(|v| match v {
+                            inkwell::values::BasicValueEnum::IntValue(iv) => Ok(*iv),
+                            _ => Err(()),
+                        })
+                        .collect();
+
+                    if let Ok(int_vals) = array_vals {
+                        let int_type = first.into_int_value().get_type();
+                        return Ok(int_type.const_array(&int_vals).into());
+                    }
+
+                    // For other types, fall back to generic struct representation
+                    Err(vec![Diagnostic::error(
+                        "Complex array expressions in const context are not yet fully supported",
+                        expr.span,
+                    )])
+                } else {
+                    Err(vec![Diagnostic::error(
+                        "Expected array type for array expression",
+                        expr.span,
+                    )])
+                }
             }
             _ => Err(vec![Diagnostic::error(
                 format!("Expression kind {:?} is not const-evaluable", std::mem::discriminant(&expr.kind)),
                 expr.span,
+            )]),
+        }
+    }
+
+    /// Evaluate a const cast at compile time.
+    fn evaluate_const_cast(
+        &self,
+        value: inkwell::values::BasicValueEnum<'ctx>,
+        _from_ty: &Type,
+        to_ty: &Type,
+        span: Span,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        let target_llvm_ty = self.lower_type(to_ty);
+
+        match (value, target_llvm_ty) {
+            (inkwell::values::BasicValueEnum::IntValue(int_val), inkwell::types::BasicTypeEnum::IntType(target_int)) => {
+                // Integer to integer cast
+                let from_bits = int_val.get_type().get_bit_width();
+                let to_bits = target_int.get_bit_width();
+                if from_bits < to_bits {
+                    // Zero-extend (const_z_ext)
+                    Ok(int_val.const_z_ext(target_int).into())
+                } else if from_bits > to_bits {
+                    // Truncate (const_truncate)
+                    Ok(int_val.const_truncate(target_int).into())
+                } else {
+                    Ok(int_val.into())
+                }
+            }
+            (inkwell::values::BasicValueEnum::IntValue(int_val), inkwell::types::BasicTypeEnum::FloatType(target_float)) => {
+                // Integer to float cast
+                Ok(int_val.const_signed_to_float(target_float).into())
+            }
+            (inkwell::values::BasicValueEnum::FloatValue(float_val), inkwell::types::BasicTypeEnum::IntType(target_int)) => {
+                // Float to integer cast
+                Ok(float_val.const_to_signed_int(target_int).into())
+            }
+            (inkwell::values::BasicValueEnum::FloatValue(float_val), inkwell::types::BasicTypeEnum::FloatType(target_float)) => {
+                // Float to float cast
+                Ok(float_val.const_cast(target_float).into())
+            }
+            _ => Err(vec![Diagnostic::error(
+                "Unsupported cast in const context",
+                span,
             )]),
         }
     }
@@ -1001,19 +1214,26 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 //   - "wasm-import-module" = import module name (e.g., "env", "wasi_snapshot_preview1")
                 //   - "wasm-import-name" = import name (the function name in the WASM module)
                 //
-                // Note: Inkwell currently doesn't have a direct API for setting string
-                // attributes on functions. For full WASM support, this would require:
-                // 1. Using inkwell's add_attribute with a custom StringAttribute, or
-                // 2. Post-processing the LLVM IR/bitcode to add attributes, or
-                // 3. Using wasm-tools to modify the final WASM binary
-                //
-                // For now, we set up the function correctly and store the import module
-                // for future use when we add full attribute support.
-                if let Some(module) = wasm_import_module {
-                    // Store for later attribute setting when inkwell support is available
-                    // or for post-processing
-                    self.wasm_imports.insert(link_name.to_string(), module.to_string());
-                }
+                // Set the WASM import attributes using Inkwell's string attribute API
+                use inkwell::attributes::AttributeLoc;
+
+                // Create and set wasm-import-name attribute (the function name in the WASM module)
+                let import_name_attr = self.context.create_string_attribute(
+                    "wasm-import-name",
+                    link_name,
+                );
+                fn_value.add_attribute(AttributeLoc::Function, import_name_attr);
+
+                // Set wasm-import-module if provided (defaults to "env" if not specified)
+                let module_name = wasm_import_module.unwrap_or("env");
+                let import_module_attr = self.context.create_string_attribute(
+                    "wasm-import-module",
+                    module_name,
+                );
+                fn_value.add_attribute(AttributeLoc::Function, import_module_attr);
+
+                // Also store in map for reference
+                self.wasm_imports.insert(link_name.to_string(), module_name.to_string());
             }
             _ => {
                 // Default to C calling convention

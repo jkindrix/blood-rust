@@ -689,12 +689,20 @@ impl<'src> Parser<'src> {
             // Array
             TokenKind::LBracket => self.parse_array_expr(),
 
-            // Block
+            // Block or anonymous record literal
+            // Detect record literal pattern: { identifier : ...
+            // If we see { followed by identifier and then colon, it's a record literal
             TokenKind::LBrace => {
-                let block = self.parse_block();
-                Expr {
-                    span: block.span,
-                    kind: ExprKind::Block(block),
+                if self.check_next(TokenKind::Ident) && self.check_after_next(TokenKind::Colon) {
+                    // Anonymous record literal: { x: 10, y: 20 }
+                    self.parse_struct_literal(None)
+                } else {
+                    // Regular block: { statements... }
+                    let block = self.parse_block();
+                    Expr {
+                        span: block.span,
+                        kind: ExprKind::Block(block),
+                    }
                 }
             }
 

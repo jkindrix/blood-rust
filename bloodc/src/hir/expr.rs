@@ -175,6 +175,11 @@ pub enum ExprKind {
         base: Option<Box<Expr>>,
     },
 
+    /// Anonymous record construction: `{ x: 1, y: 2 }`
+    Record {
+        fields: Vec<RecordFieldExpr>,
+    },
+
     /// Enum variant construction: `Some(x)`
     Variant {
         def_id: DefId,
@@ -383,6 +388,15 @@ impl LiteralValue {
 pub struct FieldExpr {
     /// Field index.
     pub field_idx: u32,
+    /// Field value.
+    pub value: Expr,
+}
+
+/// A field in an anonymous record expression.
+#[derive(Debug, Clone)]
+pub struct RecordFieldExpr {
+    /// Field name.
+    pub name: crate::ast::Symbol,
     /// Field value.
     pub value: Expr,
 }

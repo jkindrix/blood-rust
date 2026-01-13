@@ -511,6 +511,9 @@ impl EffectLowering {
             ExprKind::Variant { fields, .. } => {
                 fields.iter().any(|e| self.detect_row_poly_recursive(e))
             }
+            ExprKind::Record { fields } => {
+                fields.iter().any(|f| self.detect_row_poly_recursive(&f.value))
+            }
             ExprKind::Cast { expr, .. } => self.detect_row_poly_recursive(expr),
             ExprKind::Borrow { expr, .. } => self.detect_row_poly_recursive(expr),
             ExprKind::Deref(expr) => self.detect_row_poly_recursive(expr),
@@ -671,6 +674,11 @@ impl EffectLowering {
             ExprKind::Variant { fields, .. } => {
                 for field in fields {
                     self.collect_effects_recursive(field, effects);
+                }
+            }
+            ExprKind::Record { fields } => {
+                for field in fields {
+                    self.collect_effects_recursive(&field.value, effects);
                 }
             }
             ExprKind::Cast { expr, .. } => {
