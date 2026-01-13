@@ -351,6 +351,59 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    /// Import an existing definition under a (possibly different) name.
+    ///
+    /// This is used for `use` statements to bring definitions from other
+    /// modules into the current scope without creating new DefIds.
+    pub fn import_binding(
+        &mut self,
+        name: String,
+        def_id: DefId,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        // Check for duplicates in current scope
+        if self.current_scope().bindings.contains_key(&name) {
+            return Err(TypeError::new(
+                TypeErrorKind::DuplicateDefinition { name },
+                span,
+            ));
+        }
+
+        // Add as a Def binding (it's an alias to an existing definition)
+        self.current_scope_mut()
+            .bindings
+            .insert(name.clone(), Binding::Def(def_id));
+
+        // Also add to globals if in root scope
+        if self.current_scope().kind == ScopeKind::Root {
+            self.globals.insert(name, def_id);
+        }
+
+        Ok(())
+    }
+
+    /// Import a type binding under a (possibly different) name.
+    pub fn import_type_binding(
+        &mut self,
+        name: String,
+        def_id: DefId,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        // Check for duplicates in current scope
+        if self.current_scope().type_bindings.contains_key(&name) {
+            return Err(TypeError::new(
+                TypeErrorKind::DuplicateDefinition { name },
+                span,
+            ));
+        }
+
+        self.current_scope_mut()
+            .type_bindings
+            .insert(name, def_id);
+
+        Ok(())
+    }
+
     /// Define a local variable in the current scope.
     pub fn define_local(
         &mut self,

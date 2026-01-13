@@ -301,6 +301,10 @@ impl TypeError {
                     searched_paths.join("\n  - ")
                 ),
             ),
+            TypeErrorKind::ImportError { message } => (
+                "E0704",
+                format!("import error: {message}"),
+            ),
             TypeErrorKind::IoError { message } => (
                 "E0702",
                 message.clone(),
@@ -574,6 +578,10 @@ pub enum TypeErrorKind {
     ModuleNotFound {
         name: String,
         searched_paths: Vec<String>,
+    },
+    /// Import resolution error.
+    ImportError {
+        message: String,
     },
     /// I/O error reading module file.
     IoError {

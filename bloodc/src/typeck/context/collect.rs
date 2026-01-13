@@ -29,11 +29,303 @@ impl<'a> TypeContext<'a> {
             }
         }
 
+        // Second pass: resolve imports (after all declarations are collected)
+        for import in &program.imports {
+            if let Err(e) = self.resolve_import(import) {
+                self.errors.push(e);
+            }
+        }
+
         if !self.errors.is_empty() {
             return Err(self.errors.iter().map(|e| e.to_diagnostic()).collect());
         }
 
         Ok(())
+    }
+
+    /// Resolve an import statement.
+    fn resolve_import(&mut self, import: &ast::Import) -> Result<(), TypeError> {
+        match import {
+            ast::Import::Simple { path, alias, span } => {
+                self.resolve_simple_import(path, alias.as_ref(), *span)
+            }
+            ast::Import::Group { path, items, span } => {
+                self.resolve_group_import(path, items, *span)
+            }
+            ast::Import::Glob { path, span } => {
+                self.resolve_glob_import(path, *span)
+            }
+        }
+    }
+
+    /// Resolve a simple import: `use std.mem.allocate;` or `use std.mem.allocate as alloc;`
+    fn resolve_simple_import(
+        &mut self,
+        path: &ast::ModulePath,
+        alias: Option<&crate::span::Spanned<ast::Symbol>>,
+        span: crate::span::Span,
+    ) -> Result<(), TypeError> {
+        // Resolve the path to find the target definition
+        let def_id = self.resolve_import_path(path)?;
+
+        // Determine the local name (last segment or alias)
+        let local_name = if let Some(alias_spanned) = alias {
+            self.symbol_to_string(alias_spanned.node)
+        } else {
+            // Use the last segment of the path as the name
+            if let Some(last) = path.segments.last() {
+                self.symbol_to_string(last.node)
+            } else {
+                return Err(TypeError::new(
+                    TypeErrorKind::ImportError {
+                        message: "empty import path".to_string(),
+                    },
+                    span,
+                ));
+            }
+        };
+
+        // Determine if this is a type or value import based on the DefKind
+        if let Some(info) = self.resolver.def_info.get(&def_id) {
+            match info.kind {
+                hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias
+                | hir::DefKind::Effect | hir::DefKind::Trait => {
+                    self.resolver.import_type_binding(local_name, def_id, span)?;
+                }
+                _ => {
+                    self.resolver.import_binding(local_name, def_id, span)?;
+                }
+            }
+        } else {
+            return Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: format!("cannot find definition for import path"),
+                },
+                span,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Resolve a group import: `use std.iter::{Iterator, IntoIterator};`
+    fn resolve_group_import(
+        &mut self,
+        path: &ast::ModulePath,
+        items: &[ast::ImportItem],
+        span: crate::span::Span,
+    ) -> Result<(), TypeError> {
+        // For group imports, we need to resolve the base path as a module
+        // and then import each item from that module
+        let base_module_id = self.resolve_module_path(path)?;
+
+        for item in items {
+            let item_name = self.symbol_to_string(item.name.node);
+
+            // Look up the item in the module
+            if let Some(def_id) = self.lookup_in_module(base_module_id, &item_name) {
+                let local_name = if let Some(alias) = &item.alias {
+                    self.symbol_to_string(alias.node)
+                } else {
+                    item_name.clone()
+                };
+
+                // Import based on def kind
+                if let Some(info) = self.resolver.def_info.get(&def_id) {
+                    match info.kind {
+                        hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias
+                        | hir::DefKind::Effect | hir::DefKind::Trait => {
+                            self.resolver.import_type_binding(local_name, def_id, span)?;
+                        }
+                        _ => {
+                            self.resolver.import_binding(local_name, def_id, span)?;
+                        }
+                    }
+                }
+            } else {
+                return Err(TypeError::new(
+                    TypeErrorKind::ImportError {
+                        message: format!("cannot find `{}` in module", item_name),
+                    },
+                    span,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve a glob import: `use std.ops::*;`
+    fn resolve_glob_import(
+        &mut self,
+        path: &ast::ModulePath,
+        span: crate::span::Span,
+    ) -> Result<(), TypeError> {
+        // Resolve the path as a module and import all public items
+        let module_id = self.resolve_module_path(path)?;
+
+        // Get all public items from the module
+        let items = self.get_module_public_items(module_id);
+
+        for (name, def_id) in items {
+            // Import based on def kind (skip if already exists)
+            if let Some(info) = self.resolver.def_info.get(&def_id) {
+                let result = match info.kind {
+                    hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias
+                    | hir::DefKind::Effect | hir::DefKind::Trait => {
+                        self.resolver.import_type_binding(name.clone(), def_id, span)
+                    }
+                    _ => {
+                        self.resolver.import_binding(name.clone(), def_id, span)
+                    }
+                };
+
+                // For glob imports, we silently skip duplicates
+                if let Err(e) = result {
+                    if !matches!(e.kind, TypeErrorKind::DuplicateDefinition { .. }) {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve an import path to find the target definition.
+    fn resolve_import_path(&mut self, path: &ast::ModulePath) -> Result<DefId, TypeError> {
+        if path.segments.is_empty() {
+            return Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: "empty import path".to_string(),
+                },
+                path.span,
+            ));
+        }
+
+        // Walk the path segments
+        let mut current_scope_names: Vec<String> = path.segments.iter()
+            .map(|s| self.symbol_to_string(s.node))
+            .collect();
+
+        // The last segment is the item we're importing
+        let item_name = current_scope_names.pop().unwrap();
+
+        if current_scope_names.is_empty() {
+            // Simple case: just a name (e.g., `use foo;`)
+            // Look it up in the current scope
+            if let Some(Binding::Def(def_id)) = self.resolver.lookup(&item_name) {
+                return Ok(def_id);
+            }
+            if let Some(def_id) = self.resolver.lookup_type(&item_name) {
+                return Ok(def_id);
+            }
+            return Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: format!("cannot find `{}` in scope", item_name),
+                },
+                path.span,
+            ));
+        }
+
+        // For paths like `std.mem.allocate`, we need to resolve the module path first
+        // then look up the item in that module
+        let module_path = ast::ModulePath {
+            segments: path.segments[..path.segments.len() - 1].to_vec(),
+            span: path.span,
+        };
+
+        let module_id = self.resolve_module_path(&module_path)?;
+
+        // Look up the item in the module
+        if let Some(def_id) = self.lookup_in_module(module_id, &item_name) {
+            Ok(def_id)
+        } else {
+            Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: format!("cannot find `{}` in module", item_name),
+                },
+                path.span,
+            ))
+        }
+    }
+
+    /// Resolve a module path to find the module DefId.
+    fn resolve_module_path(&self, path: &ast::ModulePath) -> Result<DefId, TypeError> {
+        if path.segments.is_empty() {
+            return Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: "empty module path".to_string(),
+                },
+                path.span,
+            ));
+        }
+
+        let first_name = self.symbol_to_string(path.segments[0].node);
+
+        // Look up the first segment
+        let mut current_id = if let Some(Binding::Def(def_id)) = self.resolver.lookup(&first_name) {
+            def_id
+        } else if let Some(def_id) = self.resolver.lookup_type(&first_name) {
+            def_id
+        } else {
+            return Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: format!("cannot find module `{}`", first_name),
+                },
+                path.span,
+            ));
+        };
+
+        // Walk the remaining segments
+        for segment in &path.segments[1..] {
+            let name = self.symbol_to_string(segment.node);
+
+            if let Some(def_id) = self.lookup_in_module(current_id, &name) {
+                current_id = def_id;
+            } else {
+                return Err(TypeError::new(
+                    TypeErrorKind::ImportError {
+                        message: format!("cannot find `{}` in module path", name),
+                    },
+                    path.span,
+                ));
+            }
+        }
+
+        Ok(current_id)
+    }
+
+    /// Look up an item by name in a module.
+    fn lookup_in_module(&self, module_id: DefId, name: &str) -> Option<DefId> {
+        // Check if we have module info for this DefId
+        if let Some(module_def) = self.module_defs.get(&module_id) {
+            // Look in the module's items
+            for &item_id in &module_def.items {
+                if let Some(info) = self.resolver.def_info.get(&item_id) {
+                    if info.name == name {
+                        return Some(item_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get all public items from a module.
+    fn get_module_public_items(&self, module_id: DefId) -> Vec<(String, DefId)> {
+        let mut items = Vec::new();
+
+        if let Some(module_def) = self.module_defs.get(&module_id) {
+            for &item_id in &module_def.items {
+                if let Some(info) = self.resolver.def_info.get(&item_id) {
+                    // TODO: Check visibility (for now, assume all are public)
+                    items.push((info.name.clone(), item_id));
+                }
+            }
+        }
+
+        items
     }
 
     /// Collect a declaration.
