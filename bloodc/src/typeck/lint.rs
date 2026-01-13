@@ -253,6 +253,7 @@ impl HandlerLintContext {
             | ExprKind::Continue { .. }
             | ExprKind::Resume { value: None }
             | ExprKind::MethodFamily { .. }
+            | ExprKind::Default
             | ExprKind::Error => {}
         }
     }

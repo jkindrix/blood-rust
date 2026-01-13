@@ -243,6 +243,28 @@ pub extern "C" fn read_int() -> i32 {
 }
 
 // ============================================================================
+// Size Functions
+// ============================================================================
+
+/// Get the size of an i32 in bytes.
+#[no_mangle]
+pub extern "C" fn size_of_i32() -> i64 {
+    std::mem::size_of::<i32>() as i64
+}
+
+/// Get the size of an i64 in bytes.
+#[no_mangle]
+pub extern "C" fn size_of_i64() -> i64 {
+    std::mem::size_of::<i64>() as i64
+}
+
+/// Get the size of a bool in bytes.
+#[no_mangle]
+pub extern "C" fn size_of_bool() -> i64 {
+    std::mem::size_of::<bool>() as i64
+}
+
+// ============================================================================
 // Memory Management (Generational References)
 // ============================================================================
 

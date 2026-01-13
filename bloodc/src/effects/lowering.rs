@@ -534,7 +534,8 @@ impl EffectLowering {
             }
             // Leaf expressions are not polymorphic
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Def(_)
-            | ExprKind::MethodFamily { .. } | ExprKind::Continue { .. } | ExprKind::Error => false,
+            | ExprKind::MethodFamily { .. } | ExprKind::Continue { .. }
+            | ExprKind::Default | ExprKind::Error => false,
         }
     }
 
@@ -718,7 +719,8 @@ impl EffectLowering {
             }
             // Leaf expressions don't contain effect operations
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Def(_)
-            | ExprKind::MethodFamily { .. } | ExprKind::Continue { .. } | ExprKind::Error => {}
+            | ExprKind::MethodFamily { .. } | ExprKind::Continue { .. }
+            | ExprKind::Default | ExprKind::Error => {}
         }
     }
 

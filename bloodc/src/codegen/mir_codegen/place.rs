@@ -83,6 +83,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         for elem in &place.projection {
             current_ptr = match elem {
                 PlaceElem::Deref => {
+                    // Update current_ty to the inner type (dereference the reference/pointer)
+                    current_ty = match current_ty.kind() {
+                        TypeKind::Ref { inner, .. } => inner.clone(),
+                        TypeKind::Ptr { inner, .. } => inner.clone(),
+                        _ => current_ty.clone(), // Keep as-is if not a reference type
+                    };
+
                     // Load the pointer value
                     let loaded = self.builder.build_load(current_ptr, "deref")
                         .map_err(|e| vec![Diagnostic::error(
@@ -180,14 +187,53 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         *idx
                     };
 
+                    // Check if this is a reference to a struct (MIR may not emit explicit Deref)
+                    let is_ref_to_struct = matches!(
+                        current_ty.kind(),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. }
+                            if matches!(inner.kind(), TypeKind::Adt { .. } | TypeKind::Tuple(_))
+                    );
+
+                    // Update current_ty to the field type (handle both direct and through-reference)
+                    let effective_ty = match current_ty.kind() {
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => inner.clone(),
+                        _ => current_ty.clone(),
+                    };
+                    current_ty = match effective_ty.kind() {
+                        TypeKind::Tuple(fields) => {
+                            fields.get(*idx as usize).cloned().unwrap_or(current_ty.clone())
+                        }
+                        TypeKind::Adt { .. } => {
+                            // For ADT types, we'd need field type lookup
+                            // For now, keep current_ty as placeholder (field access works via GEP)
+                            current_ty.clone()
+                        }
+                        _ => current_ty.clone(),
+                    };
+
                     // Get struct element pointer
-                    self.builder.build_struct_gep(
-                        current_ptr,
-                        actual_idx,
-                        &format!("field_{}", idx)
-                    ).map_err(|e| vec![Diagnostic::error(
-                        format!("LLVM GEP error: {} (place={:?}, ty={:?})", e, place, current_ty), body.span
-                    )])?
+                    if is_ref_to_struct {
+                        // Reference to struct: load pointer then struct_gep
+                        let struct_ptr = self.builder.build_load(current_ptr, "struct_ptr")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM load error: {}", e), body.span
+                            )])?.into_pointer_value();
+                        self.builder.build_struct_gep(
+                            struct_ptr,
+                            actual_idx,
+                            &format!("field_{}", idx)
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM GEP error: {} (place={:?}, ty={:?})", e, place, effective_ty), body.span
+                        )])?
+                    } else {
+                        self.builder.build_struct_gep(
+                            current_ptr,
+                            actual_idx,
+                            &format!("field_{}", idx)
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM GEP error: {} (place={:?}, ty={:?})", e, place, current_ty), body.span
+                        )])?
+                    }
                 }
 
                 PlaceElem::Index(idx_local) => {
@@ -202,19 +248,32 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             format!("LLVM load error: {}", e), body.span
                         )])?;
 
-                    // For array/slice types, we need two GEP indices: [0, index]
-                    // The first 0 dereferences the pointer to array, the second indexes into the array
-                    let is_array_ty = matches!(current_ty.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. });
+                    // Check if this is a direct array or a reference to an array
+                    let (is_direct_array, is_ref_to_array) = match current_ty.kind() {
+                        TypeKind::Array { .. } | TypeKind::Slice { .. } => (true, false),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            (false, matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. }))
+                        }
+                        _ => (false, false),
+                    };
 
-                    // Update current_ty to element type
+                    // Update current_ty to element type (handle both direct and through-reference)
                     current_ty = match current_ty.kind() {
                         TypeKind::Array { element, .. } => element.clone(),
                         TypeKind::Slice { element } => element.clone(),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            match inner.kind() {
+                                TypeKind::Array { element, .. } => element.clone(),
+                                TypeKind::Slice { element } => element.clone(),
+                                _ => current_ty.clone(),
+                            }
+                        }
                         _ => current_ty.clone(),
                     };
 
                     unsafe {
-                        if is_array_ty {
+                        if is_direct_array {
+                            // Direct array: current_ptr is [N x T]*, use two-index GEP
                             let zero = self.context.i64_type().const_zero();
                             self.builder.build_in_bounds_gep(
                                 current_ptr,
@@ -223,7 +282,23 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             ).map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM GEP error: {}", e), body.span
                             )])?
+                        } else if is_ref_to_array {
+                            // Reference to array: current_ptr is [N x T]**, load to get [N x T]*
+                            // then use two-index GEP
+                            let array_ptr = self.builder.build_load(current_ptr, "array_ptr")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM load error: {}", e), body.span
+                                )])?.into_pointer_value();
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(
+                                array_ptr,
+                                &[zero, idx_val.into_int_value()],
+                                "idx_gep"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM GEP error: {}", e), body.span
+                            )])?
                         } else {
+                            // Other pointer type: single-index GEP
                             self.builder.build_in_bounds_gep(
                                 current_ptr,
                                 &[idx_val.into_int_value()],
@@ -236,12 +311,25 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 }
 
                 PlaceElem::ConstantIndex { offset, min_length: _, from_end } => {
-                    // Check if current type is array/slice BEFORE updating
-                    let is_array_ty = matches!(current_ty.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. });
+                    // Check if this is a direct array or a reference to an array
+                    let (is_direct_array, is_ref_to_array) = match current_ty.kind() {
+                        TypeKind::Array { .. } | TypeKind::Slice { .. } => (true, false),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            (false, matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. }))
+                        }
+                        _ => (false, false),
+                    };
+
+                    // Get the effective array type for from_end calculations
+                    let effective_array_ty = match current_ty.kind() {
+                        TypeKind::Array { .. } => current_ty.clone(),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => inner.clone(),
+                        _ => current_ty.clone(),
+                    };
 
                     let idx = if *from_end {
                         // For from_end, compute actual index as array_length - offset - 1
-                        let array_len = match current_ty.kind() {
+                        let array_len = match effective_array_ty.kind() {
                             TypeKind::Array { size, .. } => size,
                             _ => {
                                 return Err(vec![Diagnostic::error(
@@ -257,23 +345,41 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         self.context.i64_type().const_int(*offset, false)
                     };
 
-                    // Update current_ty to element type
+                    // Update current_ty to element type (handle both direct and through-reference)
                     current_ty = match current_ty.kind() {
                         TypeKind::Array { element, .. } => element.clone(),
                         TypeKind::Slice { element } => element.clone(),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            match inner.kind() {
+                                TypeKind::Array { element, .. } => element.clone(),
+                                TypeKind::Slice { element } => element.clone(),
+                                _ => current_ty.clone(),
+                            }
+                        }
                         _ => current_ty.clone(),
                     };
 
-                    // For array types, we need two GEP indices: [0, index]
-                    // The first 0 dereferences the pointer to array, the second indexes into the array
                     unsafe {
-                        if is_array_ty {
+                        if is_direct_array {
+                            // Direct array: current_ptr is [N x T]*, use two-index GEP
                             let zero = self.context.i64_type().const_zero();
                             self.builder.build_in_bounds_gep(current_ptr, &[zero, idx], "const_idx")
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
                                 )])?
+                        } else if is_ref_to_array {
+                            // Reference to array: load pointer then two-index GEP
+                            let array_ptr = self.builder.build_load(current_ptr, "array_ptr")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM load error: {}", e), body.span
+                                )])?.into_pointer_value();
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(array_ptr, &[zero, idx], "const_idx")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
                         } else {
+                            // Other type: single-index GEP
                             self.builder.build_in_bounds_gep(current_ptr, &[idx], "const_idx")
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
@@ -283,8 +389,14 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 }
 
                 PlaceElem::Subslice { from, to, from_end: _ } => {
-                    // Check if current type is array/slice BEFORE indexing
-                    let is_array_ty = matches!(current_ty.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. });
+                    // Check if this is a direct array or a reference to an array
+                    let (is_direct_array, is_ref_to_array) = match current_ty.kind() {
+                        TypeKind::Array { .. } | TypeKind::Slice { .. } => (true, false),
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            (false, matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. }))
+                        }
+                        _ => (false, false),
+                    };
 
                     let idx = self.context.i64_type().const_int(*from, false);
                     let _ = to; // End index for slice length calculation
@@ -293,9 +405,20 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // but the GEP behavior depends on whether we have an array pointer
 
                     unsafe {
-                        if is_array_ty {
+                        if is_direct_array {
                             let zero = self.context.i64_type().const_zero();
                             self.builder.build_in_bounds_gep(current_ptr, &[zero, idx], "subslice")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                        } else if is_ref_to_array {
+                            // Reference to array: load pointer then two-index GEP
+                            let array_ptr = self.builder.build_load(current_ptr, "array_ptr")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM load error: {}", e), body.span
+                                )])?.into_pointer_value();
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(array_ptr, &[zero, idx], "subslice")
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
                                 )])?

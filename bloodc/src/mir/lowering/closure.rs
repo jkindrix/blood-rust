@@ -341,6 +341,15 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 )])
             }
 
+            ExprKind::Default => {
+                // Create a default value - for now, return a zero-initialized value
+                // In the future, this should call Default::default() trait method
+                let temp = self.new_temp(expr.ty.clone(), expr.span);
+                let rvalue = Rvalue::ZeroInit(expr.ty.clone());
+                self.push_assign(Place::local(temp), rvalue);
+                Ok(Operand::Copy(Place::local(temp)))
+            }
+
             ExprKind::Error => {
                 Err(vec![Diagnostic::error("lowering error expression".to_string(), expr.span)])
             }

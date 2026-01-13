@@ -759,6 +759,9 @@ impl LivenessAnalysis {
                 Self::collect_operand_uses(generation, uses);
                 Self::collect_operand_uses(metadata, uses);
             }
+            Rvalue::ZeroInit(_) => {
+                // Zero-initialization doesn't use any locals
+            }
         }
     }
 

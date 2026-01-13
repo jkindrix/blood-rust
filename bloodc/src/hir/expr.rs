@@ -339,6 +339,12 @@ pub enum ExprKind {
         candidates: Vec<DefId>,
     },
 
+    /// Default value: `default`
+    ///
+    /// Creates a default instance of the inferred type.
+    /// The type must implement the Default trait.
+    Default,
+
     /// Error placeholder (for error recovery).
     Error,
 }

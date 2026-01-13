@@ -19,7 +19,28 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     fn get_type_size_in_bytes(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
         match ty {
             BasicTypeEnum::IntType(t) => (t.get_bit_width() as u64).div_ceil(8),
-            BasicTypeEnum::FloatType(_) => 4,
+            BasicTypeEnum::FloatType(t) => {
+                // LLVM FloatType can be various sizes (16-bit half, 32-bit float, 64-bit double, etc.)
+                // We compare against known types from the context to determine the size.
+                let f32_ty = self.context.f32_type();
+                let f64_ty = self.context.f64_type();
+                let f128_ty = self.context.f128_type();
+                let f16_ty = self.context.f16_type();
+
+                if t == f64_ty {
+                    8  // 64-bit double
+                } else if t == f32_ty {
+                    4  // 32-bit float
+                } else if t == f128_ty {
+                    16 // 128-bit quad precision
+                } else if t == f16_ty {
+                    2  // 16-bit half
+                } else {
+                    // Unknown float type - use target data layout as fallback
+                    // For safety, assume 8 bytes (double) as conservative default
+                    8
+                }
+            }
             BasicTypeEnum::PointerType(_) => 8, // 64-bit pointers
             BasicTypeEnum::ArrayType(t) => {
                 let elem_size = self.get_type_size_in_bytes(t.get_element_type());

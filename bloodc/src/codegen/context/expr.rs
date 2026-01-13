@@ -911,10 +911,28 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
             BasicValueEnum::PointerValue(ptr) => {
-                // Pointer indexing (for slices/dynamic arrays)
+                // Check if this is a pointer to an array (from &[T; N] or &[T])
+                // In that case we need two-index GEP: [0, idx] to first dereference
+                // the pointer to array, then index into the array elements
+                let is_array_ref = match base.ty.kind() {
+                    TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                        matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. })
+                    }
+                    TypeKind::Array { .. } | TypeKind::Slice { .. } => true,
+                    _ => false,
+                };
+
                 let elem_ptr = unsafe {
-                    self.builder.build_gep(ptr, &[idx], "ptr.idx")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    if is_array_ref {
+                        // Two-index GEP for array pointers: [0, idx]
+                        let zero = self.context.i64_type().const_zero();
+                        self.builder.build_in_bounds_gep(ptr, &[zero, idx], "arr.elem.ptr")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    } else {
+                        // Single-index GEP for element pointers
+                        self.builder.build_gep(ptr, &[idx], "ptr.idx")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    }
                 };
                 let elem = self.builder.build_load(elem_ptr, "elem")
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;

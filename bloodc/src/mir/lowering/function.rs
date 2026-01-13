@@ -306,6 +306,16 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             ExprKind::Record { fields } => {
                 self.lower_record(fields, &expr.ty, expr.span)
             }
+
+            ExprKind::Default => {
+                // Create a default-initialized value
+                // For now, create a zeroed temp and return it
+                // In a full implementation, this would call the Default trait method
+                let temp = self.new_temp(expr.ty.clone(), expr.span);
+                let rvalue = Rvalue::ZeroInit(expr.ty.clone());
+                self.push_assign(Place::local(temp), rvalue);
+                Ok(Operand::Copy(Place::local(temp)))
+            }
         }
     }
 

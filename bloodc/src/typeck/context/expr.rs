@@ -131,7 +131,22 @@ impl<'a> TypeContext<'a> {
             ast::ExprKind::Range { start, end, inclusive } => {
                 self.infer_range(start.as_deref(), end.as_deref(), *inclusive, expr.span)
             }
+            ast::ExprKind::Default => {
+                self.infer_default(expr.span)
+            }
         }
+    }
+
+    /// Infer type for `default` expression.
+    /// The type is inferred from context (where the value is used).
+    fn infer_default(&mut self, span: Span) -> Result<hir::Expr, TypeError> {
+        // Create a fresh type variable - the type will be inferred from usage context
+        let ty = self.unifier.fresh_var();
+        Ok(hir::Expr {
+            kind: hir::ExprKind::Default,
+            ty,
+            span,
+        })
     }
 
     /// Infer type of a with...handle expression.
@@ -3086,6 +3101,13 @@ impl<'a> TypeContext<'a> {
             (deref_hir, deref_ty)
         } else {
             (base_expr, base_ty.clone())
+        };
+
+        // Unwrap ownership types for field access (linear/affine are compile-time only)
+        let inner_ty = if let TypeKind::Ownership { inner, .. } = inner_ty.kind() {
+            self.unifier.resolve(inner)
+        } else {
+            inner_ty
         };
 
         match field {

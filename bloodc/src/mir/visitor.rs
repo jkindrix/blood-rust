@@ -279,6 +279,9 @@ pub trait Visitor: Sized {
                 self.visit_operand(address, location);
                 self.visit_operand(generation, location);
             }
+            Rvalue::ZeroInit(_) => {
+                // Zero-initialization has no operands to visit
+            }
         }
     }
 

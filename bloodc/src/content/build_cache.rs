@@ -1072,6 +1072,9 @@ fn hash_expr(expr: &hir::Expr, hasher: &mut ContentHasher) {
                 hash_expr(&field.value, hasher);
             }
         }
+        hir::ExprKind::Default => {
+            hasher.update_u8(0x25);
+        }
         hir::ExprKind::Error => {
             hasher.update_u8(0xFF);
         }
@@ -1631,6 +1634,7 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
         // (Local is handled above at line 1330)
         hir::ExprKind::Literal(_)
         | hir::ExprKind::Continue { .. }
+        | hir::ExprKind::Default
         | hir::ExprKind::Error => {}
     }
 }

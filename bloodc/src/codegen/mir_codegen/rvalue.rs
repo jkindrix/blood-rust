@@ -155,6 +155,13 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             Rvalue::MakeGenPtr { address, generation, metadata } => {
                 self.compile_make_gen_ptr(address, generation, metadata, body, escape_results)
             }
+
+            Rvalue::ZeroInit(ty) => {
+                // Create a zero-initialized value of the given type
+                let llvm_ty = self.lower_type(ty);
+                let zero = llvm_ty.const_zero();
+                Ok(zero)
+            }
         }
     }
 

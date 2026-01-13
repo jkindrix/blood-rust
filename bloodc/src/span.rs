@@ -5,6 +5,40 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A precomputed index of line start positions for O(log n) line/column lookup.
+///
+/// This avoids the O(n²) behavior of scanning from the start for each token.
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    /// Byte offsets where each line starts. line_starts[0] = 0 (line 1 starts at byte 0).
+    line_starts: Vec<usize>,
+}
+
+impl LineIndex {
+    /// Build a line index from source code. O(n) one-time cost.
+    pub fn new(source: &str) -> Self {
+        let mut line_starts = vec![0]; // Line 1 starts at byte 0
+        for (offset, ch) in source.char_indices() {
+            if ch == '\n' {
+                line_starts.push(offset + 1); // Next line starts after the newline
+            }
+        }
+        Self { line_starts }
+    }
+
+    /// Look up line and column for a byte offset. O(log n) via binary search.
+    pub fn line_col(&self, offset: usize) -> (u32, u32) {
+        // Binary search for the line containing this offset
+        let line_idx = match self.line_starts.binary_search(&offset) {
+            Ok(idx) => idx,      // Exact match - offset is at start of a line
+            Err(idx) => idx - 1, // offset is between line_starts[idx-1] and line_starts[idx]
+        };
+        let line = (line_idx + 1) as u32; // 1-indexed
+        let col = (offset - self.line_starts[line_idx] + 1) as u32; // 1-indexed
+        (line, col)
+    }
+}
+
 /// A span representing a contiguous region in source code.
 ///
 /// Spans are byte offsets into the source text, along with cached

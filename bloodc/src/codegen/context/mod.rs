@@ -357,6 +357,9 @@ fn substitute_rvalue_types(rvalue: &mut crate::mir::types::Rvalue, subst: &HashM
             substitute_operand_types(generation, subst);
             substitute_operand_types(metadata, subst);
         }
+        Rvalue::ZeroInit(ty) => {
+            *ty = substitute_type(ty, subst);
+        }
     }
 }
 
@@ -2275,6 +2278,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // println() -> void
         let println_type = void_type.fn_type(&[], false);
         self.module.add_function("println", println_type, None);
+
+        // === Size Functions ===
+
+        // size_of_i32() -> i64
+        let size_of_type = i64_type.fn_type(&[], false);
+        self.module.add_function("size_of_i32", size_of_type, None);
+
+        // size_of_i64() -> i64
+        self.module.add_function("size_of_i64", size_of_type, None);
+
+        // size_of_bool() -> i64
+        self.module.add_function("size_of_bool", size_of_type, None);
 
         // === Memory Management (Generational References) ===
 

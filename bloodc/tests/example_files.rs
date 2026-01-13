@@ -126,7 +126,7 @@ fn test_algebraic_effects_declarations() {
 
 /// Test that we can parse all example files in a loop.
 /// This provides a single test that covers all files for quick validation.
-/// Note: Very large files (>500 lines) are tested individually to avoid timeouts.
+/// Note: Some files are skipped because they use unsupported language features.
 #[test]
 fn test_parse_all_examples() {
     let examples_dir = "../examples";
@@ -137,17 +137,37 @@ fn test_parse_all_examples() {
     let mut parsed_count = 0;
     let mut errors = Vec::new();
 
-    // Files that are skipped (tested individually or have known issues)
+    // Files skipped due to using Rust-style syntax that Blood doesn't support.
+    // These files use macros (format!, matches!, etc.) and incorrect effect syntax
+    // (`with Effect` instead of `/ Effect`).
+    //
+    // Implemented features (no longer block parsing):
+    //   - `>>` in types (right shift/nested generics)
+    //   - `default` keyword
+    //   - `::` module path separator
+    //   - `extern` blocks
+    //   - `\x` hex escapes
+    //
+    // Remaining blockers for these files:
+    //   - `matches!`, `format!`, `vec!` etc. macro calls (Blood has no macros)
+    //   - `with Effect` should be `/ Effect` (Blood effect syntax)
+    //   - `fn` in effect declarations (should be `op`)
     let skip_files = [
-        "concurrent_fibers.blood",  // Large file, tested individually
-        "ffi_interop.blood",        // Large file, tested individually
-        "json_parser.blood",        // Has unsupported syntax (>> as shift, \x escapes)
-        "http_server.blood",        // Large file (1100+ lines)
-        "http_client.blood",        // Large file (1000+ lines)
-        "argparse.blood",           // Large file (1000+ lines)
-        "web_scraper.blood",        // Large file (900+ lines)
-        "markdown_parser.blood",    // Parser timeout (complex syntax)
-        "sqlite_driver.blood",      // Parser timeout (complex syntax)
+        "json_parser.blood",        // Uses matches! macro
+        "blood_parser.blood",       // Uses format! macro, `with` effect syntax
+        "blood_typeck.blood",       // Uses format! macro, `with` effect syntax
+        "blood_lexer.blood",        // Uses `fn` in effect (should be `op`), format! macro
+        "markdown_parser.blood",    // Uses `fn` in effect (should be `op`), format! macro
+        "sqlite_driver.blood",      // Uses format! macro
+        "config_parser.blood",      // Uses matches! macro, `with` effect syntax
+        "gzip_compression.blood",   // Uses `fn` in effect (should be `op`)
+        "http_server.blood",        // Uses format! macro
+        "http_client.blood",        // Uses format! macro
+        "argparse.blood",           // Uses format! macro
+        "web_scraper.blood",        // Uses format! macro
+        "order_book.blood",         // Uses `with` effect syntax
+        "gpio_driver.blood",        // Uses bitfield syntax
+        "state_machine.blood",      // Uses `with` effect syntax
     ];
 
     for entry in entries {
@@ -606,4 +626,59 @@ fn test_concurrent_fibers_declarations() {
         "Expected at least 40 total declarations (4 effects + 2 handlers + 10 structs + 25+ functions), found {}",
         program.declarations.len()
     );
+}
+
+/// Verify parser has O(n) complexity (constant ms/line).
+/// This catches regressions like the O(n²) line_col bug.
+#[test]
+fn test_parse_complexity_is_linear() {
+    use std::time::Instant;
+    use std::fs;
+
+    // Test files of increasing size (use files >200 lines to reduce overhead impact)
+    let files = [
+        "sorting.blood",            // ~230 lines
+        "algebraic_effects.blood",  // ~476 lines
+        "data_structures.blood",    // ~681 lines
+    ];
+
+    let mut times_per_line = Vec::new();
+
+    for name in files {
+        let path = format!("../examples/{}", name);
+        if let Ok(source) = fs::read_to_string(&path) {
+            let lines = source.lines().count();
+
+            // Warmup run to reduce variance
+            let mut parser = Parser::new(&source);
+            let _ = parser.parse_program();
+
+            // Average 3 runs for more stable timing
+            let mut total_ms = 0.0;
+            for _ in 0..3 {
+                let start = Instant::now();
+                let mut parser = Parser::new(&source);
+                let result = parser.parse_program();
+                assert!(result.is_ok(), "{} failed to parse", name);
+                total_ms += start.elapsed().as_secs_f64() * 1000.0;
+            }
+            let avg_ms = total_ms / 3.0;
+            let ms_per_line = avg_ms / lines as f64;
+            times_per_line.push(ms_per_line);
+        }
+    }
+
+    // If O(n), ms/line should be roughly constant.
+    // If O(n²), ms/line would grow proportionally to file size.
+    // Allow 15x variance for debug mode noise; O(n²) would show 100x+ variance.
+    // In release mode, variance is typically <3x.
+    if times_per_line.len() >= 2 {
+        let min = times_per_line.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = times_per_line.iter().cloned().fold(0.0, f64::max);
+        assert!(
+            max / min < 15.0,
+            "Parser complexity appears non-linear: min={:.4}ms/line, max={:.4}ms/line, ratio={:.1}x",
+            min, max, max / min
+        );
+    }
 }

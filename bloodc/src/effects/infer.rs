@@ -327,6 +327,7 @@ impl EffectInferencer {
             ExprKind::Continue { .. } |
             ExprKind::Return(None) |
             ExprKind::Break { value: None, .. } |
+            ExprKind::Default |
             ExprKind::Error => {
                 // No effects
             }

@@ -735,7 +735,8 @@ impl SemanticAnalyzer {
             | ExprKind::Path(_)
             | ExprKind::Return(None)
             | ExprKind::Break { value: None, .. }
-            | ExprKind::Continue { .. } => {}
+            | ExprKind::Continue { .. }
+            | ExprKind::Default => {}
         }
     }
 

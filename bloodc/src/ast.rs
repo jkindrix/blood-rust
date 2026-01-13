@@ -1100,6 +1100,10 @@ pub enum ExprKind {
 
     /// Parenthesized: `(x)`
     Paren(Box<Expr>),
+
+    /// Default value: `default`
+    /// Creates a default instance of the type being assigned to.
+    Default,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

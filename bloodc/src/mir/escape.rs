@@ -456,6 +456,9 @@ impl EscapeAnalyzer {
                 let _ = generation;
                 let _ = metadata;
             }
+            Rvalue::ZeroInit(_) => {
+                // Zero-initialization doesn't reference any locals
+            }
         }
 
         changed

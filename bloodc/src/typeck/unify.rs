@@ -304,6 +304,20 @@ impl Unifier {
                 TypeKind::Ownership { qualifier: q2, inner: i2 },
             ) if q1 == q2 => self.unify(i1, i2, span),
 
+            // Coercion: linear T -> affine T
+            // Linear is stricter than affine, so we can relax linear to affine
+            (
+                TypeKind::Ownership { qualifier: crate::hir::ty::OwnershipQualifier::Affine, inner: i1 },
+                TypeKind::Ownership { qualifier: crate::hir::ty::OwnershipQualifier::Linear, inner: i2 },
+            ) => self.unify(i1, i2, span),
+
+            // Coercion: T -> linear T or T -> affine T
+            // A plain type can be promoted to an ownership-qualified type
+            // (Only when the found type is NOT an ownership type)
+            (TypeKind::Ownership { inner, .. }, found) if !matches!(found, TypeKind::Ownership { .. }) => {
+                self.unify(inner, &t2, span)
+            }
+
             // No match
             _ => Err(TypeError::new(
                 TypeErrorKind::Mismatch {
@@ -1645,5 +1659,517 @@ mod tests {
 
         // TyVarId(50) doesn't occur anywhere
         assert!(!u.occurs_in(TyVarId::new(50), &forall_ty));
+    }
+
+    // ============================================================
+    // Type Checker Soundness Property Tests (FUZZ-003)
+    // ============================================================
+
+    /// Generate a collection of representative types for property testing
+    fn all_test_types() -> Vec<Type> {
+        vec![
+            // Primitives
+            Type::i32(),
+            Type::i64(),
+            Type::bool(),
+            Type::f64(),
+            Type::unit(),
+            Type::never(),
+            // Compound types
+            Type::tuple(vec![Type::i32(), Type::bool()]),
+            Type::tuple(vec![]),
+            Type::array(Type::i32(), 5),
+            Type::slice(Type::bool()),
+            Type::reference(Type::i32(), false),
+            Type::reference(Type::i32(), true),
+            Type::function(vec![Type::i32()], Type::bool()),
+            Type::function(vec![], Type::unit()),
+            Type::function(vec![Type::i32(), Type::bool()], Type::i64()),
+            // Nested types
+            Type::tuple(vec![Type::tuple(vec![Type::i32()]), Type::bool()]),
+            Type::array(Type::tuple(vec![Type::i32(), Type::bool()]), 3),
+            Type::function(vec![Type::tuple(vec![Type::i32()])], Type::bool()),
+        ]
+    }
+
+    #[test]
+    fn test_property_transitivity() {
+        // Transitivity: if unify(A, B) and unify(B, C) succeed,
+        // then resolve(A) = resolve(C)
+        let span = Span::dummy();
+
+        // Test with inference variables forming a chain
+        let mut u = Unifier::new();
+        let a = u.fresh_var();
+        let b = u.fresh_var();
+        let c = u.fresh_var();
+
+        // A = B, B = C, C = i32
+        assert!(u.unify(&a, &b, span).is_ok());
+        assert!(u.unify(&b, &c, span).is_ok());
+        assert!(u.unify(&c, &Type::i32(), span).is_ok());
+
+        // All should resolve to i32 (transitivity)
+        let resolved_a = u.resolve(&a);
+        let resolved_b = u.resolve(&b);
+        let resolved_c = u.resolve(&c);
+
+        assert_eq!(resolved_a, resolved_b, "Transitivity failed: A != B");
+        assert_eq!(resolved_b, resolved_c, "Transitivity failed: B != C");
+        assert_eq!(resolved_a, Type::i32(), "Transitivity failed: A != i32");
+    }
+
+    #[test]
+    fn test_property_transitivity_complex() {
+        // Transitivity with complex types
+        let span = Span::dummy();
+        let mut u = Unifier::new();
+
+        let a = u.fresh_var();
+        let b = u.fresh_var();
+        let c = u.fresh_var();
+
+        let target = Type::tuple(vec![Type::i32(), Type::bool()]);
+
+        // Chain: A = B = C = (i32, bool)
+        assert!(u.unify(&a, &b, span).is_ok());
+        assert!(u.unify(&b, &c, span).is_ok());
+        assert!(u.unify(&c, &target, span).is_ok());
+
+        assert_eq!(u.resolve(&a), target);
+        assert_eq!(u.resolve(&b), target);
+        assert_eq!(u.resolve(&c), target);
+    }
+
+    #[test]
+    fn test_property_idempotence_of_resolution() {
+        // Idempotence: resolve(resolve(T)) = resolve(T) for all T
+        let span = Span::dummy();
+
+        for ty in all_test_types() {
+            let mut u = Unifier::new();
+
+            // Create a variable and bind it to ty
+            let var = u.fresh_var();
+            if u.unify(&var, &ty, span).is_ok() {
+                let once = u.resolve(&var);
+                let twice = u.resolve(&once);
+                assert_eq!(
+                    once, twice,
+                    "Idempotence failed for {:?}: resolve != resolve(resolve)",
+                    ty
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_idempotence_concrete_types() {
+        // For concrete types, resolution should be identity
+        let u = Unifier::new();
+
+        for ty in all_test_types() {
+            let resolved = u.resolve(&ty);
+            let resolved_again = u.resolve(&resolved);
+            assert_eq!(
+                resolved, resolved_again,
+                "Idempotence failed for concrete type {:?}",
+                ty
+            );
+        }
+    }
+
+    #[test]
+    fn test_property_substitution_consistency() {
+        // After successful unification, both sides resolve to the same type
+        // Note: Never and Error types are "absorbing" elements - they unify with
+        // anything but don't bind variables. This is intentional behavior.
+        let span = Span::dummy();
+
+        for ty in all_test_types() {
+            // Skip absorbing types (Never, Error) which don't bind variables
+            if ty.is_never() || matches!(ty.kind(), TypeKind::Error) {
+                continue;
+            }
+
+            let mut u = Unifier::new();
+            let var = u.fresh_var();
+
+            if u.unify(&var, &ty, span).is_ok() {
+                let resolved_var = u.resolve(&var);
+                let resolved_ty = u.resolve(&ty);
+                assert_eq!(
+                    resolved_var, resolved_ty,
+                    "Substitution consistency failed: resolved var != resolved type for {:?}",
+                    ty
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_substitution_consistency_bidirectional() {
+        // Unification should be symmetric: unify(A, B) and unify(B, A)
+        // should produce equivalent results
+        let span = Span::dummy();
+
+        for ty in all_test_types() {
+            let mut u1 = Unifier::new();
+            let mut u2 = Unifier::new();
+
+            let var1 = u1.fresh_var();
+            let var2 = u2.fresh_var();
+
+            let result1 = u1.unify(&var1, &ty, span);
+            let result2 = u2.unify(&ty, &var2, span);
+
+            // Both should succeed or both fail
+            assert_eq!(
+                result1.is_ok(),
+                result2.is_ok(),
+                "Symmetry violated for {:?}",
+                ty
+            );
+
+            if result1.is_ok() {
+                assert_eq!(
+                    u1.resolve(&var1),
+                    u2.resolve(&var2),
+                    "Symmetric unification produced different results for {:?}",
+                    ty
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_determinism() {
+        // Same unifications should produce same results
+        let span = Span::dummy();
+
+        for _ in 0..10 {
+            let mut u1 = Unifier::new();
+            let mut u2 = Unifier::new();
+
+            let v1_a = u1.fresh_var();
+            let v1_b = u1.fresh_var();
+            let v2_a = u2.fresh_var();
+            let v2_b = u2.fresh_var();
+
+            // Same sequence of unifications
+            let _ = u1.unify(&v1_a, &Type::i32(), span);
+            let _ = u1.unify(&v1_b, &v1_a, span);
+
+            let _ = u2.unify(&v2_a, &Type::i32(), span);
+            let _ = u2.unify(&v2_b, &v2_a, span);
+
+            assert_eq!(
+                u1.resolve(&v1_a),
+                u2.resolve(&v2_a),
+                "Determinism failed"
+            );
+            assert_eq!(
+                u1.resolve(&v1_b),
+                u2.resolve(&v2_b),
+                "Determinism failed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_property_monotonicity() {
+        // Once a variable is bound, it stays bound to that type
+        let span = Span::dummy();
+        let mut u = Unifier::new();
+
+        let var = u.fresh_var();
+
+        // Bind to i32
+        assert!(u.unify(&var, &Type::i32(), span).is_ok());
+        let bound_type = u.resolve(&var);
+        assert_eq!(bound_type, Type::i32());
+
+        // Try to unify with same type - should succeed
+        assert!(u.unify(&var, &Type::i32(), span).is_ok());
+        assert_eq!(u.resolve(&var), bound_type, "Monotonicity violated: type changed");
+
+        // Try to unify with different type - should fail
+        assert!(u.unify(&var, &Type::bool(), span).is_err());
+        // Variable should still be bound to original type
+        assert_eq!(u.resolve(&var), bound_type, "Monotonicity violated after failed unification");
+    }
+
+    #[test]
+    fn test_property_type_preservation() {
+        // Resolution of concrete types should not change them
+        let u = Unifier::new();
+
+        for ty in all_test_types() {
+            if !ty.has_type_vars() {
+                let resolved = u.resolve(&ty);
+                assert_eq!(
+                    ty, resolved,
+                    "Type preservation failed: concrete type {:?} changed to {:?}",
+                    ty, resolved
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_unification_preserves_structure() {
+        // After unification, resolved types should have expected structure
+        let span = Span::dummy();
+        let mut u = Unifier::new();
+
+        // Create tuple with variables: (?A, ?B)
+        let var_a = u.fresh_var();
+        let var_b = u.fresh_var();
+        let tuple_with_vars = Type::tuple(vec![var_a.clone(), var_b.clone()]);
+
+        // Unify with concrete tuple
+        let concrete_tuple = Type::tuple(vec![Type::i32(), Type::bool()]);
+        assert!(u.unify(&tuple_with_vars, &concrete_tuple, span).is_ok());
+
+        // Check structure is preserved
+        let resolved = u.resolve(&tuple_with_vars);
+        match resolved.kind() {
+            TypeKind::Tuple(elements) => {
+                assert_eq!(elements.len(), 2);
+                assert_eq!(elements[0], Type::i32());
+                assert_eq!(elements[1], Type::bool());
+            }
+            _ => panic!("Structure not preserved: expected tuple, got {:?}", resolved),
+        }
+    }
+
+    #[test]
+    fn test_property_function_structure_preservation() {
+        // Function type structure should be preserved through unification
+        let span = Span::dummy();
+        let mut u = Unifier::new();
+
+        let var_param = u.fresh_var();
+        let var_ret = u.fresh_var();
+        let fn_with_vars = Type::function(vec![var_param.clone()], var_ret.clone());
+
+        let concrete_fn = Type::function(vec![Type::i32()], Type::bool());
+        assert!(u.unify(&fn_with_vars, &concrete_fn, span).is_ok());
+
+        let resolved = u.resolve(&fn_with_vars);
+        match resolved.kind() {
+            TypeKind::Fn { params, ret } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0], Type::i32());
+                assert_eq!(*ret, Type::bool());
+            }
+            _ => panic!("Function structure not preserved"),
+        }
+    }
+
+    #[test]
+    fn test_property_no_information_loss() {
+        // Unifying two concrete compatible types should not lose information
+        let span = Span::dummy();
+        let mut u = Unifier::new();
+
+        let ty1 = Type::tuple(vec![Type::i32(), Type::bool(), Type::f64()]);
+        let ty2 = Type::tuple(vec![Type::i32(), Type::bool(), Type::f64()]);
+
+        assert!(u.unify(&ty1, &ty2, span).is_ok());
+
+        // Both should still resolve to the same complete type
+        let resolved1 = u.resolve(&ty1);
+        let resolved2 = u.resolve(&ty2);
+
+        assert_eq!(resolved1, resolved2);
+        match resolved1.kind() {
+            TypeKind::Tuple(elements) => {
+                assert_eq!(elements.len(), 3);
+            }
+            _ => panic!("Information lost"),
+        }
+    }
+
+    #[test]
+    fn test_property_error_type_absorption() {
+        // Error type should unify with anything (for error recovery)
+        let span = Span::dummy();
+
+        for ty in all_test_types() {
+            let mut u = Unifier::new();
+            assert!(
+                u.unify(&Type::error(), &ty, span).is_ok(),
+                "Error type should absorb {:?}",
+                ty
+            );
+
+            let mut u2 = Unifier::new();
+            assert!(
+                u2.unify(&ty, &Type::error(), span).is_ok(),
+                "Error type should be absorbed by {:?}",
+                ty
+            );
+        }
+    }
+
+    #[test]
+    fn test_property_never_type_absorption() {
+        // Never type should unify with anything (it's the bottom type)
+        let span = Span::dummy();
+
+        for ty in all_test_types() {
+            let mut u = Unifier::new();
+            assert!(
+                u.unify(&Type::never(), &ty, span).is_ok(),
+                "Never type should unify with {:?}",
+                ty
+            );
+
+            let mut u2 = Unifier::new();
+            assert!(
+                u2.unify(&ty, &Type::never(), span).is_ok(),
+                "{:?} should unify with never type",
+                ty
+            );
+        }
+    }
+
+    #[test]
+    fn test_property_occurs_check_soundness() {
+        // Occurs check should prevent all infinite types
+        let span = Span::dummy();
+
+        let mut u = Unifier::new();
+        let var = u.fresh_var();
+
+        // All these should fail due to occurs check
+        let infinite_types = vec![
+            Type::tuple(vec![var.clone()]),
+            Type::array(var.clone(), 1),
+            Type::slice(var.clone()),
+            Type::reference(var.clone(), false),
+            Type::function(vec![var.clone()], Type::bool()),
+            Type::function(vec![Type::i32()], var.clone()),
+            Type::tuple(vec![Type::i32(), Type::tuple(vec![var.clone()])]),
+        ];
+
+        for infinite_ty in infinite_types {
+            let mut u_test = Unifier::new();
+            let test_var = u_test.fresh_var();
+            assert!(
+                u_test.unify(&test_var, &infinite_ty, span).is_err(),
+                "Occurs check should prevent infinite type {:?}",
+                infinite_ty
+            );
+        }
+    }
+
+    #[test]
+    fn test_property_fresh_var_independence() {
+        // Fresh variables should be independent
+        let mut u = Unifier::new();
+        let span = Span::dummy();
+
+        let vars: Vec<Type> = (0..10).map(|_| u.fresh_var()).collect();
+
+        // Binding one should not affect others
+        u.unify(&vars[0], &Type::i32(), span).unwrap();
+
+        for (i, var) in vars.iter().enumerate().skip(1) {
+            // Other variables should still be unresolved (or at least not i32 unless unified)
+            let resolved = u.resolve(var);
+            // Check they haven't been accidentally bound
+            if let TypeKind::Infer(_) = resolved.kind() {
+                // Still unbound - good
+            } else {
+                panic!("Variable {} was unexpectedly bound to {:?}", i, resolved);
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_array_size_must_match() {
+        // Arrays with different sizes should never unify
+        let span = Span::dummy();
+
+        for size1 in [0, 1, 5, 10, 100] {
+            for size2 in [0, 1, 5, 10, 100] {
+                let mut u = Unifier::new();
+                let arr1 = Type::array(Type::i32(), size1);
+                let arr2 = Type::array(Type::i32(), size2);
+
+                let result = u.unify(&arr1, &arr2, span);
+                if size1 == size2 {
+                    assert!(result.is_ok(), "Same size arrays should unify");
+                } else {
+                    assert!(result.is_err(), "Different size arrays should not unify");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_mutability_must_match() {
+        // References with different mutability should not unify
+        let span = Span::dummy();
+
+        let mut u = Unifier::new();
+        let ref_mut = Type::reference(Type::i32(), true);
+        let ref_imm = Type::reference(Type::i32(), false);
+
+        assert!(u.unify(&ref_mut, &ref_imm, span).is_err());
+        assert!(u.unify(&ref_imm, &ref_mut, span).is_err());
+
+        // Same mutability should unify
+        let mut u2 = Unifier::new();
+        assert!(u2.unify(&ref_mut, &Type::reference(Type::i32(), true), span).is_ok());
+        assert!(u2.unify(&ref_imm, &Type::reference(Type::i32(), false), span).is_ok());
+    }
+
+    #[test]
+    fn test_property_arity_must_match() {
+        // Functions with different arities should not unify
+        let span = Span::dummy();
+
+        for arity1 in 0..5 {
+            for arity2 in 0..5 {
+                let mut u = Unifier::new();
+                let params1: Vec<Type> = (0..arity1).map(|_| Type::i32()).collect();
+                let params2: Vec<Type> = (0..arity2).map(|_| Type::i32()).collect();
+                let fn1 = Type::function(params1, Type::bool());
+                let fn2 = Type::function(params2, Type::bool());
+
+                let result = u.unify(&fn1, &fn2, span);
+                if arity1 == arity2 {
+                    assert!(result.is_ok(), "Same arity functions should unify");
+                } else {
+                    assert!(result.is_err(), "Different arity functions should not unify");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_property_tuple_length_must_match() {
+        // Tuples with different lengths should not unify
+        let span = Span::dummy();
+
+        for len1 in 0..5 {
+            for len2 in 0..5 {
+                let mut u = Unifier::new();
+                let elems1: Vec<Type> = (0..len1).map(|_| Type::i32()).collect();
+                let elems2: Vec<Type> = (0..len2).map(|_| Type::i32()).collect();
+                let tuple1 = Type::tuple(elems1);
+                let tuple2 = Type::tuple(elems2);
+
+                let result = u.unify(&tuple1, &tuple2, span);
+                if len1 == len2 {
+                    assert!(result.is_ok(), "Same length tuples should unify");
+                } else {
+                    assert!(result.is_err(), "Different length tuples should not unify");
+                }
+            }
+        }
     }
 }

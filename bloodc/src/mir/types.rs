@@ -626,6 +626,10 @@ pub enum Rvalue {
         generation: Operand,
         metadata: Operand,
     },
+
+    /// Zero-initialize a value of the given type.
+    /// Used for `default` expressions and uninitialized struct fields.
+    ZeroInit(Type),
 }
 
 /// Binary operations.
