@@ -199,7 +199,8 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
         Closure { .. } => true,
 
         // Leaf nodes - no resume inside
-        Literal(_) | Local(_) | Def(_) | Continue { .. } | Error => true,
+        Literal(_) | Local(_) | Def(_) | Continue { .. } | Error
+        | MethodFamily { .. } => true,
     }
 }
 

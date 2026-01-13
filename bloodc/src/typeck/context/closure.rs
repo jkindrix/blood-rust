@@ -327,6 +327,7 @@ impl<'a> TypeContext<'a> {
             hir::ExprKind::Literal(_)
             | hir::ExprKind::Def(_)
             | hir::ExprKind::Continue { .. }
+            | hir::ExprKind::MethodFamily { .. }
             | hir::ExprKind::Error => {}
         }
     }

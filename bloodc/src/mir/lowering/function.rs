@@ -278,6 +278,20 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             ExprKind::Range { start, end, inclusive } => {
                 self.lower_range(start.as_deref(), end.as_deref(), *inclusive, &expr.ty, expr.span)
             }
+
+            ExprKind::MethodFamily { name, candidates } => {
+                // Method family should be resolved at call site during type checking.
+                // If we reach here, it means the method family was used without a call,
+                // which is an error (e.g., `let f = add;` where `add` has multiple overloads).
+                Err(vec![Diagnostic::error(
+                    format!(
+                        "cannot reference method family '{}' without a call (has {} overloads)",
+                        name,
+                        candidates.len()
+                    ),
+                    expr.span,
+                )])
+            }
         }
     }
 

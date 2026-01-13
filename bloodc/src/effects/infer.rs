@@ -317,6 +317,7 @@ impl EffectInferencer {
             ExprKind::Literal(_) |
             ExprKind::Local(_) |
             ExprKind::Def(_) |
+            ExprKind::MethodFamily { .. } |
             ExprKind::Continue { .. } |
             ExprKind::Return(None) |
             ExprKind::Break { value: None, .. } |

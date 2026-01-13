@@ -1036,6 +1036,15 @@ fn hash_expr(expr: &hir::Expr, hasher: &mut ContentHasher) {
                 hasher.update_u8(0);
             }
         }
+        hir::ExprKind::MethodFamily { name, candidates } => {
+            hasher.update_u8(0x23);
+            hasher.update_u32(name.len() as u32);
+            hasher.update(name.as_bytes());
+            hasher.update_u32(candidates.len() as u32);
+            for def_id in candidates {
+                hasher.update_u32(def_id.index);
+            }
+        }
         hir::ExprKind::Error => {
             hasher.update_u8(0xFF);
         }
@@ -1570,6 +1579,12 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
         }
         hir::ExprKind::Unsafe(inner) => {
             extract_expr_deps(inner, deps);
+        }
+        hir::ExprKind::MethodFamily { candidates, .. } => {
+            // All candidate methods are dependencies
+            for def_id in candidates {
+                deps.insert(*def_id);
+            }
         }
         // Leaf expressions that don't contain dependencies
         // (Local is handled above at line 1330)

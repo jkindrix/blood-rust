@@ -850,6 +850,7 @@ impl<'a> TypeContext<'a> {
                 | hir::ExprKind::Local(_)
                 | hir::ExprKind::Def(_)
                 | hir::ExprKind::Continue { .. }
+                | hir::ExprKind::MethodFamily { .. }
                 | hir::ExprKind::Error) => kind,
         };
         hir::Expr::new(zonked_kind, zonked_ty, expr.span)
