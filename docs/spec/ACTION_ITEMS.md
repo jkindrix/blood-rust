@@ -239,11 +239,14 @@ DUP-002 extracted some utilities, but more remains.
 
 ### 6.2 Pattern Lowering Extraction [P2]
 
-- [ ] **DUP-IMPL-003**: Move pattern matching logic to `util.rs`
-  - `test_pattern`, `test_pattern_tuple`, `test_pattern_fields`
-  - `test_pattern_struct_fields`, `test_pattern_or`, `test_pattern_slice`
-  - `bind_pattern`
-  - Already have `lower_literal_to_constant` and `is_irrefutable_pattern`
+- [x] **DUP-IMPL-003**: Move pattern matching logic to `util.rs`
+  - ✅ COMPLETED: Added control-flow pattern testing methods to `ExprLowering` trait
+  - ✅ Methods added: `test_pattern_cf`, `test_pattern_tuple_cf`, `test_pattern_fields_cf`,
+    `test_pattern_struct_fields_cf`, `test_pattern_or_cf`, `test_pattern_slice_cf`, `bind_pattern_cf`
+  - ✅ Updated `bind_pattern` in trait to handle ref bindings properly
+  - ✅ FunctionLowering and ClosureLowering now use trait methods instead of duplicated code
+  - ✅ Removed 1,096 lines of duplicated code, added 590 lines of shared code (net -506 lines)
+  - ✅ All 836 tests pass
 
 ---
 
@@ -280,11 +283,15 @@ Identified in PERF-007 hot path profiling.
 | Closure Optimization | 0 | 4 | 0 | 0 | **4** | 0 |
 | Self-Hosting | 0 | 7 | 2 | 0 | **9** | 0 |
 | Formal Verification | 0 | 0 | 0 | 4 | **4** | 0 |
-| MIR Deduplication | 0 | 0 | 3 | 0 | **3** | 2 |
+| MIR Deduplication | 0 | 0 | 3 | 0 | **3** | 3 |
 | Performance Optimization | 0 | 0 | 1 | 0 | **1** | 1 |
-| **Total** | **0** | **11** | **15** | **6** | **32** | **6** |
+| **Total** | **0** | **11** | **15** | **6** | **32** | **7** |
 
-**Recently Completed (Section 6.1 - MIR Lowering Deduplication):**
+**Recently Completed (Section 6 - MIR Lowering Deduplication):**
+- DUP-IMPL-003: Moved pattern matching logic to ExprLowering trait in `util.rs`
+  - Added control-flow pattern testing methods (`test_pattern_cf`, `bind_pattern_cf`, etc.)
+  - Removed 1,096 lines of duplicated code, added 590 lines of shared code (net -506 lines)
+  - All 836 tests pass
 - DUP-IMPL-001: Extracted `ExprLowering` trait for shared expression lowering
   - Created trait with 35+ default method implementations in `util.rs`
   - Implemented for both `FunctionLowering` and `ClosureLowering`

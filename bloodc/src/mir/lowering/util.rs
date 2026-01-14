@@ -2013,12 +2013,31 @@ pub trait ExprLowering {
             PatternKind::Wildcard => {
                 // Nothing to bind
             }
-            PatternKind::Binding { local_id, subpattern, .. } => {
+            PatternKind::Binding { local_id, mutable, subpattern } => {
                 let mir_local = self.map_local(*local_id);
-                self.push_assign(Place::local(mir_local), Rvalue::Use(Operand::Copy(place.clone())));
+
+                // Check if this is a ref binding (pattern type is a reference)
+                // In that case, we need to create a reference to the place instead of copying
+                if pattern.ty.is_ref() {
+                    // This is a ref binding (e.g., ref x or ref rest @ ..)
+                    // Create a reference to the place
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Ref {
+                            place: place.clone(),
+                            mutable: *mutable,
+                        },
+                    );
+                } else {
+                    // Regular binding - copy the value
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Use(Operand::Copy(place.clone())),
+                    );
+                }
 
                 if let Some(sub) = subpattern {
-                    self.bind_pattern(sub, place)?;
+                    self.bind_pattern(sub, &Place::local(mir_local))?;
                 }
             }
             PatternKind::Literal(_) => {
@@ -2085,6 +2104,551 @@ pub trait ExprLowering {
             }
             PatternKind::Range { .. } => {
                 // Range patterns don't bind variables
+            }
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Control-Flow Pattern Testing Methods
+    // ========================================================================
+    //
+    // These methods emit control flow directly based on pattern matching.
+    // Unlike the Operand-returning test_pattern methods above, these take
+    // on_match/on_no_match blocks and emit branches directly.
+
+    /// Test a pattern against a place, emitting control flow.
+    ///
+    /// On successful match, control flows to `on_match`.
+    /// On failure, control flows to `on_no_match`.
+    fn test_pattern_cf(
+        &mut self,
+        pattern: &Pattern,
+        place: &Place,
+        on_match: BasicBlockId,
+        on_no_match: BasicBlockId,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        match &pattern.kind {
+            PatternKind::Wildcard => {
+                // Always matches
+                self.terminate(TerminatorKind::Goto { target: on_match });
+            }
+
+            PatternKind::Binding { subpattern, .. } => {
+                // Binding always succeeds; test subpattern if present
+                if let Some(subpat) = subpattern {
+                    self.test_pattern_cf(subpat, place, on_match, on_no_match, span)?;
+                } else {
+                    self.terminate(TerminatorKind::Goto { target: on_match });
+                }
+            }
+
+            PatternKind::Literal(lit) => {
+                // Compare the value with the literal
+                let lit_const = lower_literal_to_constant(lit, &pattern.ty);
+                let lit_operand = Operand::Constant(lit_const);
+                let value_operand = Operand::Copy(place.clone());
+
+                // Create comparison
+                let cmp_result = self.new_temp(Type::bool(), span);
+                self.push_assign(
+                    Place::local(cmp_result),
+                    Rvalue::BinaryOp {
+                        op: MirBinOp::Eq,
+                        left: value_operand,
+                        right: lit_operand,
+                    },
+                );
+
+                // Branch based on comparison
+                self.terminate(TerminatorKind::SwitchInt {
+                    discr: Operand::Copy(Place::local(cmp_result)),
+                    targets: SwitchTargets::new(vec![(1, on_match)], on_no_match),
+                });
+            }
+
+            PatternKind::Variant { variant_idx, fields, .. } => {
+                // Get discriminant and compare with expected variant
+                let discr_temp = self.new_temp(Type::i32(), span);
+                self.push_assign(
+                    Place::local(discr_temp),
+                    Rvalue::Discriminant(place.clone()),
+                );
+
+                if fields.is_empty() {
+                    // No fields to test, just check discriminant
+                    self.terminate(TerminatorKind::SwitchInt {
+                        discr: Operand::Copy(Place::local(discr_temp)),
+                        targets: SwitchTargets::new(
+                            vec![(*variant_idx as u128, on_match)],
+                            on_no_match,
+                        ),
+                    });
+                } else {
+                    // Need to check discriminant first, then test field patterns
+                    let fields_test_block = self.builder_mut().new_block();
+                    self.terminate(TerminatorKind::SwitchInt {
+                        discr: Operand::Copy(Place::local(discr_temp)),
+                        targets: SwitchTargets::new(
+                            vec![(*variant_idx as u128, fields_test_block)],
+                            on_no_match,
+                        ),
+                    });
+
+                    // Test each field pattern on the downcasted variant
+                    self.builder_mut().switch_to(fields_test_block);
+                    *self.current_block_mut() = fields_test_block;
+                    let variant_place = place.project(PlaceElem::Downcast(*variant_idx));
+                    self.test_pattern_fields_cf(fields, &variant_place, on_match, on_no_match, span)?;
+                }
+            }
+
+            PatternKind::Tuple(pats) => {
+                // Test each element pattern sequentially
+                self.test_pattern_tuple_cf(pats, place, on_match, on_no_match, span)?;
+            }
+
+            PatternKind::Struct { fields, .. } => {
+                // Test each field pattern sequentially
+                let field_pats: Vec<_> = fields.iter()
+                    .map(|f| (f.field_idx, &f.pattern))
+                    .collect();
+                self.test_pattern_struct_fields_cf(&field_pats, place, on_match, on_no_match, span)?;
+            }
+
+            PatternKind::Or(alternatives) => {
+                // Try each alternative; succeed if any matches
+                if alternatives.is_empty() {
+                    self.terminate(TerminatorKind::Goto { target: on_no_match });
+                } else {
+                    self.test_pattern_or_cf(alternatives, place, on_match, on_no_match, span)?;
+                }
+            }
+
+            PatternKind::Ref { inner, .. } => {
+                // Dereference and test inner pattern
+                let deref_place = place.project(PlaceElem::Deref);
+                self.test_pattern_cf(inner, &deref_place, on_match, on_no_match, span)?;
+            }
+
+            PatternKind::Slice { prefix, slice, suffix } => {
+                // For slices, check length first, then test element patterns
+                self.test_pattern_slice_cf(prefix, slice, suffix, place, on_match, on_no_match, span)?;
+            }
+
+            PatternKind::Range { start, end, inclusive } => {
+                // Range pattern: check if value is within range
+                let value_operand = Operand::Copy(place.clone());
+
+                let mut checks = Vec::new();
+
+                // Check lower bound: value >= start
+                if let Some(start_pat) = start {
+                    if let PatternKind::Literal(lit) = &start_pat.kind {
+                        let start_const = lower_literal_to_constant(lit, &pattern.ty);
+                        let cmp_result = self.new_temp(Type::bool(), span);
+                        self.push_assign(
+                            Place::local(cmp_result),
+                            Rvalue::BinaryOp {
+                                op: MirBinOp::Ge,
+                                left: value_operand.clone(),
+                                right: Operand::Constant(start_const),
+                            },
+                        );
+                        checks.push(cmp_result);
+                    }
+                }
+
+                // Check upper bound: value < end (or value <= end if inclusive)
+                if let Some(end_pat) = end {
+                    if let PatternKind::Literal(lit) = &end_pat.kind {
+                        let end_const = lower_literal_to_constant(lit, &pattern.ty);
+                        let cmp_result = self.new_temp(Type::bool(), span);
+                        let cmp_op = if *inclusive { MirBinOp::Le } else { MirBinOp::Lt };
+                        self.push_assign(
+                            Place::local(cmp_result),
+                            Rvalue::BinaryOp {
+                                op: cmp_op,
+                                left: value_operand,
+                                right: Operand::Constant(end_const),
+                            },
+                        );
+                        checks.push(cmp_result);
+                    }
+                }
+
+                // Combine checks with AND
+                if checks.is_empty() {
+                    // No bounds - always matches
+                    self.terminate(TerminatorKind::Goto { target: on_match });
+                } else if checks.len() == 1 {
+                    // Single check
+                    self.terminate(TerminatorKind::SwitchInt {
+                        discr: Operand::Copy(Place::local(checks[0])),
+                        targets: SwitchTargets::new(vec![(1, on_match)], on_no_match),
+                    });
+                } else {
+                    // Multiple checks - AND them together
+                    let combined = self.new_temp(Type::bool(), span);
+                    self.push_assign(
+                        Place::local(combined),
+                        Rvalue::BinaryOp {
+                            op: MirBinOp::BitAnd,
+                            left: Operand::Copy(Place::local(checks[0])),
+                            right: Operand::Copy(Place::local(checks[1])),
+                        },
+                    );
+                    self.terminate(TerminatorKind::SwitchInt {
+                        discr: Operand::Copy(Place::local(combined)),
+                        targets: SwitchTargets::new(vec![(1, on_match)], on_no_match),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Test a sequence of tuple element patterns with control flow.
+    fn test_pattern_tuple_cf(
+        &mut self,
+        pats: &[Pattern],
+        place: &Place,
+        final_match: BasicBlockId,
+        on_no_match: BasicBlockId,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if pats.is_empty() {
+            self.terminate(TerminatorKind::Goto { target: final_match });
+            return Ok(());
+        }
+
+        // Save the original block - this is where the first test must go
+        let original_block = self.current_block();
+
+        // Create intermediate blocks for each pattern test
+        let mut next_block = final_match;
+        for (i, pat) in pats.iter().enumerate().rev() {
+            let field_place = place.project(PlaceElem::Field(i as u32));
+            if i == 0 {
+                // First pattern test - must use the ORIGINAL block
+                self.builder_mut().switch_to(original_block);
+                *self.current_block_mut() = original_block;
+                self.test_pattern_cf(pat, &field_place, next_block, on_no_match, span)?;
+            } else {
+                // Create a new block for this test
+                let test_block = self.builder_mut().new_block();
+                self.builder_mut().switch_to(test_block);
+                *self.current_block_mut() = test_block;
+                self.test_pattern_cf(pat, &field_place, next_block, on_no_match, span)?;
+                next_block = test_block;
+            }
+        }
+        Ok(())
+    }
+
+    /// Test field patterns for variant (positional fields) with control flow.
+    fn test_pattern_fields_cf(
+        &mut self,
+        pats: &[Pattern],
+        place: &Place,
+        final_match: BasicBlockId,
+        on_no_match: BasicBlockId,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if pats.is_empty() {
+            self.terminate(TerminatorKind::Goto { target: final_match });
+            return Ok(());
+        }
+
+        // Save the original block - this is where the first test must go
+        let original_block = self.current_block();
+
+        let mut current_target = final_match;
+        for (i, pat) in pats.iter().enumerate().rev() {
+            let field_place = place.project(PlaceElem::Field(i as u32));
+            if i == 0 {
+                // First pattern in sequence - must use the ORIGINAL block
+                self.builder_mut().switch_to(original_block);
+                *self.current_block_mut() = original_block;
+                self.test_pattern_cf(pat, &field_place, current_target, on_no_match, span)?;
+            } else {
+                let next_block = self.builder_mut().new_block();
+                self.builder_mut().switch_to(next_block);
+                *self.current_block_mut() = next_block;
+                self.test_pattern_cf(pat, &field_place, current_target, on_no_match, span)?;
+                current_target = next_block;
+            }
+        }
+        Ok(())
+    }
+
+    /// Test struct field patterns (named fields) with control flow.
+    fn test_pattern_struct_fields_cf(
+        &mut self,
+        fields: &[(u32, &Pattern)],
+        place: &Place,
+        final_match: BasicBlockId,
+        on_no_match: BasicBlockId,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if fields.is_empty() {
+            self.terminate(TerminatorKind::Goto { target: final_match });
+            return Ok(());
+        }
+
+        // Save the original block - this is where the first test must go
+        let original_block = self.current_block();
+
+        let mut current_target = final_match;
+        for (i, (field_idx, pat)) in fields.iter().enumerate().rev() {
+            let field_place = place.project(PlaceElem::Field(*field_idx));
+            if i == 0 {
+                // First pattern in sequence - must use the ORIGINAL block
+                self.builder_mut().switch_to(original_block);
+                *self.current_block_mut() = original_block;
+                self.test_pattern_cf(pat, &field_place, current_target, on_no_match, span)?;
+            } else {
+                let next_block = self.builder_mut().new_block();
+                self.builder_mut().switch_to(next_block);
+                *self.current_block_mut() = next_block;
+                self.test_pattern_cf(pat, &field_place, current_target, on_no_match, span)?;
+                current_target = next_block;
+            }
+        }
+        Ok(())
+    }
+
+    /// Test or-pattern alternatives with control flow.
+    fn test_pattern_or_cf(
+        &mut self,
+        alternatives: &[Pattern],
+        place: &Place,
+        on_match: BasicBlockId,
+        final_no_match: BasicBlockId,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        // Try each alternative; if any matches, go to on_match
+        // If all fail, go to final_no_match
+        for (i, alt) in alternatives.iter().enumerate() {
+            let next_try = if i + 1 < alternatives.len() {
+                self.builder_mut().new_block()
+            } else {
+                final_no_match
+            };
+            self.test_pattern_cf(alt, place, on_match, next_try, span)?;
+            if i + 1 < alternatives.len() {
+                self.builder_mut().switch_to(next_try);
+                *self.current_block_mut() = next_try;
+            }
+        }
+        Ok(())
+    }
+
+    /// Test slice pattern with control flow.
+    fn test_pattern_slice_cf(
+        &mut self,
+        prefix: &[Pattern],
+        slice: &Option<Box<Pattern>>,
+        suffix: &[Pattern],
+        place: &Place,
+        on_match: BasicBlockId,
+        on_no_match: BasicBlockId,
+        span: Span,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let min_len = (prefix.len() + suffix.len()) as u64;
+
+        // Check length first
+        let len_temp = self.new_temp(Type::usize(), span);
+        self.push_assign(
+            Place::local(len_temp),
+            Rvalue::Len(place.clone()),
+        );
+
+        // Compare length
+        let len_ok = self.new_temp(Type::bool(), span);
+        if slice.is_some() {
+            // With rest pattern: len >= min_len
+            self.push_assign(
+                Place::local(len_ok),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::Ge,
+                    left: Operand::Copy(Place::local(len_temp)),
+                    right: Operand::Constant(Constant::new(
+                        Type::usize(),
+                        ConstantKind::Int(min_len as i128),
+                    )),
+                },
+            );
+        } else {
+            // Without rest: len == min_len
+            self.push_assign(
+                Place::local(len_ok),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::Eq,
+                    left: Operand::Copy(Place::local(len_temp)),
+                    right: Operand::Constant(Constant::new(
+                        Type::usize(),
+                        ConstantKind::Int(min_len as i128),
+                    )),
+                },
+            );
+        }
+
+        // Branch on length check
+        let elements_block = self.builder_mut().new_block();
+        self.terminate(TerminatorKind::SwitchInt {
+            discr: Operand::Copy(Place::local(len_ok)),
+            targets: SwitchTargets::new(vec![(1, elements_block)], on_no_match),
+        });
+
+        // Test prefix and suffix patterns
+        self.builder_mut().switch_to(elements_block);
+        *self.current_block_mut() = elements_block;
+
+        if prefix.is_empty() && suffix.is_empty() {
+            self.terminate(TerminatorKind::Goto { target: on_match });
+        } else {
+            let mut current_target = on_match;
+
+            // Test suffix patterns (in reverse order)
+            for (i, pat) in suffix.iter().enumerate().rev() {
+                let offset_from_end = (suffix.len() - 1 - i) as u64;
+                let idx_place = place.project(PlaceElem::ConstantIndex {
+                    offset: offset_from_end,
+                    min_length: min_len,
+                    from_end: true,
+                });
+                if i == 0 && prefix.is_empty() {
+                    self.test_pattern_cf(pat, &idx_place, current_target, on_no_match, span)?;
+                } else if i == 0 {
+                    let prefix_block = self.builder_mut().new_block();
+                    self.test_pattern_cf(pat, &idx_place, prefix_block, on_no_match, span)?;
+                    self.builder_mut().switch_to(prefix_block);
+                    *self.current_block_mut() = prefix_block;
+                    current_target = on_match;
+                } else {
+                    let next_block = self.builder_mut().new_block();
+                    self.builder_mut().switch_to(next_block);
+                    *self.current_block_mut() = next_block;
+                    self.test_pattern_cf(pat, &idx_place, current_target, on_no_match, span)?;
+                    current_target = next_block;
+                }
+            }
+
+            // Test prefix patterns (in reverse order)
+            for (i, pat) in prefix.iter().enumerate().rev() {
+                let idx_place = place.project(PlaceElem::ConstantIndex {
+                    offset: i as u64,
+                    min_length: min_len,
+                    from_end: false,
+                });
+                if i == 0 {
+                    self.test_pattern_cf(pat, &idx_place, current_target, on_no_match, span)?;
+                } else {
+                    let next_block = self.builder_mut().new_block();
+                    self.builder_mut().switch_to(next_block);
+                    *self.current_block_mut() = next_block;
+                    self.test_pattern_cf(pat, &idx_place, current_target, on_no_match, span)?;
+                    current_target = next_block;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Bind pattern variables to a place with control flow semantics.
+    ///
+    /// This version creates new temps directly and inserts them into the local map,
+    /// which is needed for proper pattern binding in match arms.
+    fn bind_pattern_cf(&mut self, pattern: &Pattern, place: &Place) -> Result<(), Vec<Diagnostic>> {
+        match &pattern.kind {
+            PatternKind::Binding { local_id, mutable, subpattern } => {
+                let mir_local = self.new_temp(pattern.ty.clone(), pattern.span);
+                self.local_map_mut().insert(*local_id, mir_local);
+
+                // Check if this is a ref binding
+                if pattern.ty.is_ref() {
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Ref {
+                            place: place.clone(),
+                            mutable: *mutable,
+                        },
+                    );
+                } else {
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Use(Operand::Copy(place.clone())),
+                    );
+                }
+
+                if let Some(subpat) = subpattern {
+                    self.bind_pattern_cf(subpat, &Place::local(mir_local))?;
+                }
+            }
+            PatternKind::Tuple(pats) => {
+                for (i, pat) in pats.iter().enumerate() {
+                    let field_place = place.project(PlaceElem::Field(i as u32));
+                    self.bind_pattern_cf(pat, &field_place)?;
+                }
+            }
+            PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    let field_place = place.project(PlaceElem::Field(field.field_idx));
+                    self.bind_pattern_cf(&field.pattern, &field_place)?;
+                }
+            }
+            PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Range { .. } => {
+                // Nothing to bind
+            }
+            PatternKind::Variant { variant_idx, fields, .. } => {
+                let variant_place = place.project(PlaceElem::Downcast(*variant_idx));
+                for (i, field_pat) in fields.iter().enumerate() {
+                    let field_place = variant_place.project(PlaceElem::Field(i as u32));
+                    self.bind_pattern_cf(field_pat, &field_place)?;
+                }
+            }
+            PatternKind::Slice { prefix, slice, suffix } => {
+                let min_length = (prefix.len() + suffix.len()) as u64;
+
+                for (i, pat) in prefix.iter().enumerate() {
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: i as u64,
+                        min_length,
+                        from_end: false,
+                    });
+                    self.bind_pattern_cf(pat, &idx_place)?;
+                }
+
+                for (i, pat) in suffix.iter().enumerate() {
+                    let offset_from_end = (suffix.len() - 1 - i) as u64;
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: offset_from_end,
+                        min_length,
+                        from_end: true,
+                    });
+                    self.bind_pattern_cf(pat, &idx_place)?;
+                }
+
+                if let Some(rest_pat) = slice {
+                    let subslice_place = place.project(PlaceElem::Subslice {
+                        from: prefix.len() as u64,
+                        to: suffix.len() as u64,
+                        from_end: true,
+                    });
+                    self.bind_pattern_cf(rest_pat, &subslice_place)?;
+                }
+            }
+            PatternKind::Or(alternatives) => {
+                if let Some(first_alt) = alternatives.first() {
+                    self.bind_pattern_cf(first_alt, place)?;
+                }
+            }
+            PatternKind::Ref { inner, .. } => {
+                let deref_place = place.project(PlaceElem::Deref);
+                self.bind_pattern_cf(inner, &deref_place)?;
             }
         }
         Ok(())

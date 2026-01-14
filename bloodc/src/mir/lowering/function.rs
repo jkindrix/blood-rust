@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use crate::hir::{
     self, Body, Crate as HirCrate, DefId, Expr, ExprKind, RecordFieldExpr,
-    LocalId, LiteralValue, MatchArm, Pattern, PatternKind, Stmt, Type, TypeKind,
+    LocalId, MatchArm, Pattern, Stmt, Type, TypeKind,
 };
-use crate::ast::{BinOp, UnaryOp};
+use crate::ast::UnaryOp;
 use crate::span::Span;
 use crate::diagnostics::Diagnostic;
 use crate::effects::std_effects::StandardEffects;
@@ -17,11 +17,11 @@ use crate::mir::body::MirBody;
 use crate::mir::types::{
     BasicBlockId, Statement, StatementKind, Terminator, TerminatorKind,
     Place, PlaceElem, Operand, Rvalue, Constant, ConstantKind,
-    BinOp as MirBinOp, UnOp as MirUnOp, AggregateKind, SwitchTargets,
+    UnOp as MirUnOp, AggregateKind, SwitchTargets,
 };
 
 use super::LoopContext;
-use super::util::{convert_binop, lower_literal_to_constant, is_irrefutable_pattern, ExprLowering, LoopContextInfo};
+use super::util::{is_irrefutable_pattern, ExprLowering, LoopContextInfo};
 
 // ============================================================================
 // Function Lowering
@@ -820,7 +820,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         // Refutable patterns would need control flow for match/no-match branches
         if is_irrefutable_pattern(pattern) {
             // Bind pattern variables
-            self.bind_pattern(pattern, &init_place)?;
+            self.bind_pattern_cf(pattern, &init_place)?;
 
             // For irrefutable let, return the initialized value
             // The type checking determines whether this is used as a condition
@@ -845,12 +845,12 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             let join_block = self.builder.new_block();
 
             // Generate the pattern test and conditional branch
-            self.test_pattern(pattern, &init_place, match_block, no_match_block, span)?;
+            self.test_pattern_cf(pattern, &init_place, match_block, no_match_block, span)?;
 
             // Match block: bind variables and set result to true
             self.builder.switch_to(match_block);
             self.current_block = match_block;
-            self.bind_pattern(pattern, &init_place)?;
+            self.bind_pattern_cf(pattern, &init_place)?;
             self.push_assign(
                 Place::local(result),
                 Rvalue::Use(Operand::Constant(Constant::new(
@@ -880,470 +880,9 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         }
     }
 
-    /// Generate MIR to test if a pattern matches a value.
-    ///
-    /// This emits the conditional branch based on whether the pattern matches.
-    /// On success, continues to `on_match`; on failure, continues to `on_no_match`.
-    fn test_pattern(
-        &mut self,
-        pattern: &Pattern,
-        place: &Place,
-        on_match: BasicBlockId,
-        on_no_match: BasicBlockId,
-        span: Span,
-    ) -> Result<(), Vec<Diagnostic>> {
-        match &pattern.kind {
-            PatternKind::Wildcard => {
-                // Always matches
-                self.terminate(TerminatorKind::Goto { target: on_match });
-            }
-
-            PatternKind::Binding { subpattern, .. } => {
-                // Binding always succeeds; test subpattern if present
-                if let Some(subpat) = subpattern {
-                    self.test_pattern(subpat, place, on_match, on_no_match, span)?;
-                } else {
-                    self.terminate(TerminatorKind::Goto { target: on_match });
-                }
-            }
-
-            PatternKind::Literal(lit) => {
-                // Compare the value with the literal
-                let lit_const = lower_literal_to_constant(lit, &pattern.ty);
-                let lit_operand = Operand::Constant(lit_const);
-                let value_operand = Operand::Copy(place.clone());
-
-                // Create comparison
-                let cmp_result = self.new_temp(Type::bool(), span);
-                self.push_assign(
-                    Place::local(cmp_result),
-                    Rvalue::BinaryOp {
-                        op: MirBinOp::Eq,
-                        left: value_operand,
-                        right: lit_operand,
-                    },
-                );
-
-                // Branch based on comparison
-                self.terminate(TerminatorKind::SwitchInt {
-                    discr: Operand::Copy(Place::local(cmp_result)),
-                    targets: SwitchTargets::new(vec![(1, on_match)], on_no_match),
-                });
-            }
-
-            PatternKind::Variant { variant_idx, fields, .. } => {
-                // Get discriminant and compare with expected variant
-                let discr_temp = self.new_temp(Type::i32(), span);
-                self.push_assign(
-                    Place::local(discr_temp),
-                    Rvalue::Discriminant(place.clone()),
-                );
-
-                if fields.is_empty() {
-                    // No fields to test, just check discriminant
-                    self.terminate(TerminatorKind::SwitchInt {
-                        discr: Operand::Copy(Place::local(discr_temp)),
-                        targets: SwitchTargets::new(
-                            vec![(*variant_idx as u128, on_match)],
-                            on_no_match,
-                        ),
-                    });
-                } else {
-                    // Need to check discriminant first, then test field patterns
-                    let fields_test_block = self.builder.new_block();
-                    self.terminate(TerminatorKind::SwitchInt {
-                        discr: Operand::Copy(Place::local(discr_temp)),
-                        targets: SwitchTargets::new(
-                            vec![(*variant_idx as u128, fields_test_block)],
-                            on_no_match,
-                        ),
-                    });
-
-                    // Test each field pattern on the downcasted variant
-                    // The Downcast projection tells codegen we're inside a variant,
-                    // so Field projections will be offset by 1 for the discriminant tag.
-                    self.builder.switch_to(fields_test_block);
-                    self.current_block = fields_test_block;
-                    let variant_place = place.project(PlaceElem::Downcast(*variant_idx));
-                    self.test_pattern_fields(fields, &variant_place, on_match, on_no_match, span)?;
-                }
-            }
-
-            PatternKind::Tuple(pats) => {
-                // Test each element pattern sequentially
-                self.test_pattern_tuple(pats, place, on_match, on_no_match, span)?;
-            }
-
-            PatternKind::Struct { fields, .. } => {
-                // Test each field pattern sequentially
-                let field_pats: Vec<_> = fields.iter()
-                    .map(|f| (f.field_idx, &f.pattern))
-                    .collect();
-                self.test_pattern_struct_fields(&field_pats, place, on_match, on_no_match, span)?;
-            }
-
-            PatternKind::Or(alternatives) => {
-                // Try each alternative; succeed if any matches
-                if alternatives.is_empty() {
-                    self.terminate(TerminatorKind::Goto { target: on_no_match });
-                } else {
-                    self.test_pattern_or(alternatives, place, on_match, on_no_match, span)?;
-                }
-            }
-
-            PatternKind::Ref { inner, .. } => {
-                // Dereference and test inner pattern
-                let deref_place = place.project(PlaceElem::Deref);
-                self.test_pattern(inner, &deref_place, on_match, on_no_match, span)?;
-            }
-
-            PatternKind::Slice { prefix, slice, suffix } => {
-                // For slices, check length first, then test element patterns
-                self.test_pattern_slice(prefix, slice, suffix, place, on_match, on_no_match, span)?;
-            }
-
-            PatternKind::Range { start, end, inclusive } => {
-                // Range pattern: check if value is within range
-                let value_operand = Operand::Copy(place.clone());
-
-                // Generate range check: start <= value && value < end (or value <= end if inclusive)
-                let mut checks = Vec::new();
-
-                // Check lower bound: value >= start
-                if let Some(start_pat) = start {
-                    if let PatternKind::Literal(lit) = &start_pat.kind {
-                        let start_const = lower_literal_to_constant(lit, &pattern.ty);
-                        let cmp_result = self.new_temp(Type::bool(), span);
-                        self.push_assign(
-                            Place::local(cmp_result),
-                            Rvalue::BinaryOp {
-                                op: MirBinOp::Ge,
-                                left: value_operand.clone(),
-                                right: Operand::Constant(start_const),
-                            },
-                        );
-                        checks.push(cmp_result);
-                    }
-                }
-
-                // Check upper bound: value < end (or value <= end if inclusive)
-                if let Some(end_pat) = end {
-                    if let PatternKind::Literal(lit) = &end_pat.kind {
-                        let end_const = lower_literal_to_constant(lit, &pattern.ty);
-                        let cmp_result = self.new_temp(Type::bool(), span);
-                        let cmp_op = if *inclusive { MirBinOp::Le } else { MirBinOp::Lt };
-                        self.push_assign(
-                            Place::local(cmp_result),
-                            Rvalue::BinaryOp {
-                                op: cmp_op,
-                                left: value_operand,
-                                right: Operand::Constant(end_const),
-                            },
-                        );
-                        checks.push(cmp_result);
-                    }
-                }
-
-                // Combine checks with AND
-                if checks.is_empty() {
-                    // No bounds - always matches (shouldn't happen in practice)
-                    self.terminate(TerminatorKind::Goto { target: on_match });
-                } else if checks.len() == 1 {
-                    // Single check
-                    self.terminate(TerminatorKind::SwitchInt {
-                        discr: Operand::Copy(Place::local(checks[0])),
-                        targets: SwitchTargets::new(vec![(1, on_match)], on_no_match),
-                    });
-                } else {
-                    // Multiple checks - AND them together
-                    let combined = self.new_temp(Type::bool(), span);
-                    self.push_assign(
-                        Place::local(combined),
-                        Rvalue::BinaryOp {
-                            op: MirBinOp::BitAnd,
-                            left: Operand::Copy(Place::local(checks[0])),
-                            right: Operand::Copy(Place::local(checks[1])),
-                        },
-                    );
-                    self.terminate(TerminatorKind::SwitchInt {
-                        discr: Operand::Copy(Place::local(combined)),
-                        targets: SwitchTargets::new(vec![(1, on_match)], on_no_match),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Test a sequence of tuple element patterns.
-    fn test_pattern_tuple(
-        &mut self,
-        pats: &[Pattern],
-        place: &Place,
-        final_match: BasicBlockId,
-        on_no_match: BasicBlockId,
-        span: Span,
-    ) -> Result<(), Vec<Diagnostic>> {
-        if pats.is_empty() {
-            self.terminate(TerminatorKind::Goto { target: final_match });
-            return Ok(());
-        }
-
-        // Save the original block - this is where the first test must go
-        let original_block = self.current_block;
-
-        // Create intermediate blocks for each pattern test
-        let mut next_block = final_match;
-        for (i, pat) in pats.iter().enumerate().rev() {
-            let field_place = place.project(PlaceElem::Field(i as u32));
-            if i == 0 {
-                // First pattern test - must use the ORIGINAL block, not the current one
-                // (current_block may have been changed by previous iterations)
-                self.builder.switch_to(original_block);
-                self.current_block = original_block;
-                self.test_pattern(pat, &field_place, next_block, on_no_match, span)?;
-            } else {
-                // Create a new block for this test
-                let test_block = self.builder.new_block();
-                self.builder.switch_to(test_block);
-                self.current_block = test_block;
-                self.test_pattern(pat, &field_place, next_block, on_no_match, span)?;
-                next_block = test_block;
-            }
-        }
-        Ok(())
-    }
-
-    /// Test field patterns for variant/struct.
-    fn test_pattern_fields(
-        &mut self,
-        pats: &[Pattern],
-        place: &Place,
-        final_match: BasicBlockId,
-        on_no_match: BasicBlockId,
-        span: Span,
-    ) -> Result<(), Vec<Diagnostic>> {
-        if pats.is_empty() {
-            self.terminate(TerminatorKind::Goto { target: final_match });
-            return Ok(());
-        }
-
-        // Save the original block - this is where the first test must go
-        let original_block = self.current_block;
-
-        let mut current_target = final_match;
-        for (i, pat) in pats.iter().enumerate().rev() {
-            let field_place = place.project(PlaceElem::Field(i as u32));
-            if i == 0 {
-                // First pattern in sequence - must use the ORIGINAL block
-                self.builder.switch_to(original_block);
-                self.current_block = original_block;
-                self.test_pattern(pat, &field_place, current_target, on_no_match, span)?;
-            } else {
-                let next_block = self.builder.new_block();
-                self.builder.switch_to(next_block);
-                self.current_block = next_block;
-                self.test_pattern(pat, &field_place, current_target, on_no_match, span)?;
-                current_target = next_block;
-            }
-        }
-        Ok(())
-    }
-
-    /// Test struct field patterns.
-    fn test_pattern_struct_fields(
-        &mut self,
-        fields: &[(u32, &Pattern)],
-        place: &Place,
-        final_match: BasicBlockId,
-        on_no_match: BasicBlockId,
-        span: Span,
-    ) -> Result<(), Vec<Diagnostic>> {
-        if fields.is_empty() {
-            self.terminate(TerminatorKind::Goto { target: final_match });
-            return Ok(());
-        }
-
-        // Save the original block - this is where the first test must go
-        let original_block = self.current_block;
-
-        let mut current_target = final_match;
-        for (i, (field_idx, pat)) in fields.iter().enumerate().rev() {
-            let field_place = place.project(PlaceElem::Field(*field_idx));
-            if i == 0 {
-                // First pattern in sequence - must use the ORIGINAL block
-                self.builder.switch_to(original_block);
-                self.current_block = original_block;
-                self.test_pattern(pat, &field_place, current_target, on_no_match, span)?;
-            } else {
-                let next_block = self.builder.new_block();
-                self.builder.switch_to(next_block);
-                self.current_block = next_block;
-                self.test_pattern(pat, &field_place, current_target, on_no_match, span)?;
-                current_target = next_block;
-            }
-        }
-        Ok(())
-    }
-
-    /// Test or-pattern alternatives.
-    fn test_pattern_or(
-        &mut self,
-        alternatives: &[Pattern],
-        place: &Place,
-        on_match: BasicBlockId,
-        final_no_match: BasicBlockId,
-        span: Span,
-    ) -> Result<(), Vec<Diagnostic>> {
-        // Try each alternative; if any matches, go to on_match
-        // If all fail, go to final_no_match
-        for (i, alt) in alternatives.iter().enumerate() {
-            let next_try = if i + 1 < alternatives.len() {
-                self.builder.new_block()
-            } else {
-                final_no_match
-            };
-            self.test_pattern(alt, place, on_match, next_try, span)?;
-            if i + 1 < alternatives.len() {
-                self.builder.switch_to(next_try);
-                self.current_block = next_try;
-            }
-        }
-        Ok(())
-    }
-
-    /// Test slice pattern.
-    fn test_pattern_slice(
-        &mut self,
-        prefix: &[Pattern],
-        slice: &Option<Box<Pattern>>,
-        suffix: &[Pattern],
-        place: &Place,
-        on_match: BasicBlockId,
-        on_no_match: BasicBlockId,
-        span: Span,
-    ) -> Result<(), Vec<Diagnostic>> {
-        let min_len = (prefix.len() + suffix.len()) as u64;
-
-        // Check length first
-        let len_temp = self.new_temp(Type::usize(), span);
-        self.push_assign(
-            Place::local(len_temp),
-            Rvalue::Len(place.clone()),
-        );
-
-        // Compare length
-        let len_ok = self.new_temp(Type::bool(), span);
-        if slice.is_some() {
-            // With rest pattern: len >= min_len
-            self.push_assign(
-                Place::local(len_ok),
-                Rvalue::BinaryOp {
-                    op: MirBinOp::Ge,
-                    left: Operand::Copy(Place::local(len_temp)),
-                    right: Operand::Constant(Constant::new(
-                        Type::usize(),
-                        ConstantKind::Int(min_len as i128),
-                    )),
-                },
-            );
-        } else {
-            // Without rest: len == min_len
-            self.push_assign(
-                Place::local(len_ok),
-                Rvalue::BinaryOp {
-                    op: MirBinOp::Eq,
-                    left: Operand::Copy(Place::local(len_temp)),
-                    right: Operand::Constant(Constant::new(
-                        Type::usize(),
-                        ConstantKind::Int(min_len as i128),
-                    )),
-                },
-            );
-        }
-
-        // Branch on length check
-        let elements_block = self.builder.new_block();
-        self.terminate(TerminatorKind::SwitchInt {
-            discr: Operand::Copy(Place::local(len_ok)),
-            targets: SwitchTargets::new(vec![(1, elements_block)], on_no_match),
-        });
-
-        // Test prefix and suffix patterns
-        self.builder.switch_to(elements_block);
-        self.current_block = elements_block;
-
-        // For simplicity, test all patterns sequentially
-        // In a full implementation, we'd handle prefix/suffix/rest properly
-        if prefix.is_empty() && suffix.is_empty() {
-            self.terminate(TerminatorKind::Goto { target: on_match });
-        } else {
-            // Test prefix patterns
-            let mut current_target = on_match;
-
-            // Save blocks for first pattern tests
-            let prefix_start_block = elements_block;
-
-            for (i, pat) in prefix.iter().enumerate().rev() {
-                let idx_place = place.project(PlaceElem::ConstantIndex {
-                    offset: i as u64,
-                    min_length: min_len,
-                    from_end: false,
-                });
-                if i == 0 && suffix.is_empty() {
-                    // First pattern test - must use the ORIGINAL elements block
-                    self.builder.switch_to(prefix_start_block);
-                    self.current_block = prefix_start_block;
-                    self.test_pattern(pat, &idx_place, current_target, on_no_match, span)?;
-                } else if i == 0 {
-                    // Continue to suffix testing - use the ORIGINAL elements block
-                    self.builder.switch_to(prefix_start_block);
-                    self.current_block = prefix_start_block;
-                    let suffix_block = self.builder.new_block();
-                    self.test_pattern(pat, &idx_place, suffix_block, on_no_match, span)?;
-                    self.builder.switch_to(suffix_block);
-                    self.current_block = suffix_block;
-                    current_target = on_match;
-                } else {
-                    let next_block = self.builder.new_block();
-                    self.builder.switch_to(next_block);
-                    self.current_block = next_block;
-                    self.test_pattern(pat, &idx_place, current_target, on_no_match, span)?;
-                    current_target = next_block;
-                }
-            }
-
-            // Test suffix patterns - save the starting block for suffix iteration
-            let suffix_start_block = self.current_block;
-
-            for (i, pat) in suffix.iter().enumerate().rev() {
-                let offset_from_end = (suffix.len() - 1 - i) as u64;
-                let idx_place = place.project(PlaceElem::ConstantIndex {
-                    offset: offset_from_end,
-                    min_length: min_len,
-                    from_end: true,
-                });
-                if i == 0 {
-                    // First pattern in suffix - must use the saved starting block
-                    self.builder.switch_to(suffix_start_block);
-                    self.current_block = suffix_start_block;
-                    self.test_pattern(pat, &idx_place, current_target, on_no_match, span)?;
-                } else {
-                    let next_block = self.builder.new_block();
-                    self.builder.switch_to(next_block);
-                    self.current_block = next_block;
-                    self.test_pattern(pat, &idx_place, current_target, on_no_match, span)?;
-                    current_target = next_block;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    // NOTE: `lower_literal_to_constant` and `is_irrefutable_pattern` are now shared
-    // utility functions in `util.rs`. Use `lower_literal_to_constant()` and
-    // `is_irrefutable_pattern()` directly.
+    // NOTE: Pattern testing and binding methods (test_pattern_cf, bind_pattern_cf, etc.)
+    // are now provided by the ExprLowering trait in util.rs. FunctionLowering implements
+    // that trait and uses its default implementations for pattern matching.
 
     /// Lower a block expression.
     fn lower_block(
@@ -1559,7 +1098,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             };
 
             // Test pattern - on match go to body, on no-match go to next arm
-            self.test_pattern(&arm.pattern, &scrut_place, arm_body_blocks[i], next_arm_test, span)?;
+            self.test_pattern_cf(&arm.pattern, &scrut_place, arm_body_blocks[i], next_arm_test, span)?;
 
             if i + 1 < arms.len() {
                 // Position for next arm's test
@@ -1579,7 +1118,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             self.current_block = arm_body_blocks[i];
 
             // Bind pattern variables
-            self.bind_pattern(&arm.pattern, &scrut_place)?;
+            self.bind_pattern_cf(&arm.pattern, &scrut_place)?;
 
             // Check guard if present
             if let Some(guard) = &arm.guard {
@@ -2112,121 +1651,6 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         }
     }
 
-    /// Bind pattern variables to a place.
-    fn bind_pattern(&mut self, pattern: &Pattern, place: &Place) -> Result<(), Vec<Diagnostic>> {
-        match &pattern.kind {
-            PatternKind::Binding { local_id, mutable, subpattern } => {
-                let mir_local = self.new_temp(pattern.ty.clone(), pattern.span);
-                self.local_map.insert(*local_id, mir_local);
-
-                // Check if this is a ref binding (pattern type is a reference)
-                // In that case, we need to create a reference to the place instead of copying
-                if pattern.ty.is_ref() {
-                    // This is a ref binding (e.g., ref x or ref rest @ ..)
-                    // Create a reference to the place
-                    self.push_assign(
-                        Place::local(mir_local),
-                        Rvalue::Ref {
-                            place: place.clone(),
-                            mutable: *mutable,
-                        },
-                    );
-                } else {
-                    // Regular binding - copy the value
-                    self.push_assign(
-                        Place::local(mir_local),
-                        Rvalue::Use(Operand::Copy(place.clone())),
-                    );
-                }
-
-                if let Some(subpat) = subpattern {
-                    self.bind_pattern(subpat, &Place::local(mir_local))?;
-                }
-            }
-            PatternKind::Tuple(pats) => {
-                for (i, pat) in pats.iter().enumerate() {
-                    let field_place = place.project(PlaceElem::Field(i as u32));
-                    self.bind_pattern(pat, &field_place)?;
-                }
-            }
-            PatternKind::Struct { fields, .. } => {
-                for field in fields {
-                    let field_place = place.project(PlaceElem::Field(field.field_idx));
-                    self.bind_pattern(&field.pattern, &field_place)?;
-                }
-            }
-            PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Range { .. } => {
-                // Nothing to bind - these patterns only test values
-            }
-            PatternKind::Variant { variant_idx, fields, .. } => {
-                // For enum variant patterns, first downcast to the variant,
-                // then bind each field pattern.
-                // The Downcast projection tells codegen we're inside a variant,
-                // so Field projections will be offset by 1 for the discriminant tag.
-                let variant_place = place.project(PlaceElem::Downcast(*variant_idx));
-                for (i, field_pat) in fields.iter().enumerate() {
-                    let field_place = variant_place.project(PlaceElem::Field(i as u32));
-                    self.bind_pattern(field_pat, &field_place)?;
-                }
-            }
-            PatternKind::Slice { prefix, slice, suffix } => {
-                // Calculate minimum length required for this pattern
-                let min_length = (prefix.len() + suffix.len()) as u64;
-
-                // Bind prefix patterns using ConstantIndex from start
-                for (i, pat) in prefix.iter().enumerate() {
-                    let idx_place = place.project(PlaceElem::ConstantIndex {
-                        offset: i as u64,
-                        min_length,
-                        from_end: false,
-                    });
-                    self.bind_pattern(pat, &idx_place)?;
-                }
-
-                // Bind suffix patterns using ConstantIndex from end
-                // Suffix is reversed: last element in suffix is at offset 0 from end
-                for (i, pat) in suffix.iter().enumerate() {
-                    let offset_from_end = (suffix.len() - 1 - i) as u64;
-                    let idx_place = place.project(PlaceElem::ConstantIndex {
-                        offset: offset_from_end,
-                        min_length,
-                        from_end: true,
-                    });
-                    self.bind_pattern(pat, &idx_place)?;
-                }
-
-                // Bind the rest pattern (..) if present
-                if let Some(rest_pat) = slice {
-                    // The rest covers elements from prefix.len() to (len - suffix.len())
-                    // Use Subslice projection
-                    let subslice_place = place.project(PlaceElem::Subslice {
-                        from: prefix.len() as u64,
-                        to: suffix.len() as u64,
-                        from_end: true,
-                    });
-                    self.bind_pattern(rest_pat, &subslice_place)?;
-                }
-            }
-            PatternKind::Or(alternatives) => {
-                // Or-patterns in binding context: all alternatives must bind the same variables
-                // with the same types. We bind using the first alternative since they're all
-                // equivalent for binding purposes.
-                //
-                // Note: This assumes type checking has verified all alternatives bind the same
-                // variables. For refutable or-patterns, match compilation should handle
-                // determining which alternative actually matched.
-                if let Some(first_alt) = alternatives.first() {
-                    self.bind_pattern(first_alt, place)?;
-                }
-            }
-            PatternKind::Ref { inner, .. } => {
-                // For reference patterns, bind the inner pattern to a dereferenced place
-                let deref_place = place.project(PlaceElem::Deref);
-                self.bind_pattern(inner, &deref_place)?;
-            }
-        }
-        Ok(())
-    }
 
     // Helper methods
 
