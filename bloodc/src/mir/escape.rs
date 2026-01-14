@@ -174,6 +174,14 @@ impl EscapeResults {
 
     /// Get recommended memory tier for a local.
     pub fn recommended_tier(&self, local: LocalId) -> MemoryTier {
+        // Stack-promotable locals can always use stack allocation.
+        // This includes:
+        // 1. Locals with NoEscape state that aren't effect/closure-captured
+        // 2. Primitive types (values are copied, storage doesn't need to escape)
+        if self.stack_promotable.contains(&local) {
+            return MemoryTier::Stack;
+        }
+
         // Effect-captured values need region allocation for snapshot
         if self.is_effect_captured(local) {
             return MemoryTier::Region;
@@ -271,11 +279,14 @@ impl EscapeAnalyzer {
         // Return place always escapes (returned to caller)
         self.states.insert(body.return_place(), EscapeState::ArgEscape);
 
-        // Parameters may escape depending on their usage
-        // For now, mark them as potentially escaping
-        for param_id in body.param_ids() {
-            self.states.insert(param_id, EscapeState::ArgEscape);
-        }
+        // Parameters start as NoEscape and only escape if they're:
+        // - Stored into a global or field of something that escapes
+        // - Returned from the function
+        // - Passed to a function that might escape them
+        //
+        // This allows reference parameters that are only read locally to remain
+        // stack-allocated with no generation checks, which is critical for performance.
+        // The dataflow analysis below will promote their escape state if needed.
 
         // First pass: collect closure captures
         for (_bb_id, block) in body.blocks() {
@@ -327,15 +338,26 @@ impl EscapeAnalyzer {
         }
 
         // Determine stack-promotable allocations
+        // Build a map from LocalId to type for efficient lookup
+        let local_types: HashMap<LocalId, &crate::hir::Type> = body.locals.iter()
+            .map(|l| (l.id, &l.ty))
+            .collect();
+
         let mut stack_promotable = HashSet::new();
         for (local, state) in &self.states {
+            let ty = local_types.get(local);
+
             // Can stack-allocate if:
-            // 1. NoEscape state
-            // 2. Not captured by effect operations
-            // 3. Not captured by an escaping closure
-            let can_stack = state.can_stack_allocate()
+            // 1. Type is primitive/Copy (values are copied, not referenced)
+            //    - For Copy types, escape state only tracks value flow, not storage
+            //    - Storage can always be on the stack since values are copied on use
+            // 2. OR NoEscape state AND not captured by effect operations or closures
+            let is_copy_type = ty.map(|t| t.is_primitive() || t.is_unit()).unwrap_or(false);
+            let escape_allows = state.can_stack_allocate()
                 && !self.effect_captured.contains(local)
                 && !self.is_captured_by_escaping_closure(*local);
+
+            let can_stack = is_copy_type || escape_allows;
             if can_stack {
                 stack_promotable.insert(*local);
             }
@@ -568,6 +590,15 @@ mod tests {
         DefId::new(0)
     }
 
+    /// Returns a non-primitive type (tuple) for testing escape analysis.
+    ///
+    /// Primitive/Copy types are always stack-promotable regardless of escape state
+    /// because they are copied by value, not referenced. To test that escape analysis
+    /// correctly prevents stack allocation, we need non-primitive types.
+    fn non_primitive_ty() -> Type {
+        Type::tuple(vec![Type::i32()])
+    }
+
     #[test]
     fn test_escape_state_ordering() {
         assert!(EscapeState::NoEscape < EscapeState::ArgEscape);
@@ -649,10 +680,13 @@ mod tests {
     fn test_escape_analyzer_with_assignment() {
         let mut body = MirBody::new(dummy_def_id(), Span::dummy());
 
+        // Use non-primitive type - primitives are always stack-promotable
+        let ty = non_primitive_ty();
+
         // _0: return place
-        body.new_local(Type::i32(), LocalKind::ReturnPlace, Span::dummy());
+        body.new_local(ty.clone(), LocalKind::ReturnPlace, Span::dummy());
         // _1: temporary
-        let temp = body.new_local(Type::i32(), LocalKind::Temp, Span::dummy());
+        let temp = body.new_local(ty.clone(), LocalKind::Temp, Span::dummy());
 
         let bb = body.new_block();
 
@@ -672,6 +706,7 @@ mod tests {
 
         // temp should now escape because it's assigned to return place
         assert_eq!(results.get(temp), EscapeState::ArgEscape);
+        // For non-primitive types, escaping values cannot be stack-allocated
         assert!(!results.can_stack_allocate(temp));
     }
 
@@ -709,8 +744,11 @@ mod tests {
     fn test_escape_analyzer_effect_capture() {
         let mut body = MirBody::new(dummy_def_id(), Span::dummy());
 
-        body.new_local(Type::i32(), LocalKind::ReturnPlace, Span::dummy());
-        let temp = body.new_local(Type::i32(), LocalKind::Temp, Span::dummy());
+        // Use non-primitive type - primitives are always stack-promotable
+        let ty = non_primitive_ty();
+
+        body.new_local(ty.clone(), LocalKind::ReturnPlace, Span::dummy());
+        let temp = body.new_local(ty.clone(), LocalKind::Temp, Span::dummy());
 
         let bb = body.new_block();
         let target_bb = body.new_block();
@@ -733,7 +771,7 @@ mod tests {
 
         // temp is effect-captured
         assert!(results.is_effect_captured(temp));
-        // Cannot stack allocate effect-captured values
+        // For non-primitive types, effect-captured values cannot be stack-allocated
         assert!(!results.can_stack_allocate(temp));
     }
 
@@ -850,8 +888,8 @@ mod tests {
         // _0: return place (where closure will be returned)
         let ret = body.new_local(Type::unit(), LocalKind::ReturnPlace, Span::dummy());
         let _ = ret;
-        // _1: captured value
-        let captured = body.new_local(Type::i32(), LocalKind::Temp, Span::dummy());
+        // _1: captured value - use non-primitive type for stack allocation test
+        let captured = body.new_local(non_primitive_ty(), LocalKind::Temp, Span::dummy());
         // _2: closure
         let closure = body.new_local(Type::unit(), LocalKind::Temp, Span::dummy());
 
@@ -889,7 +927,7 @@ mod tests {
         // The captured value should also escape (propagated from closure)
         assert_eq!(results.get(captured), EscapeState::ArgEscape);
 
-        // Cannot stack allocate captured value
+        // For non-primitive types, captured values that escape cannot be stack-allocated
         assert!(!results.can_stack_allocate(captured));
     }
 
@@ -1076,14 +1114,18 @@ mod tests {
         }
     }
 
-    // Soundness property: stack_promotable implies not effect_captured
+    // Soundness property: for non-primitive types, stack_promotable implies not effect_captured
+    // Note: This invariant only applies to non-primitive types. Primitives can be both
+    // effect_captured AND stack_promotable because they are copied by value.
     #[test]
     fn test_property_stack_promotable_implies_not_effect_captured() {
         let mut body = MirBody::new(dummy_def_id(), Span::dummy());
-        body.new_local(Type::i32(), LocalKind::ReturnPlace, Span::dummy());
+        // Use non-primitive types - the invariant doesn't apply to primitives
+        let ty = non_primitive_ty();
+        body.new_local(ty.clone(), LocalKind::ReturnPlace, Span::dummy());
 
         let temps: Vec<_> = (0..5)
-            .map(|_| body.new_local(Type::i32(), LocalKind::Temp, Span::dummy()))
+            .map(|_| body.new_local(ty.clone(), LocalKind::Temp, Span::dummy()))
             .collect();
 
         let bb = body.new_block();
@@ -1226,7 +1268,8 @@ mod tests {
     #[test]
     fn test_property_return_place_always_escapes() {
         let mut body = MirBody::new(dummy_def_id(), Span::dummy());
-        body.new_local(Type::i32(), LocalKind::ReturnPlace, Span::dummy());
+        // Use non-primitive type - primitives are always stack-promotable
+        body.new_local(non_primitive_ty(), LocalKind::ReturnPlace, Span::dummy());
 
         let bb = body.new_block();
         body.set_terminator(bb, Terminator::new(TerminatorKind::Return, Span::dummy()));
@@ -1240,15 +1283,18 @@ mod tests {
             "return place has state {:?}, expected ArgEscape or higher",
             return_state
         );
+        // For non-primitive types, return place should not be stack-promotable
         assert!(
             !results.can_stack_allocate(body.return_place()),
-            "return place should not be stack_promotable"
+            "return place should not be stack_promotable for non-primitive types"
         );
     }
 
-    // Property: function arguments escape at least as ArgEscape
+    // Property: function arguments that are only used locally remain NoEscape
+    // This is critical for performance - reference parameters that are only read
+    // can be stack-allocated without generation checks.
     #[test]
-    fn test_property_args_escape() {
+    fn test_property_args_noescaping_unless_used() {
         let mut body = MirBody::new(dummy_def_id(), Span::dummy());
         body.new_local(Type::i32(), LocalKind::ReturnPlace, Span::dummy());
         let arg1 = body.new_local(Type::i32(), LocalKind::Arg, Span::dummy());
@@ -1262,11 +1308,12 @@ mod tests {
         let mut analyzer = EscapeAnalyzer::new();
         let results = analyzer.analyze(&body);
 
+        // Arguments that are not used should remain NoEscape
         for &arg in &[arg1, arg2] {
             let state = results.get(arg);
-            assert!(
-                state >= EscapeState::ArgEscape,
-                "arg {:?} has state {:?}, expected ArgEscape or higher",
+            assert_eq!(
+                state, EscapeState::NoEscape,
+                "unused arg {:?} has state {:?}, expected NoEscape",
                 arg,
                 state
             );
