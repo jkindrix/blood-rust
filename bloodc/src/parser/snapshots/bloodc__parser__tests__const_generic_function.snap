@@ -286,7 +286,32 @@ Program {
                                                 Expr {
                                                     kind: Call {
                                                         callee: Expr {
-                                                            kind: Default,
+                                                            kind: Path(
+                                                                ExprPath {
+                                                                    segments: [
+                                                                        ExprPathSegment {
+                                                                            name: Spanned {
+                                                                                node: SymbolU32 {
+                                                                                    value: 7,
+                                                                                },
+                                                                                span: Span {
+                                                                                    start: 68,
+                                                                                    end: 75,
+                                                                                    start_line: 1,
+                                                                                    start_col: 69,
+                                                                                },
+                                                                            },
+                                                                            args: None,
+                                                                        },
+                                                                    ],
+                                                                    span: Span {
+                                                                        start: 68,
+                                                                        end: 75,
+                                                                        start_line: 1,
+                                                                        start_col: 69,
+                                                                    },
+                                                                },
+                                                            ),
                                                             span: Span {
                                                                 start: 68,
                                                                 end: 75,

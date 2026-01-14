@@ -10,6 +10,7 @@ Program {
             FnDecl {
                 attrs: [
                     Attribute {
+                        is_inner: false,
                         path: [
                             Spanned {
                                 node: SymbolU32 {

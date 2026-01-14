@@ -261,8 +261,9 @@ impl<'src> Parser<'src> {
                 self.error_expected_one_of(&["type name", "`&`", "`*`", "`[`", "`(`", "`fn`", "`forall`", "`!`"]);
                 self.advance(); // consume `mut`
                 // Try to parse and discard the following type for better error recovery
+                // Include contextual keywords in addition to standard type identifiers
                 if self.check(TokenKind::TypeIdent)
-                    || self.check(TokenKind::Ident)
+                    || self.check_ident()
                     || self.check(TokenKind::SelfUpper)
                     || self.check(TokenKind::Crate)
                     || self.check(TokenKind::Super)
@@ -294,8 +295,9 @@ impl<'src> Parser<'src> {
         let mut segments = Vec::new();
 
         loop {
+            // Allow contextual keywords as path segments (for identifier patterns)
             let name = if self.check(TokenKind::TypeIdent)
-                || self.check(TokenKind::Ident)
+                || self.check_ident()
                 || self.check(TokenKind::SelfUpper)
                 || self.check(TokenKind::Crate)
                 || self.check(TokenKind::Super)
@@ -381,7 +383,8 @@ impl<'src> Parser<'src> {
             }
 
             let field_start = self.current.span;
-            let name = if self.check(TokenKind::Ident) {
+            // Allow contextual keywords as field names
+            let name = if self.check_ident() {
                 self.advance();
                 self.spanned_symbol()
             } else {
@@ -444,9 +447,9 @@ impl<'src> Parser<'src> {
             let mut rest = None;
 
             loop {
-                // Check for row variable
+                // Check for row variable (allow contextual keywords as variable names)
                 if self.try_consume(TokenKind::Or) {
-                    if self.check(TokenKind::Ident) {
+                    if self.check_ident() {
                         self.advance();
                         rest = Some(self.spanned_symbol());
                     }
@@ -456,8 +459,8 @@ impl<'src> Parser<'src> {
                 effects.push(self.parse_type());
 
                 if !self.try_consume(TokenKind::Comma) {
-                    // Check for trailing row variable
-                    if self.try_consume(TokenKind::Or) && self.check(TokenKind::Ident) {
+                    // Check for trailing row variable (allow contextual keywords)
+                    if self.try_consume(TokenKind::Or) && self.check_ident() {
                         self.advance();
                         rest = Some(self.spanned_symbol());
                     }
@@ -473,8 +476,8 @@ impl<'src> Parser<'src> {
             };
         }
 
-        // Just a type variable
-        if self.check(TokenKind::Ident) {
+        // Just a type variable (allow contextual keywords)
+        if self.check_ident() {
             self.advance();
             let var = self.spanned_symbol();
             return EffectRow {

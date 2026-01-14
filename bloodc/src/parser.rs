@@ -165,6 +165,18 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Parse a single expression (used for macro expansion).
+    #[must_use = "parsing has no effect if the result is not used"]
+    pub fn parse_expr_for_macro(&mut self) -> Result<crate::ast::Expr, Vec<Diagnostic>> {
+        let expr = self.parse_expr();
+
+        if self.errors.is_empty() {
+            Ok(expr)
+        } else {
+            Err(std::mem::take(&mut self.errors))
+        }
+    }
+
     // ============================================================
     // Token handling
     // ============================================================
@@ -172,6 +184,26 @@ impl<'src> Parser<'src> {
     /// Check if the current token matches the given kind.
     fn check(&self, kind: TokenKind) -> bool {
         self.current.kind == kind
+    }
+
+    /// Check if a token kind is a contextual keyword that can be used as an identifier.
+    /// These keywords are reserved but can appear as identifiers in certain contexts
+    /// (field names, parameter names, function names, etc.).
+    fn is_contextual_keyword(kind: TokenKind) -> bool {
+        matches!(kind, TokenKind::Default | TokenKind::Handle)
+    }
+
+    /// Check if the current token is an identifier or a contextual keyword.
+    /// Use this instead of `check(TokenKind::Ident)` when parsing names that
+    /// should allow contextual keywords.
+    fn check_ident(&self) -> bool {
+        self.current.kind == TokenKind::Ident || Self::is_contextual_keyword(self.current.kind)
+    }
+
+    /// Check if the next token is an identifier or a contextual keyword.
+    #[allow(dead_code)] // Infrastructure for lookahead parsing
+    fn check_ident_next(&self) -> bool {
+        self.next.kind == TokenKind::Ident || Self::is_contextual_keyword(self.next.kind)
     }
 
     /// Check if we've reached the end of input.
@@ -754,16 +786,60 @@ impl<'src> Parser<'src> {
     fn parse_attributes(&mut self) -> Vec<Attribute> {
         let mut attrs = Vec::new();
 
-        while self.check(TokenKind::Hash) {
-            attrs.push(self.parse_attribute());
+        loop {
+            if self.check(TokenKind::DocComment) {
+                // Convert doc comment to #[doc = "content"] attribute
+                attrs.push(self.parse_doc_comment_as_attribute());
+            } else if self.check(TokenKind::Hash) {
+                attrs.push(self.parse_attribute());
+            } else {
+                break;
+            }
         }
 
         attrs
     }
 
+    /// Parse a doc comment (`///`) and convert it to a `#[doc = "..."]` attribute.
+    ///
+    /// This follows the same approach as Rust's `syn` crate where doc comments
+    /// are promoted to attributes. This enables documentation generation and
+    /// makes the parser handle doc comments uniformly with other attributes.
+    fn parse_doc_comment_as_attribute(&mut self) -> Attribute {
+        let span = self.current.span;
+        let text = self.text(&span);
+
+        // Doc comment starts with "/// " or just "///"
+        // Strip the leading "///" to get the content
+        let content = if let Some(stripped) = text.strip_prefix("/// ") {
+            stripped
+        } else if let Some(stripped) = text.strip_prefix("///") {
+            stripped
+        } else {
+            text
+        };
+
+        self.advance(); // consume the doc comment token
+
+        // Create a synthetic #[doc = "content"] attribute
+        let doc_sym = self.intern("doc");
+        Attribute {
+            is_inner: false,
+            path: vec![Spanned::new(doc_sym, span)],
+            args: Some(AttributeArgs::Eq(Literal {
+                kind: LiteralKind::String(content.to_string()),
+                span,
+            })),
+            span,
+        }
+    }
+
     fn parse_attribute(&mut self) -> Attribute {
         let start = self.current.span;
         self.advance(); // consume '#'
+
+        // Check for inner attribute: #![...] vs outer: #[...]
+        let is_inner = self.try_consume(TokenKind::Not);
 
         self.expect(TokenKind::LBracket);
 
@@ -831,6 +907,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::RBracket);
 
         Attribute {
+            is_inner,
             path,
             args,
             span: start.merge(self.previous.span),
@@ -857,6 +934,10 @@ impl<'src> Parser<'src> {
             TokenKind::StringLit => {
                 let s = self.parse_string_literal(text);
                 LiteralKind::String(s)
+            }
+            TokenKind::ByteStringLit => {
+                let bytes = self.parse_byte_string_literal(text);
+                LiteralKind::ByteString(bytes)
             }
             TokenKind::RawStringLit => {
                 let s = self.parse_raw_string_literal(text, 0);
@@ -901,11 +982,13 @@ impl<'src> Parser<'src> {
                 "i32" => Some(IntSuffix::I32),
                 "i64" => Some(IntSuffix::I64),
                 "i128" => Some(IntSuffix::I128),
+                "isize" => Some(IntSuffix::Isize),
                 "u8" => Some(IntSuffix::U8),
                 "u16" => Some(IntSuffix::U16),
                 "u32" => Some(IntSuffix::U32),
                 "u64" => Some(IntSuffix::U64),
                 "u128" => Some(IntSuffix::U128),
+                "usize" => Some(IntSuffix::Usize),
                 _ => {
                     self.error_at(span, &format!("invalid integer suffix '{}'", s), ErrorCode::InvalidInteger);
                     None
@@ -1027,6 +1110,46 @@ impl<'src> Parser<'src> {
                 }
             } else {
                 result.push(c);
+            }
+        }
+
+        result
+    }
+
+    /// Parse a byte string literal like b"..."
+    fn parse_byte_string_literal(&self, text: &str) -> Vec<u8> {
+        // Remove b prefix and quotes, then process escape sequences
+        let inner = &text[2..text.len() - 1];
+        let mut result = Vec::new();
+        let mut chars = inner.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => result.push(b'\n'),
+                    Some('r') => result.push(b'\r'),
+                    Some('t') => result.push(b'\t'),
+                    Some('\\') => result.push(b'\\'),
+                    Some('\'') => result.push(b'\''),
+                    Some('"') => result.push(b'"'),
+                    Some('0') => result.push(0),
+                    Some('x') => {
+                        // Hex escape \xNN
+                        let mut hex = String::new();
+                        for _ in 0..2 {
+                            if let Some(h) = chars.next() {
+                                hex.push(h);
+                            }
+                        }
+                        if let Ok(n) = u8::from_str_radix(&hex, 16) {
+                            result.push(n);
+                        }
+                    }
+                    Some(c) if c.is_ascii() => result.push(c as u8),
+                    _ => {}
+                }
+            } else if c.is_ascii() {
+                result.push(c as u8);
             }
         }
 

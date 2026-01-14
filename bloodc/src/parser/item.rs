@@ -34,6 +34,7 @@ impl<'src> Parser<'src> {
             TokenKind::Bridge => Some(Declaration::Bridge(self.parse_bridge_decl(attrs))),
             TokenKind::Extern => Some(Declaration::Bridge(self.parse_extern_block(attrs))),
             TokenKind::Mod => Some(Declaration::Module(self.parse_mod_decl(attrs, vis))),
+            TokenKind::Macro => Some(Declaration::Macro(self.parse_macro_decl(attrs, vis))),
             // Handle `use` encountered after declarations have started
             // This is an error (imports must come before declarations) but we
             // need to handle it to avoid infinite loops in error recovery
@@ -41,7 +42,7 @@ impl<'src> Parser<'src> {
                 self.error_expected_one_of(&[
                     "`fn`", "`struct`", "`enum`", "`trait`", "`impl`",
                     "`effect`", "`handler`", "`type`", "`const`", "`static`",
-                    "`bridge`", "`extern`", "`mod`",
+                    "`bridge`", "`extern`", "`mod`", "`macro`",
                 ]);
                 // Skip past the use statement to avoid infinite loop
                 while !self.is_at_end()
@@ -60,6 +61,7 @@ impl<'src> Parser<'src> {
                             | TokenKind::Pub
                             | TokenKind::Module
                             | TokenKind::Extern
+                            | TokenKind::Macro
                     )
                 {
                     self.advance();
@@ -70,7 +72,7 @@ impl<'src> Parser<'src> {
                 self.error_expected_one_of(&[
                     "`fn`", "`struct`", "`enum`", "`trait`", "`impl`",
                     "`effect`", "`handler`", "`type`", "`const`", "`static`",
-                    "`bridge`", "`extern`", "`mod`",
+                    "`bridge`", "`extern`", "`mod`", "`macro`",
                 ]);
                 self.synchronize();
                 None
@@ -119,8 +121,8 @@ impl<'src> Parser<'src> {
 
         self.expect(TokenKind::Fn);
 
-        // Parse name
-        let name = if self.check(TokenKind::Ident) {
+        // Parse name (allow contextual keywords as function names)
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -226,54 +228,17 @@ impl<'src> Parser<'src> {
 
     /// Try to parse a self parameter shorthand.
     /// Returns Some(Param) if this is a self shorthand, None otherwise.
+    /// Uses lookahead to avoid consuming tokens before we're sure it's a self param.
     fn try_parse_self_param(&mut self, start: Span) -> Option<Param> {
-        // Case 1: `&self` or `&mut self`
-        if self.check(TokenKind::And) {
-            // Look ahead to see if this is &self or &mut self
-            // We need to be careful not to consume tokens if it's not a self param
+        // Case 1: `&self` - check: current is &, next is self
+        if self.check(TokenKind::And) && self.check_next(TokenKind::SelfLower) {
             self.advance(); // consume &
+            self.advance(); // consume self
+            let self_span = self.previous.span;
 
-            let mutable = self.try_consume(TokenKind::Mut);
-
-            if self.check(TokenKind::SelfLower) {
-                // This is &self or &mut self
-                self.advance(); // consume self
-                let self_span = self.previous.span;
-
-                // Check if there's a colon (explicit type annotation)
-                if self.check(TokenKind::Colon) {
-                    // Has explicit type, parse normally by going back
-                    // Actually, we already consumed &, so we need to handle this differently
-                    // For now, we'll just parse the type annotation
-                    self.advance(); // consume :
-                    let ty = self.parse_type();
-                    return Some(Param {
-                        qualifier: None,
-                        pattern: Pattern {
-                            kind: PatternKind::Ident {
-                                by_ref: false,
-                                mutable: false,
-                                name: Spanned::new(self.intern("self"), self_span),
-                                subpattern: None,
-                            },
-                            span: start.merge(self_span),
-                        },
-                        ty,
-                        span: start.merge(self.previous.span),
-                    });
-                }
-
-                // No explicit type - use &Self or &mut Self
-                let self_type = self.make_self_type(self_span);
-                let ref_type = Type {
-                    kind: TypeKind::Reference {
-                        lifetime: None,
-                        mutable,
-                        inner: Box::new(self_type),
-                    },
-                    span: start.merge(self_span),
-                };
-
+            if self.check(TokenKind::Colon) {
+                self.advance(); // consume :
+                let ty = self.parse_type();
                 return Some(Param {
                     qualifier: None,
                     pattern: Pattern {
@@ -283,32 +248,102 @@ impl<'src> Parser<'src> {
                             name: Spanned::new(self.intern("self"), self_span),
                             subpattern: None,
                         },
-                        span: self_span,
+                        span: start.merge(self_span),
                     },
-                    ty: ref_type,
-                    span: start.merge(self_span),
+                    ty,
+                    span: start.merge(self.previous.span),
                 });
-            } else {
-                // Not a self param, we need to backtrack
-                // Unfortunately we can't easily backtrack in this parser
-                // So we'll handle this as a reference pattern in parse_pattern
-                // For now, we consumed & (and possibly mut), so we need to handle it
-                // This is tricky - let's return None and let the normal path handle it
-                // Actually, we already consumed tokens, so this is a problem.
-                // Let's restructure: only consume if we're sure it's self
             }
+
+            // No explicit type - use &Self
+            let self_type = self.make_self_type(self_span);
+            let ref_type = Type {
+                kind: TypeKind::Reference {
+                    lifetime: None,
+                    mutable: false,
+                    inner: Box::new(self_type),
+                },
+                span: start.merge(self_span),
+            };
+
+            return Some(Param {
+                qualifier: None,
+                pattern: Pattern {
+                    kind: PatternKind::Ident {
+                        by_ref: false,
+                        mutable: false,
+                        name: Spanned::new(self.intern("self"), self_span),
+                        subpattern: None,
+                    },
+                    span: self_span,
+                },
+                ty: ref_type,
+                span: start.merge(self_span),
+            });
         }
 
-        // Case 2: `self` (without reference)
-        if self.check(TokenKind::SelfLower) {
-            // Check if next token is : (explicit type) or , or ) (shorthand)
-            // We need lookahead here
+        // Case 2: `&mut self` - check: current is &, next is mut, after that is self
+        if self.check(TokenKind::And)
+            && self.check_next(TokenKind::Mut)
+            && self.check_after_next(TokenKind::SelfLower)
+        {
+            self.advance(); // consume &
+            self.advance(); // consume mut
             self.advance(); // consume self
             let self_span = self.previous.span;
 
             if self.check(TokenKind::Colon) {
-                // Has explicit type annotation - this is not a shorthand
-                // Go back by using the pattern parsing
+                self.advance(); // consume :
+                let ty = self.parse_type();
+                return Some(Param {
+                    qualifier: None,
+                    pattern: Pattern {
+                        kind: PatternKind::Ident {
+                            by_ref: false,
+                            mutable: false,
+                            name: Spanned::new(self.intern("self"), self_span),
+                            subpattern: None,
+                        },
+                        span: start.merge(self_span),
+                    },
+                    ty,
+                    span: start.merge(self.previous.span),
+                });
+            }
+
+            // No explicit type - use &mut Self
+            let self_type = self.make_self_type(self_span);
+            let ref_type = Type {
+                kind: TypeKind::Reference {
+                    lifetime: None,
+                    mutable: true,
+                    inner: Box::new(self_type),
+                },
+                span: start.merge(self_span),
+            };
+
+            return Some(Param {
+                qualifier: None,
+                pattern: Pattern {
+                    kind: PatternKind::Ident {
+                        by_ref: false,
+                        mutable: false,
+                        name: Spanned::new(self.intern("self"), self_span),
+                        subpattern: None,
+                    },
+                    span: self_span,
+                },
+                ty: ref_type,
+                span: start.merge(self_span),
+            });
+        }
+
+        // Case 3: `self` (without reference)
+        if self.check(TokenKind::SelfLower) {
+            self.advance(); // consume self
+            let self_span = self.previous.span;
+
+            if self.check(TokenKind::Colon) {
                 self.advance(); // consume :
                 let ty = self.parse_type();
                 return Some(Param {
@@ -345,38 +380,16 @@ impl<'src> Parser<'src> {
             });
         }
 
-        // Case 3: `mut self`
-        if self.check(TokenKind::Mut) {
-            // Look ahead to see if next is self
+        // Case 4: `mut self` - check: current is mut, next is self
+        if self.check(TokenKind::Mut) && self.check_next(TokenKind::SelfLower) {
             let mut_span = self.current.span;
             self.advance(); // consume mut
+            self.advance(); // consume self
+            let self_span = self.previous.span;
 
-            if self.check(TokenKind::SelfLower) {
-                self.advance(); // consume self
-                let self_span = self.previous.span;
-
-                if self.check(TokenKind::Colon) {
-                    // Has explicit type
-                    self.advance(); // consume :
-                    let ty = self.parse_type();
-                    return Some(Param {
-                        qualifier: Some(ParamQualifier::Mut),
-                        pattern: Pattern {
-                            kind: PatternKind::Ident {
-                                by_ref: false,
-                                mutable: true,
-                                name: Spanned::new(self.intern("self"), self_span),
-                                subpattern: None,
-                            },
-                            span: mut_span.merge(self_span),
-                        },
-                        ty,
-                        span: start.merge(self.previous.span),
-                    });
-                }
-
-                // No colon - shorthand
-                let self_type = self.make_self_type(self_span);
+            if self.check(TokenKind::Colon) {
+                self.advance(); // consume :
+                let ty = self.parse_type();
                 return Some(Param {
                     qualifier: Some(ParamQualifier::Mut),
                     pattern: Pattern {
@@ -388,17 +401,27 @@ impl<'src> Parser<'src> {
                         },
                         span: mut_span.merge(self_span),
                     },
-                    ty: self_type,
-                    span: start.merge(self_span),
+                    ty,
+                    span: start.merge(self.previous.span),
                 });
             }
 
-            // Not `mut self`, but we consumed `mut`
-            // This will be handled by the qualifier parsing below
-            // We need to return None but remember we consumed mut
-            // Actually this is handled - after we return None, the qualifier parsing
-            // will try to consume mut again, but it's already consumed.
-            // We have a problem here. Let me restructure.
+            // No colon - shorthand
+            let self_type = self.make_self_type(self_span);
+            return Some(Param {
+                qualifier: Some(ParamQualifier::Mut),
+                pattern: Pattern {
+                    kind: PatternKind::Ident {
+                        by_ref: false,
+                        mutable: true,
+                        name: Spanned::new(self.intern("self"), self_span),
+                        subpattern: None,
+                    },
+                    span: mut_span.merge(self_span),
+                },
+                ty: self_type,
+                span: start.merge(self_span),
+            });
         }
 
         None
@@ -671,9 +694,11 @@ impl<'src> Parser<'src> {
 
     fn parse_struct_field(&mut self) -> StructField {
         let start = self.current.span;
+        let attrs = self.parse_attributes();
         let vis = self.parse_visibility();
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as field names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -685,6 +710,7 @@ impl<'src> Parser<'src> {
         let ty = self.parse_type();
 
         StructField {
+            attrs,
             vis,
             name,
             ty,
@@ -804,9 +830,17 @@ impl<'src> Parser<'src> {
 
         let mut operations = Vec::new();
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            // Skip doc comments before operations (they're currently ignored)
+            while matches!(self.current.kind, TokenKind::DocComment) {
+                self.advance();
+            }
+
             // Check if we're at a valid operation start
             if self.check(TokenKind::Op) {
                 operations.push(self.parse_operation_decl());
+            } else if self.check(TokenKind::RBrace) {
+                // Done with operations
+                break;
             } else {
                 // Error recovery: skip invalid token and report error
                 self.error_expected("keyword `op`");
@@ -837,7 +871,8 @@ impl<'src> Parser<'src> {
         let start = self.current.span;
         self.expect(TokenKind::Op);
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as operation names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -940,7 +975,8 @@ impl<'src> Parser<'src> {
 
         let is_mut = self.try_consume(TokenKind::Mut);
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as state variable names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -974,7 +1010,8 @@ impl<'src> Parser<'src> {
         self.advance(); // consume 'return'
 
         self.expect(TokenKind::LParen);
-        let param = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as parameter names
+        let param = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -996,7 +1033,8 @@ impl<'src> Parser<'src> {
         let start = self.current.span;
         self.advance(); // consume 'op'
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as operation names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -1471,7 +1509,8 @@ impl<'src> Parser<'src> {
         let start = self.current.span;
         self.advance(); // consume 'fn'
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as function names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -1535,7 +1574,8 @@ impl<'src> Parser<'src> {
         // Extract ownership annotation from attributes
         let ownership = self.extract_ownership(&attrs);
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as parameter names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -1671,7 +1711,8 @@ impl<'src> Parser<'src> {
     fn parse_bridge_field(&mut self) -> BridgeField {
         let start = self.current.span;
 
-        let name = if self.check(TokenKind::Ident) {
+        // Allow contextual keywords as field names
+        let name = if self.check_ident() {
             self.advance();
             self.spanned_symbol()
         } else {
@@ -1872,5 +1913,426 @@ impl<'src> Parser<'src> {
             body,
             span: start.merge(self.previous.span),
         }
+    }
+
+    // ============================================================
+    // Macro Declaration
+    // ============================================================
+
+    /// Parse a macro declaration.
+    ///
+    /// Syntax:
+    /// ```text
+    /// // Single rule:
+    /// macro name!($arg:expr) => { $arg + $arg }
+    ///
+    /// // Multiple rules:
+    /// macro name! {
+    ///     ($a:expr) => { ... },
+    ///     ($a:expr, $b:expr) => { ... },
+    /// }
+    /// ```
+    pub(super) fn parse_macro_decl(&mut self, attrs: Vec<Attribute>, vis: Visibility) -> MacroDecl {
+        let start = self.current.span;
+        self.advance(); // consume 'macro'
+
+        // Parse macro name (followed by `!`)
+        let name = if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
+            self.advance();
+            self.spanned_symbol()
+        } else {
+            self.error_expected("macro name");
+            Spanned::new(self.intern(""), self.current.span)
+        };
+
+        // Expect `!` after the name
+        self.expect(TokenKind::Not);
+
+        let rules = if self.check(TokenKind::LBrace) {
+            // Multiple rules: macro name! { (pattern) => expansion, ... }
+            self.advance(); // consume '{'
+            self.parse_macro_rules()
+        } else if self.check(TokenKind::LParen) || self.check(TokenKind::LBracket) {
+            // Single rule: macro name!(pattern) => expansion
+            let rule = self.parse_single_macro_rule();
+            vec![rule]
+        } else {
+            self.error_expected_one_of(&["`{`", "`(`", "`[`"]);
+            Vec::new()
+        };
+
+        MacroDecl {
+            attrs,
+            vis,
+            name,
+            rules,
+            span: start.merge(self.previous.span),
+        }
+    }
+
+    /// Parse multiple macro rules inside `{ ... }`.
+    fn parse_macro_rules(&mut self) -> Vec<MacroRule> {
+        let mut rules = Vec::new();
+
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            let rule = self.parse_single_macro_rule();
+            rules.push(rule);
+
+            // Allow trailing comma
+            if !self.try_consume(TokenKind::Comma) {
+                break;
+            }
+        }
+
+        self.expect(TokenKind::RBrace);
+        rules
+    }
+
+    /// Parse a single macro rule: `(pattern) => expansion`
+    fn parse_single_macro_rule(&mut self) -> MacroRule {
+        let start = self.current.span;
+
+        // Parse the pattern (in parentheses, brackets, or braces)
+        let pattern = self.parse_macro_pattern();
+
+        // Expect `=>`
+        self.expect(TokenKind::FatArrow);
+
+        // Parse the expansion
+        let expansion = self.parse_macro_expansion();
+
+        MacroRule {
+            pattern,
+            expansion,
+            span: start.merge(self.previous.span),
+        }
+    }
+
+    /// Parse a macro pattern.
+    fn parse_macro_pattern(&mut self) -> MacroPattern {
+        let start = self.current.span;
+
+        let (delim, close_kind) = if self.check(TokenKind::LParen) {
+            self.advance();
+            (MacroDelimiter::Paren, TokenKind::RParen)
+        } else if self.check(TokenKind::LBracket) {
+            self.advance();
+            (MacroDelimiter::Bracket, TokenKind::RBracket)
+        } else if self.check(TokenKind::LBrace) {
+            self.advance();
+            (MacroDelimiter::Brace, TokenKind::RBrace)
+        } else {
+            self.error_expected_one_of(&["`(`", "`[`", "`{`"]);
+            return MacroPattern {
+                parts: Vec::new(),
+                span: start,
+            };
+        };
+
+        let parts = self.parse_macro_pattern_parts(close_kind);
+
+        self.expect(close_kind);
+
+        // Wrap in a group
+        MacroPattern {
+            parts: vec![MacroPatternPart::Group {
+                delimiter: delim,
+                pattern: parts,
+                span: start.merge(self.previous.span),
+            }],
+            span: start.merge(self.previous.span),
+        }
+    }
+
+    /// Parse the parts of a macro pattern until we hit the closing delimiter.
+    fn parse_macro_pattern_parts(&mut self, close_kind: TokenKind) -> Vec<MacroPatternPart> {
+        let mut parts = Vec::new();
+
+        while !self.check(close_kind) && !self.is_at_end() {
+            if self.check(TokenKind::Dollar) {
+                parts.push(self.parse_macro_capture_or_repetition());
+            } else if self.check(TokenKind::LParen) {
+                // Nested group
+                let start = self.current.span;
+                self.advance();
+                let inner = self.parse_macro_pattern_parts(TokenKind::RParen);
+                self.expect(TokenKind::RParen);
+                parts.push(MacroPatternPart::Group {
+                    delimiter: MacroDelimiter::Paren,
+                    pattern: inner,
+                    span: start.merge(self.previous.span),
+                });
+            } else if self.check(TokenKind::LBracket) {
+                let start = self.current.span;
+                self.advance();
+                let inner = self.parse_macro_pattern_parts(TokenKind::RBracket);
+                self.expect(TokenKind::RBracket);
+                parts.push(MacroPatternPart::Group {
+                    delimiter: MacroDelimiter::Bracket,
+                    pattern: inner,
+                    span: start.merge(self.previous.span),
+                });
+            } else if self.check(TokenKind::LBrace) {
+                let start = self.current.span;
+                self.advance();
+                let inner = self.parse_macro_pattern_parts(TokenKind::RBrace);
+                self.expect(TokenKind::RBrace);
+                parts.push(MacroPatternPart::Group {
+                    delimiter: MacroDelimiter::Brace,
+                    pattern: inner,
+                    span: start.merge(self.previous.span),
+                });
+            } else {
+                // Literal token to match
+                let span = self.current.span;
+                let kind = self.current.kind;
+                self.advance();
+                parts.push(MacroPatternPart::Token(kind, span));
+            }
+        }
+
+        parts
+    }
+
+    /// Parse a macro capture `$name:frag` or repetition `$(...)*`.
+    fn parse_macro_capture_or_repetition(&mut self) -> MacroPatternPart {
+        let start = self.current.span;
+        self.advance(); // consume '$'
+
+        if self.check(TokenKind::LParen) {
+            // Repetition: $(...)*
+            self.advance(); // consume '('
+            let inner = self.parse_macro_pattern_parts(TokenKind::RParen);
+            self.expect(TokenKind::RParen);
+
+            // Optional separator before repetition operator
+            let separator = if !matches!(
+                self.current.kind,
+                TokenKind::Star | TokenKind::Plus | TokenKind::Question
+            ) {
+                let sep = self.current.kind;
+                self.advance();
+                Some(sep)
+            } else {
+                None
+            };
+
+            // Parse repetition kind
+            let kind = if self.try_consume(TokenKind::Star) {
+                RepetitionKind::ZeroOrMore
+            } else if self.try_consume(TokenKind::Plus) {
+                RepetitionKind::OneOrMore
+            } else if self.try_consume(TokenKind::Question) {
+                RepetitionKind::ZeroOrOne
+            } else {
+                self.error_expected_one_of(&["`*`", "`+`", "`?`"]);
+                RepetitionKind::ZeroOrMore
+            };
+
+            MacroPatternPart::Repetition {
+                pattern: inner,
+                separator,
+                kind,
+                span: start.merge(self.previous.span),
+            }
+        } else if self.check(TokenKind::Ident) {
+            // Capture: $name:frag
+            self.advance();
+            let name = self.spanned_symbol();
+
+            self.expect(TokenKind::Colon);
+
+            // Parse fragment specifier
+            let frag_start = self.current.span;
+            if self.check(TokenKind::Ident) {
+                self.advance();
+                let frag_str = self.text(&self.previous.span);
+                let fragment = FragmentKind::from_str(frag_str).unwrap_or_else(|| {
+                    use crate::diagnostics::ErrorCode;
+                    self.error_at(self.previous.span, &format!("unknown fragment specifier `{}`", frag_str), ErrorCode::InvalidMacroFragment);
+                    FragmentKind::Expr
+                });
+
+                MacroPatternPart::Capture {
+                    name,
+                    fragment,
+                    span: start.merge(self.previous.span),
+                }
+            } else {
+                self.error_expected("fragment specifier (expr, ty, pat, ident, literal, block, stmt, item, tt)");
+                MacroPatternPart::Capture {
+                    name,
+                    fragment: FragmentKind::Expr,
+                    span: start.merge(frag_start),
+                }
+            }
+        } else {
+            self.error_expected("capture name or `(`");
+            MacroPatternPart::Token(TokenKind::Dollar, start)
+        }
+    }
+
+    /// Parse a macro expansion.
+    fn parse_macro_expansion(&mut self) -> MacroExpansion {
+        let start = self.current.span;
+
+        // Expansion is typically wrapped in braces, but can also be parentheses or brackets
+        let (close_kind, delim) = if self.check(TokenKind::LBrace) {
+            self.advance();
+            (TokenKind::RBrace, MacroDelimiter::Brace)
+        } else if self.check(TokenKind::LParen) {
+            self.advance();
+            (TokenKind::RParen, MacroDelimiter::Paren)
+        } else if self.check(TokenKind::LBracket) {
+            self.advance();
+            (TokenKind::RBracket, MacroDelimiter::Bracket)
+        } else {
+            self.error_expected_one_of(&["`{`", "`(`", "`[`"]);
+            return MacroExpansion {
+                parts: Vec::new(),
+                span: start,
+            };
+        };
+
+        let inner_parts = self.parse_macro_expansion_parts(close_kind);
+        self.expect(close_kind);
+
+        // Wrap in a group
+        MacroExpansion {
+            parts: vec![MacroExpansionPart::Group {
+                delimiter: delim,
+                parts: inner_parts,
+                span: start.merge(self.previous.span),
+            }],
+            span: start.merge(self.previous.span),
+        }
+    }
+
+    /// Parse the parts of a macro expansion until we hit the closing delimiter.
+    fn parse_macro_expansion_parts(&mut self, close_kind: TokenKind) -> Vec<MacroExpansionPart> {
+        let mut parts = Vec::new();
+        let mut current_tokens: Vec<MacroToken> = Vec::new();
+
+        while !self.check(close_kind) && !self.is_at_end() {
+            if self.check(TokenKind::Dollar) {
+                // Flush accumulated tokens
+                if !current_tokens.is_empty() {
+                    parts.push(MacroExpansionPart::Tokens(std::mem::take(&mut current_tokens)));
+                }
+
+                let dollar_span = self.current.span;
+                self.advance(); // consume '$'
+
+                if self.check(TokenKind::LParen) {
+                    // Repetition: $(...)*
+                    self.advance(); // consume '('
+                    let inner = self.parse_macro_expansion_parts(TokenKind::RParen);
+                    self.expect(TokenKind::RParen);
+
+                    // Optional separator before repetition operator
+                    let separator = if !matches!(
+                        self.current.kind,
+                        TokenKind::Star | TokenKind::Plus | TokenKind::Question
+                    ) {
+                        let sep = MacroToken {
+                            kind: self.current.kind,
+                            span: self.current.span,
+                            hygiene: HygieneId::default(),
+                        };
+                        self.advance();
+                        Some(sep)
+                    } else {
+                        None
+                    };
+
+                    // Expect repetition operator
+                    if !self.try_consume(TokenKind::Star)
+                        && !self.try_consume(TokenKind::Plus)
+                        && !self.try_consume(TokenKind::Question)
+                    {
+                        self.error_expected_one_of(&["`*`", "`+`", "`?`"]);
+                    }
+
+                    parts.push(MacroExpansionPart::Repetition {
+                        parts: inner,
+                        separator,
+                        span: dollar_span.merge(self.previous.span),
+                    });
+                } else if self.check(TokenKind::Ident) {
+                    // Substitution: $name
+                    self.advance();
+                    let name = self.spanned_symbol();
+                    let name_span = name.span;
+
+                    parts.push(MacroExpansionPart::Substitution {
+                        name,
+                        span: dollar_span.merge(name_span),
+                    });
+                } else {
+                    // Just a dollar sign - emit it as a token
+                    current_tokens.push(MacroToken {
+                        kind: TokenKind::Dollar,
+                        span: dollar_span,
+                        hygiene: HygieneId::default(),
+                    });
+                }
+            } else if self.check(TokenKind::LParen) {
+                // Flush accumulated tokens
+                if !current_tokens.is_empty() {
+                    parts.push(MacroExpansionPart::Tokens(std::mem::take(&mut current_tokens)));
+                }
+                // Nested group
+                let start = self.current.span;
+                self.advance();
+                let inner = self.parse_macro_expansion_parts(TokenKind::RParen);
+                self.expect(TokenKind::RParen);
+                parts.push(MacroExpansionPart::Group {
+                    delimiter: MacroDelimiter::Paren,
+                    parts: inner,
+                    span: start.merge(self.previous.span),
+                });
+            } else if self.check(TokenKind::LBracket) {
+                if !current_tokens.is_empty() {
+                    parts.push(MacroExpansionPart::Tokens(std::mem::take(&mut current_tokens)));
+                }
+                let start = self.current.span;
+                self.advance();
+                let inner = self.parse_macro_expansion_parts(TokenKind::RBracket);
+                self.expect(TokenKind::RBracket);
+                parts.push(MacroExpansionPart::Group {
+                    delimiter: MacroDelimiter::Bracket,
+                    parts: inner,
+                    span: start.merge(self.previous.span),
+                });
+            } else if self.check(TokenKind::LBrace) {
+                if !current_tokens.is_empty() {
+                    parts.push(MacroExpansionPart::Tokens(std::mem::take(&mut current_tokens)));
+                }
+                let start = self.current.span;
+                self.advance();
+                let inner = self.parse_macro_expansion_parts(TokenKind::RBrace);
+                self.expect(TokenKind::RBrace);
+                parts.push(MacroExpansionPart::Group {
+                    delimiter: MacroDelimiter::Brace,
+                    parts: inner,
+                    span: start.merge(self.previous.span),
+                });
+            } else {
+                // Regular token - accumulate it
+                current_tokens.push(MacroToken {
+                    kind: self.current.kind,
+                    span: self.current.span,
+                    hygiene: HygieneId::default(),
+                });
+                self.advance();
+            }
+        }
+
+        // Flush any remaining tokens
+        if !current_tokens.is_empty() {
+            parts.push(MacroExpansionPart::Tokens(current_tokens));
+        }
+
+        parts
     }
 }

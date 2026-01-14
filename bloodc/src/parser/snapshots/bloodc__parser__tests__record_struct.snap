@@ -25,6 +25,7 @@ Program {
                 body: Record(
                     [
                         StructField {
+                            attrs: [],
                             vis: Private,
                             name: Spanned {
                                 node: SymbolU32 {
@@ -79,6 +80,7 @@ Program {
                             },
                         },
                         StructField {
+                            attrs: [],
                             vis: Private,
                             name: Spanned {
                                 node: SymbolU32 {
@@ -133,6 +135,7 @@ Program {
                             },
                         },
                         StructField {
+                            attrs: [],
                             vis: Private,
                             name: Spanned {
                                 node: SymbolU32 {

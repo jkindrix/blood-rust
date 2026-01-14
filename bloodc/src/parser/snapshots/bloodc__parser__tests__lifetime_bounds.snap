@@ -114,6 +114,7 @@ Program {
                 body: Record(
                     [
                         StructField {
+                            attrs: [],
                             vis: Private,
                             name: Spanned {
                                 node: SymbolU32 {

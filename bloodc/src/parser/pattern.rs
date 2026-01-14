@@ -77,7 +77,7 @@ impl<'src> Parser<'src> {
                         // Only Int and Float literals can be preceded by minus.
                         // We already checked for IntLit/FloatLit token, so other variants
                         // should never occur here.
-                        LiteralKind::String(_) | LiteralKind::Char(_) | LiteralKind::Bool(_) => {
+                        LiteralKind::String(_) | LiteralKind::ByteString(_) | LiteralKind::Char(_) | LiteralKind::Bool(_) => {
                             // Unreachable: we check for IntLit/FloatLit before calling parse_literal
                         }
                     }
@@ -159,7 +159,8 @@ impl<'src> Parser<'src> {
                 self.advance();
                 let mutable = self.try_consume(TokenKind::Mut);
 
-                let name = if self.check(TokenKind::Ident) {
+                // Allow contextual keywords as identifiers
+                let name = if self.check_ident() {
                     self.advance();
                     self.spanned_symbol()
                 } else {
@@ -187,7 +188,8 @@ impl<'src> Parser<'src> {
             TokenKind::Mut => {
                 self.advance();
 
-                let name = if self.check(TokenKind::Ident) {
+                // Allow contextual keywords as identifiers
+                let name = if self.check_ident() {
                     self.advance();
                     self.spanned_symbol()
                 } else {
@@ -213,7 +215,9 @@ impl<'src> Parser<'src> {
             }
 
             // Identifier, path, struct, or tuple struct pattern
-            TokenKind::Ident | TokenKind::TypeIdent | TokenKind::SelfLower | TokenKind::SelfUpper => {
+            // Also include contextual keywords that can be used as identifiers
+            TokenKind::Ident | TokenKind::TypeIdent | TokenKind::SelfLower | TokenKind::SelfUpper
+            | TokenKind::Default | TokenKind::Handle => {
                 self.parse_ident_or_path_pattern()
             }
 
@@ -343,7 +347,8 @@ impl<'src> Parser<'src> {
             }
 
             let field_start = self.current.span;
-            let name = if self.check(TokenKind::Ident) {
+            // Allow contextual keywords as field names
+            let name = if self.check_ident() {
                 self.advance();
                 self.spanned_symbol()
             } else {
