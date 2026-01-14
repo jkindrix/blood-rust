@@ -73,14 +73,22 @@ impl<'a> TypeContext<'a> {
 
     /// Resolve names in a program.
     pub fn resolve_program(&mut self, program: &ast::Program) -> Result<(), Vec<Diagnostic>> {
-        // First pass: collect all top-level definitions
+        // Phase 1: Pre-register all type names so forward references work.
+        // This allows struct A { b: B } to compile when B is defined after A.
+        for decl in &program.declarations {
+            if let Err(e) = self.register_type_name(decl) {
+                self.errors.push(e);
+            }
+        }
+
+        // Phase 2: Collect all top-level definitions (now that all type names are known)
         for decl in &program.declarations {
             if let Err(e) = self.collect_declaration(decl) {
                 self.errors.push(e);
             }
         }
 
-        // Second pass: resolve imports (after all declarations are collected)
+        // Phase 3: Resolve imports (after all declarations are collected)
         for import in &program.imports {
             if let Err(e) = self.resolve_import(import) {
                 self.errors.push(e);
@@ -91,6 +99,61 @@ impl<'a> TypeContext<'a> {
             return Err(self.errors.iter().map(|e| e.to_diagnostic()).collect());
         }
 
+        Ok(())
+    }
+
+    /// Pre-register type names for forward reference support.
+    /// This only registers the name -> DefId mapping, without resolving field types.
+    fn register_type_name(&mut self, decl: &ast::Declaration) -> Result<(), TypeError> {
+        match decl {
+            ast::Declaration::Struct(s) => {
+                let name = self.symbol_to_string(s.name.node);
+                let def_id = self.resolver.define_item(
+                    name.clone(),
+                    hir::DefKind::Struct,
+                    s.span,
+                )?;
+                self.resolver.define_type(name, def_id, s.span)?;
+            }
+            ast::Declaration::Enum(e) => {
+                let name = self.symbol_to_string(e.name.node);
+                let def_id = self.resolver.define_item(
+                    name.clone(),
+                    hir::DefKind::Enum,
+                    e.span,
+                )?;
+                self.resolver.define_type(name, def_id, e.span)?;
+            }
+            ast::Declaration::Type(t) => {
+                let name = self.symbol_to_string(t.name.node);
+                let def_id = self.resolver.define_item(
+                    name.clone(),
+                    hir::DefKind::TypeAlias,
+                    t.span,
+                )?;
+                self.resolver.define_type(name, def_id, t.span)?;
+            }
+            ast::Declaration::Effect(e) => {
+                let name = self.symbol_to_string(e.name.node);
+                let def_id = self.resolver.define_item(
+                    name.clone(),
+                    hir::DefKind::Effect,
+                    e.span,
+                )?;
+                self.resolver.define_type(name, def_id, e.span)?;
+            }
+            ast::Declaration::Trait(t) => {
+                let name = self.symbol_to_string(t.name.node);
+                let def_id = self.resolver.define_item(
+                    name.clone(),
+                    hir::DefKind::Trait,
+                    t.span,
+                )?;
+                self.resolver.define_type(name, def_id, t.span)?;
+            }
+            // Other declarations don't introduce type names that can be forward-referenced
+            _ => {}
+        }
         Ok(())
     }
 
@@ -904,14 +967,20 @@ impl<'a> TypeContext<'a> {
     /// Collect a struct declaration.
     pub(crate) fn collect_struct(&mut self, struct_decl: &ast::StructDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(struct_decl.name.node);
-        let def_id = self.resolver.define_item(
-            name.clone(),
-            hir::DefKind::Struct,
-            struct_decl.span,
-        )?;
 
-        // Also define as a type
-        self.resolver.define_type(name.clone(), def_id, struct_decl.span)?;
+        // Use pre-registered DefId if it exists (from forward reference support phase),
+        // otherwise define the item now
+        let def_id = if let Some(existing_def_id) = self.resolver.lookup_type(&name) {
+            existing_def_id
+        } else {
+            let def_id = self.resolver.define_item(
+                name.clone(),
+                hir::DefKind::Struct,
+                struct_decl.span,
+            )?;
+            self.resolver.define_type(name.clone(), def_id, struct_decl.span)?;
+            def_id
+        };
 
         // Register generic type parameters before processing field types
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1009,14 +1078,20 @@ impl<'a> TypeContext<'a> {
     /// Collect a type alias declaration.
     pub(crate) fn collect_type_alias(&mut self, type_decl: &ast::TypeDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(type_decl.name.node);
-        let def_id = self.resolver.define_item(
-            name.clone(),
-            hir::DefKind::TypeAlias,
-            type_decl.span,
-        )?;
 
-        // Also define as a type so it can be referenced
-        self.resolver.define_type(name.clone(), def_id, type_decl.span)?;
+        // Use pre-registered DefId if it exists (from forward reference support phase),
+        // otherwise define the item now
+        let def_id = if let Some(existing_def_id) = self.resolver.lookup_type(&name) {
+            existing_def_id
+        } else {
+            let def_id = self.resolver.define_item(
+                name.clone(),
+                hir::DefKind::TypeAlias,
+                type_decl.span,
+            )?;
+            self.resolver.define_type(name.clone(), def_id, type_decl.span)?;
+            def_id
+        };
 
         // Register generic type parameters before processing the aliased type
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1072,14 +1147,20 @@ impl<'a> TypeContext<'a> {
     /// Collect an enum declaration.
     pub(crate) fn collect_enum(&mut self, enum_decl: &ast::EnumDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(enum_decl.name.node);
-        let def_id = self.resolver.define_item(
-            name.clone(),
-            hir::DefKind::Enum,
-            enum_decl.span,
-        )?;
 
-        // Also define as a type
-        self.resolver.define_type(name.clone(), def_id, enum_decl.span)?;
+        // Use pre-registered DefId if it exists (from forward reference support phase),
+        // otherwise define the item now
+        let def_id = if let Some(existing_def_id) = self.resolver.lookup_type(&name) {
+            existing_def_id
+        } else {
+            let def_id = self.resolver.define_item(
+                name.clone(),
+                hir::DefKind::Enum,
+                enum_decl.span,
+            )?;
+            self.resolver.define_type(name.clone(), def_id, enum_decl.span)?;
+            def_id
+        };
 
         // Register generic type parameters before processing variant types
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1120,12 +1201,14 @@ impl<'a> TypeContext<'a> {
         for (i, variant) in enum_decl.variants.iter().enumerate() {
             let variant_name = self.symbol_to_string(variant.name.node);
 
-            // Define variant in scope
-            let variant_def_id = self.resolver.define_item(
+            // Define variant as a namespaced item (not in global scope).
+            // Variants are accessed via qualified paths like EnumName::VariantName,
+            // so they shouldn't pollute the global namespace.
+            let variant_def_id = self.resolver.define_namespaced_item(
                 variant_name.clone(),
                 hir::DefKind::Variant,
                 variant.span,
-            )?;
+            );
 
             // Set the parent to the enum def_id for qualified path resolution
             if let Some(def_info) = self.resolver.def_info.get_mut(&variant_def_id) {
@@ -1272,11 +1355,20 @@ impl<'a> TypeContext<'a> {
     /// Collect an effect declaration.
     pub(crate) fn collect_effect(&mut self, effect: &ast::EffectDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(effect.name.node);
-        let def_id = self.resolver.define_item(
-            name.clone(),
-            hir::DefKind::Effect,
-            effect.span,
-        )?;
+
+        // Use pre-registered DefId if it exists (from forward reference support phase),
+        // otherwise define the item now
+        let def_id = if let Some(existing_def_id) = self.resolver.lookup_type(&name) {
+            existing_def_id
+        } else {
+            let def_id = self.resolver.define_item(
+                name.clone(),
+                hir::DefKind::Effect,
+                effect.span,
+            )?;
+            self.resolver.define_type(name.clone(), def_id, effect.span)?;
+            def_id
+        };
 
         // Collect generic parameters
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1714,12 +1806,19 @@ impl<'a> TypeContext<'a> {
     pub(crate) fn collect_trait(&mut self, trait_decl: &ast::TraitDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(trait_decl.name.node);
 
-        // Register the trait
-        let def_id = self.resolver.define_item(
-            name.clone(),
-            hir::DefKind::Trait,
-            trait_decl.span,
-        )?;
+        // Use pre-registered DefId if it exists (from forward reference support phase),
+        // otherwise define the item now
+        let def_id = if let Some(existing_def_id) = self.resolver.lookup_type(&name) {
+            existing_def_id
+        } else {
+            let def_id = self.resolver.define_item(
+                name.clone(),
+                hir::DefKind::Trait,
+                trait_decl.span,
+            )?;
+            self.resolver.define_type(name.clone(), def_id, trait_decl.span)?;
+            def_id
+        };
 
         // Save current generic params and current_impl_self_ty
         let saved_generic_params = std::mem::take(&mut self.generic_params);
