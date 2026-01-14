@@ -1743,6 +1743,313 @@ impl<'a> Arbitrary<'a> for FuzzStatement {
     }
 }
 
+// ============================================================
+// Patterns (for match expressions)
+// ============================================================
+
+/// A pattern for match expressions.
+#[derive(Debug, Clone)]
+pub enum FuzzPattern {
+    /// Wildcard: `_`
+    Wildcard,
+    /// Identifier binding: `x`, `mut x`
+    Binding {
+        mutable: bool,
+        name: FuzzIdent,
+        subpattern: Option<Box<FuzzPattern>>,
+    },
+    /// Literal: `42`, `true`, `"hello"`
+    Literal(FuzzLiteral),
+    /// Tuple: `(a, b, c)`
+    Tuple(Vec<FuzzPattern>),
+    /// Struct: `Point { x, y }`
+    Struct {
+        name: FuzzTypeIdent,
+        fields: Vec<(FuzzIdent, FuzzPattern)>,
+    },
+    /// Variant: `Some(x)`, `None`
+    Variant {
+        name: FuzzTypeIdent,
+        fields: Option<Vec<FuzzPattern>>,
+    },
+    /// Or pattern: `A | B`
+    Or(Vec<FuzzPattern>),
+    /// Range: `0..10`, `'a'..='z'`
+    Range {
+        start: Option<Box<FuzzLiteral>>,
+        end: Option<Box<FuzzLiteral>>,
+        inclusive: bool,
+    },
+    /// Rest: `..`
+    Rest,
+}
+
+impl FuzzPattern {
+    pub fn to_source(&self) -> String {
+        match self {
+            FuzzPattern::Wildcard => "_".to_string(),
+            FuzzPattern::Binding { mutable, name, subpattern } => {
+                let mut s = String::new();
+                if *mutable {
+                    s.push_str("mut ");
+                }
+                s.push_str(&name.to_source());
+                if let Some(sub) = subpattern {
+                    s.push_str(" @ ");
+                    s.push_str(&sub.to_source());
+                }
+                s
+            }
+            FuzzPattern::Literal(lit) => lit.to_source(),
+            FuzzPattern::Tuple(pats) => {
+                let mut s = String::from("(");
+                s.push_str(
+                    &pats
+                        .iter()
+                        .map(|p| p.to_source())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                if pats.len() == 1 {
+                    s.push(',');
+                }
+                s.push(')');
+                s
+            }
+            FuzzPattern::Struct { name, fields } => {
+                let mut s = name.to_source();
+                s.push_str(" { ");
+                s.push_str(
+                    &fields
+                        .iter()
+                        .map(|(n, p)| {
+                            let pat_src = p.to_source();
+                            if n.0 == pat_src {
+                                n.to_source()
+                            } else {
+                                format!("{}: {}", n.to_source(), pat_src)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                s.push_str(" }");
+                s
+            }
+            FuzzPattern::Variant { name, fields } => {
+                let mut s = name.to_source();
+                if let Some(pats) = fields {
+                    s.push('(');
+                    s.push_str(
+                        &pats
+                            .iter()
+                            .map(|p| p.to_source())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                    s.push(')');
+                }
+                s
+            }
+            FuzzPattern::Or(pats) => pats
+                .iter()
+                .map(|p| p.to_source())
+                .collect::<Vec<_>>()
+                .join(" | "),
+            FuzzPattern::Range { start, end, inclusive } => {
+                let mut s = String::new();
+                if let Some(st) = start {
+                    s.push_str(&st.to_source());
+                }
+                s.push_str(if *inclusive { "..=" } else { ".." });
+                if let Some(en) = end {
+                    s.push_str(&en.to_source());
+                }
+                s
+            }
+            FuzzPattern::Rest => "..".to_string(),
+        }
+    }
+
+    fn arbitrary_with_depth(u: &mut Unstructured<'_>, depth: u8) -> arbitrary::Result<Self> {
+        if depth >= MAX_DEPTH {
+            return Self::arbitrary_simple(u);
+        }
+
+        let choice: u8 = u.arbitrary()?;
+        Ok(match choice % 10 {
+            0 | 1 => FuzzPattern::Wildcard,
+            2 | 3 => {
+                let has_sub: bool = u.arbitrary()?;
+                FuzzPattern::Binding {
+                    mutable: u.arbitrary()?,
+                    name: FuzzIdent::arbitrary(u)?,
+                    subpattern: if has_sub && depth < MAX_DEPTH - 1 {
+                        Some(Box::new(FuzzPattern::arbitrary_with_depth(u, depth + 1)?))
+                    } else {
+                        None
+                    },
+                }
+            }
+            4 => FuzzPattern::Literal(FuzzLiteral::arbitrary(u)?),
+            5 => {
+                let count: u8 = u.arbitrary()?;
+                let count = (count % 4) + 1;
+                let mut pats = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    pats.push(FuzzPattern::arbitrary_with_depth(u, depth + 1)?);
+                }
+                FuzzPattern::Tuple(pats)
+            }
+            6 => {
+                let field_count: u8 = u.arbitrary()?;
+                let field_count = field_count % 4;
+                let mut fields = Vec::with_capacity(field_count as usize);
+                for _ in 0..field_count {
+                    fields.push((
+                        FuzzIdent::arbitrary(u)?,
+                        FuzzPattern::arbitrary_with_depth(u, depth + 1)?,
+                    ));
+                }
+                FuzzPattern::Struct {
+                    name: FuzzTypeIdent::arbitrary(u)?,
+                    fields,
+                }
+            }
+            7 => {
+                let has_fields: bool = u.arbitrary()?;
+                FuzzPattern::Variant {
+                    name: FuzzTypeIdent::arbitrary(u)?,
+                    fields: if has_fields {
+                        let count: u8 = u.arbitrary()?;
+                        let count = (count % 3) + 1;
+                        let mut pats = Vec::with_capacity(count as usize);
+                        for _ in 0..count {
+                            pats.push(FuzzPattern::arbitrary_with_depth(u, depth + 1)?);
+                        }
+                        Some(pats)
+                    } else {
+                        None
+                    },
+                }
+            }
+            8 => {
+                let count: u8 = u.arbitrary()?;
+                let count = (count % 3) + 2; // At least 2 alternatives
+                let mut pats = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    pats.push(FuzzPattern::arbitrary_with_depth(u, depth + 1)?);
+                }
+                FuzzPattern::Or(pats)
+            }
+            _ => Self::arbitrary_simple(u)?,
+        })
+    }
+
+    fn arbitrary_simple(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let choice: u8 = u.arbitrary()?;
+        Ok(match choice % 4 {
+            0 => FuzzPattern::Wildcard,
+            1 => FuzzPattern::Binding {
+                mutable: false,
+                name: FuzzIdent::arbitrary(u)?,
+                subpattern: None,
+            },
+            2 => FuzzPattern::Literal(FuzzLiteral::arbitrary(u)?),
+            _ => FuzzPattern::Wildcard,
+        })
+    }
+}
+
+impl<'a> Arbitrary<'a> for FuzzPattern {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Self::arbitrary_with_depth(u, 0)
+    }
+}
+
+/// A match arm: `pattern => expr`
+#[derive(Debug, Clone)]
+pub struct FuzzMatchArm {
+    pub pattern: FuzzPattern,
+    pub guard: Option<FuzzExpr>,
+    pub body: FuzzExpr,
+}
+
+impl FuzzMatchArm {
+    pub fn to_source(&self) -> String {
+        let mut s = self.pattern.to_source();
+        if let Some(guard) = &self.guard {
+            s.push_str(" if ");
+            s.push_str(&guard.to_source());
+        }
+        s.push_str(" => ");
+        s.push_str(&self.body.to_source());
+        s
+    }
+
+    fn arbitrary_with_depth(u: &mut Unstructured<'_>, depth: u8) -> arbitrary::Result<Self> {
+        let has_guard: bool = u.arbitrary()?;
+        Ok(FuzzMatchArm {
+            pattern: FuzzPattern::arbitrary_with_depth(u, depth)?,
+            guard: if has_guard && depth < MAX_DEPTH {
+                Some(FuzzExpr::arbitrary_with_depth(u, depth + 1)?)
+            } else {
+                None
+            },
+            body: FuzzExpr::arbitrary_with_depth(u, depth)?,
+        })
+    }
+}
+
+impl<'a> Arbitrary<'a> for FuzzMatchArm {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Self::arbitrary_with_depth(u, 0)
+    }
+}
+
+/// A match expression.
+#[derive(Debug, Clone)]
+pub struct FuzzMatch {
+    pub scrutinee: FuzzExpr,
+    pub arms: Vec<FuzzMatchArm>,
+}
+
+impl FuzzMatch {
+    pub fn to_source(&self) -> String {
+        let mut s = String::from("match ");
+        s.push_str(&self.scrutinee.to_source());
+        s.push_str(" {\n");
+        for arm in &self.arms {
+            s.push_str("    ");
+            s.push_str(&arm.to_source());
+            s.push_str(",\n");
+        }
+        s.push('}');
+        s
+    }
+
+    fn arbitrary_with_depth(u: &mut Unstructured<'_>, depth: u8) -> arbitrary::Result<Self> {
+        let arm_count: u8 = u.arbitrary()?;
+        let arm_count = (arm_count % 4) + 1; // At least 1 arm
+
+        let mut arms = Vec::with_capacity(arm_count as usize);
+        for _ in 0..arm_count {
+            arms.push(FuzzMatchArm::arbitrary_with_depth(u, depth)?);
+        }
+
+        Ok(FuzzMatch {
+            scrutinee: FuzzExpr::arbitrary_with_depth(u, depth)?,
+            arms,
+        })
+    }
+}
+
+impl<'a> Arbitrary<'a> for FuzzMatch {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Self::arbitrary_with_depth(u, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1756,6 +2063,26 @@ mod tests {
         assert!(!source.is_empty());
         // Should be parseable
         println!("Generated:\n{}", source);
+    }
+
+    #[test]
+    fn test_pattern_generation() {
+        let data = [99u8; 128];
+        let mut u = Unstructured::new(&data);
+        let pattern = FuzzPattern::arbitrary(&mut u).unwrap();
+        let source = pattern.to_source();
+        assert!(!source.is_empty());
+        println!("Pattern:\n{}", source);
+    }
+
+    #[test]
+    fn test_match_generation() {
+        let data = [55u8; 256];
+        let mut u = Unstructured::new(&data);
+        let match_expr = FuzzMatch::arbitrary(&mut u).unwrap();
+        let source = match_expr.to_source();
+        assert!(source.starts_with("match "));
+        println!("Match:\n{}", source);
     }
 
     #[test]

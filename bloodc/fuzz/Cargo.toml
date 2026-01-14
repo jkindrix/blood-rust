@@ -61,5 +61,26 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_typeck_full"
+path = "fuzz_targets/fuzz_typeck_full.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mir_lowering"
+path = "fuzz_targets/fuzz_mir_lowering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_patterns"
+path = "fuzz_targets/fuzz_patterns.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
