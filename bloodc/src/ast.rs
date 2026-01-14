@@ -156,6 +156,8 @@ pub enum Declaration {
     Trait(TraitDecl),
     Bridge(BridgeDecl),
     Module(ModItemDecl),
+    /// Declarative macro definition: `macro name!(...) { ... }`
+    Macro(MacroDecl),
 }
 
 impl Declaration {
@@ -173,6 +175,7 @@ impl Declaration {
             Declaration::Trait(d) => d.span,
             Declaration::Bridge(d) => d.span,
             Declaration::Module(d) => d.span,
+            Declaration::Macro(d) => d.span,
         }
     }
 }
@@ -215,6 +218,8 @@ pub enum Visibility {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute {
+    /// Whether this is an inner attribute (`#![...]`) vs outer (`#[...]`)
+    pub is_inner: bool,
     pub path: Vec<Spanned<Symbol>>,
     pub args: Option<AttributeArgs>,
     pub span: Span,
@@ -317,6 +322,7 @@ pub enum StructBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructField {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<Symbol>,
     pub ty: Type,
@@ -1129,6 +1135,11 @@ pub enum MacroCallKind {
     },
     /// Built-in dbg macro: `dbg!(expr)`
     Dbg(Box<Expr>),
+    /// Built-in matches macro: `matches!(expr, pattern)` returns bool
+    Matches {
+        expr: Box<Expr>,
+        pattern: Box<Pattern>,
+    },
     /// User-defined macro (not yet supported - stored as raw tokens for future expansion)
     Custom {
         delim: MacroDelimiter,
@@ -1319,6 +1330,8 @@ pub enum LiteralKind {
         suffix: Option<FloatSuffix>,
     },
     String(String),
+    /// Byte string literal (b"...")
+    ByteString(Vec<u8>),
     Char(char),
     Bool(bool),
 }
@@ -1330,11 +1343,13 @@ pub enum IntSuffix {
     I32,
     I64,
     I128,
+    Isize,
     U8,
     U16,
     U32,
     U64,
     U128,
+    Usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1467,4 +1482,231 @@ impl Statement {
             Statement::Item(decl) => decl.span(),
         }
     }
+}
+
+// ============================================================
+// Macro System Types
+// ============================================================
+
+/// A hygiene context identifier for macro expansion.
+///
+/// Each macro expansion gets a unique hygiene ID to prevent
+/// accidental variable capture (hygienic macros).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HygieneId(pub u32);
+
+impl Default for HygieneId {
+    fn default() -> Self {
+        HygieneId(0)
+    }
+}
+
+/// A token with hygiene information for macro expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroToken {
+    /// The token kind
+    pub kind: crate::lexer::TokenKind,
+    /// Source span
+    pub span: Span,
+    /// Hygiene context for macro hygiene
+    pub hygiene: HygieneId,
+}
+
+/// A stream of tokens for macro processing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TokenStream {
+    pub tokens: Vec<TokenTree>,
+}
+
+impl TokenStream {
+    pub fn new() -> Self {
+        Self { tokens: Vec::new() }
+    }
+
+    pub fn push(&mut self, tree: TokenTree) {
+        self.tokens.push(tree);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+}
+
+/// A single token or delimited group in a token stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenTree {
+    /// A single token
+    Token(MacroToken),
+    /// A delimited group: `(...)`, `[...]`, `{...}`
+    Group {
+        delimiter: MacroDelimiter,
+        stream: TokenStream,
+        span: Span,
+    },
+}
+
+impl TokenTree {
+    pub fn span(&self) -> Span {
+        match self {
+            TokenTree::Token(t) => t.span,
+            TokenTree::Group { span, .. } => *span,
+        }
+    }
+}
+
+// ============================================================
+// Macro Declarations
+// ============================================================
+
+/// A declarative macro definition: `macro name!(...) { ... }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroDecl {
+    /// Attributes on the macro
+    pub attrs: Vec<Attribute>,
+    /// Visibility
+    pub vis: Visibility,
+    /// Macro name (without the `!`)
+    pub name: Spanned<Symbol>,
+    /// Macro rules (pattern -> expansion pairs)
+    pub rules: Vec<MacroRule>,
+    /// Full span
+    pub span: Span,
+}
+
+/// A single macro rule: `(pattern) => { expansion }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroRule {
+    /// The pattern to match
+    pub pattern: MacroPattern,
+    /// The expansion template
+    pub expansion: MacroExpansion,
+    /// Full span
+    pub span: Span,
+}
+
+/// A macro pattern (what to match in macro invocation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroPattern {
+    pub parts: Vec<MacroPatternPart>,
+    pub span: Span,
+}
+
+/// A part of a macro pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroPatternPart {
+    /// Literal token to match
+    Token(crate::lexer::TokenKind, Span),
+    /// Capture: `$name:frag`
+    Capture {
+        /// The capture name (e.g., `x` in `$x:expr`)
+        name: Spanned<Symbol>,
+        /// The fragment kind
+        fragment: FragmentKind,
+        /// Full span including `$name:frag`
+        span: Span,
+    },
+    /// Repetition: `$(...)*`, `$(...)+`, `$(...)?`
+    Repetition {
+        /// The pattern inside the repetition
+        pattern: Vec<MacroPatternPart>,
+        /// Optional separator token (e.g., `,` in `$($x:expr),*`)
+        separator: Option<crate::lexer::TokenKind>,
+        /// Repetition kind
+        kind: RepetitionKind,
+        /// Full span
+        span: Span,
+    },
+    /// A delimited group in the pattern
+    Group {
+        delimiter: MacroDelimiter,
+        pattern: Vec<MacroPatternPart>,
+        span: Span,
+    },
+}
+
+/// Fragment specifier for macro captures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FragmentKind {
+    /// Expression: `$x:expr`
+    Expr,
+    /// Type: `$t:ty`
+    Ty,
+    /// Pattern: `$p:pat`
+    Pat,
+    /// Identifier: `$i:ident`
+    Ident,
+    /// Literal: `$l:literal`
+    Literal,
+    /// Block: `$b:block`
+    Block,
+    /// Statement: `$s:stmt`
+    Stmt,
+    /// Item/Declaration: `$d:item`
+    Item,
+    /// Single token tree: `$t:tt`
+    TokenTree,
+}
+
+impl FragmentKind {
+    /// Parse a fragment kind from its string representation.
+    pub fn from_str(s: &str) -> Option<FragmentKind> {
+        match s {
+            "expr" => Some(FragmentKind::Expr),
+            "ty" => Some(FragmentKind::Ty),
+            "pat" => Some(FragmentKind::Pat),
+            "ident" => Some(FragmentKind::Ident),
+            "literal" => Some(FragmentKind::Literal),
+            "block" => Some(FragmentKind::Block),
+            "stmt" => Some(FragmentKind::Stmt),
+            "item" => Some(FragmentKind::Item),
+            "tt" => Some(FragmentKind::TokenTree),
+            _ => None,
+        }
+    }
+}
+
+/// Repetition kind in macro patterns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepetitionKind {
+    /// Zero or more: `*`
+    ZeroOrMore,
+    /// One or more: `+`
+    OneOrMore,
+    /// Zero or one: `?`
+    ZeroOrOne,
+}
+
+/// A macro expansion template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroExpansion {
+    pub parts: Vec<MacroExpansionPart>,
+    pub span: Span,
+}
+
+/// A part of a macro expansion template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroExpansionPart {
+    /// Literal tokens to emit
+    Tokens(Vec<MacroToken>),
+    /// Substitution: `$name`
+    Substitution {
+        name: Spanned<Symbol>,
+        span: Span,
+    },
+    /// Repetition: `$(...)*`
+    Repetition {
+        parts: Vec<MacroExpansionPart>,
+        separator: Option<MacroToken>,
+        span: Span,
+    },
+    /// A delimited group
+    Group {
+        delimiter: MacroDelimiter,
+        parts: Vec<MacroExpansionPart>,
+        span: Span,
+    },
 }
