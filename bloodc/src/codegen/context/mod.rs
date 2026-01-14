@@ -1395,6 +1395,28 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let str_val = str_type.const_named_struct(&[ptr.into(), len.into()]);
                 Ok(str_val.into())
             }
+            LiteralValue::ByteString(bytes) => {
+                // Create a global byte array constant and byte slice {ptr, len}
+                let array_type = self.context.i8_type().array_type(bytes.len() as u32);
+                let global = self.module.add_global(array_type, Some(AddressSpace::default()), "bytes");
+                global.set_initializer(&self.context.const_string(bytes, false));
+                global.set_constant(true);
+
+                // Cast array pointer to i8*
+                let ptr = global.as_pointer_value().const_cast(
+                    self.context.i8_type().ptr_type(AddressSpace::default())
+                );
+                let len = self.context.i64_type().const_int(bytes.len() as u64, false);
+
+                // Create byte slice struct {ptr, len}
+                let slice_type = self.context.struct_type(
+                    &[self.context.i8_type().ptr_type(AddressSpace::default()).into(),
+                      self.context.i64_type().into()],
+                    false
+                );
+                let slice_val = slice_type.const_named_struct(&[ptr.into(), len.into()]);
+                Ok(slice_val.into())
+            }
         }
     }
 
@@ -1940,6 +1962,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 PrimitiveTy::String => "str".to_string(),
                 PrimitiveTy::Str => "rawstr".to_string(),
                 PrimitiveTy::Unit => "unit".to_string(),
+                PrimitiveTy::Never => "never".to_string(),
             },
             TypeKind::Tuple(elems) => {
                 let elem_mangles: Vec<String> = elems.iter()

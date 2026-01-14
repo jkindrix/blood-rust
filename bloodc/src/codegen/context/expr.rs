@@ -242,6 +242,35 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let str_val = str_type.const_named_struct(&[ptr.into(), len.into()]);
                 Ok(str_val.into())
             }
+            hir::LiteralValue::ByteString(bytes) => {
+                // Create global byte array constant and byte slice {ptr, len}
+                let byte_values: Vec<_> = bytes.iter()
+                    .map(|&b| self.context.i8_type().const_int(b as u64, false))
+                    .collect();
+                let array_type = self.context.i8_type().array_type(bytes.len() as u32);
+                let const_array = self.context.i8_type().const_array(&byte_values);
+
+                let global = self.module.add_global(array_type, None, "bytes");
+                global.set_initializer(&const_array);
+                global.set_constant(true);
+
+                // Cast array pointer to i8*
+                let ptr = self.builder.build_pointer_cast(
+                    global.as_pointer_value(),
+                    self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                    "bytes_ptr"
+                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                let len = self.context.i64_type().const_int(bytes.len() as u64, false);
+
+                // Create byte slice struct {ptr, len}
+                let slice_type = self.context.struct_type(
+                    &[self.context.i8_type().ptr_type(inkwell::AddressSpace::default()).into(),
+                      self.context.i64_type().into()],
+                    false
+                );
+                let slice_val = slice_type.const_named_struct(&[ptr.into(), len.into()]);
+                Ok(slice_val.into())
+            }
         }
     }
 
@@ -788,7 +817,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Get the LLVM type for the enum
         let enum_llvm_type = self.lower_type(result_ty);
 
-        // Create an undefined enum value
+        // Handle unit enums (no payload fields) - lowered to just i32 tag
+        if enum_llvm_type.is_int_type() {
+            // Unit enum - just return the tag value
+            let tag = self.context.i32_type().const_int(variant_idx as u64, false);
+            return Ok(Some(tag.into()));
+        }
+
+        // Create an undefined enum value (struct with tag + payload)
         let enum_type = enum_llvm_type.into_struct_type();
         let mut enum_val = enum_type.get_undef();
 

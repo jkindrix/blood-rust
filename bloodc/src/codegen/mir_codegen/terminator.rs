@@ -963,8 +963,41 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 ).map_err(|e| vec![Diagnostic::error(
                     format!("LLVM int_to_ptr error: {}", e), span
                 )])?.into()
+            } else if dest_llvm_ty.is_struct_type() {
+                // For struct types (including enums), the bits are packed into the i64.
+                // Unpack by storing i64 to stack, bitcasting to struct*, and loading.
+                let result_i64 = result_val.into_int_value();
+                let i64_ty = self.context.i64_type();
+                let dest_struct_ty = dest_llvm_ty.into_struct_type();
+
+                // Allocate temp storage for the i64
+                let temp_alloca = self.builder.build_alloca(i64_ty, "perform_temp")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM alloca error: {}", e), span
+                    )])?;
+
+                // Store the i64 (which contains packed struct bits)
+                self.builder.build_store(temp_alloca, result_i64)
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM store error: {}", e), span
+                    )])?;
+
+                // Bitcast i64* to struct*
+                let struct_ptr = self.builder.build_pointer_cast(
+                    temp_alloca,
+                    dest_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                    "perform_struct_ptr"
+                ).map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM pointer_cast error: {}", e), span
+                )])?;
+
+                // Load the struct value
+                self.builder.build_load(struct_ptr, "perform_struct")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM load error: {}", e), span
+                    )])?
             } else {
-                // For other types (struct, etc.), use the value directly
+                // For other types, use the value directly
                 // This may fail if types don't match, but that indicates a bug elsewhere
                 result_val
             };

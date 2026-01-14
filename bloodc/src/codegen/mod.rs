@@ -240,6 +240,7 @@ fn get_native_target_machine_with_opt(opt_level: BloodOptLevel) -> Result<Target
 }
 
 /// Get a target machine for the native platform with default optimization.
+#[allow(dead_code)] // Infrastructure for default optimization level
 fn get_native_target_machine() -> Result<TargetMachine, String> {
     get_native_target_machine_with_opt(BloodOptLevel::Default)
 }

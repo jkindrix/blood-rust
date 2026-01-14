@@ -481,6 +481,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .build_int_to_ptr(result_i64.into_int_value(), result_llvm_type.into_pointer_type(), "result_ptr")
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                     .into()
+            } else if result_llvm_type.is_struct_type() {
+                // For struct types (including enums), the bits are packed into the i64.
+                // Unpack by storing i64 to stack, bitcasting to struct*, and loading.
+                let result_i64_val = result_i64.into_int_value();
+                let i64_ty = self.context.i64_type();
+                let dest_struct_ty = result_llvm_type.into_struct_type();
+
+                // Allocate temp storage for the i64
+                let temp_alloca = self.builder.build_alloca(i64_ty, "perform_temp")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                // Store the i64 (which contains packed struct bits)
+                self.builder.build_store(temp_alloca, result_i64_val)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                // Bitcast i64* to struct*
+                let struct_ptr = self.builder.build_pointer_cast(
+                    temp_alloca,
+                    dest_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                    "perform_struct_ptr"
+                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                // Load the struct value
+                self.builder.build_load(struct_ptr, "perform_struct")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
             } else {
                 result_i64
             };
@@ -501,8 +526,24 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         value: Option<&hir::Expr>,
         result_ty: &Type,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        use crate::hir::ty::TypeKind;
+
         let i64_type = self.context.i64_type();
-        let expected_llvm_ty = self.lower_type(result_ty);
+
+        // If result_ty is an unresolved type variable, use the value's type instead.
+        // This happens because resume's result type is often a fresh type variable
+        // that isn't unified with the actual operation return type.
+        let effective_result_ty = if matches!(result_ty.kind(), TypeKind::Infer(_)) {
+            if let Some(val_expr) = value {
+                &val_expr.ty
+            } else {
+                result_ty
+            }
+        } else {
+            result_ty
+        };
+        let expected_llvm_ty = self.lower_type(effective_result_ty);
+
 
         // Compile the value to resume with
         let resume_value = if let Some(val_expr) = value {
@@ -524,9 +565,26 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .build_ptr_to_int(pv, i64_type, "resume_ptr_int")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                     }
-                    BasicValueEnum::StructValue(_sv) => {
-                        // For unit type (empty struct), use 0
-                        i64_type.const_zero()
+                    BasicValueEnum::StructValue(sv) => {
+                        // For small structs that fit in 64 bits, pack the bits directly into i64.
+                        // This avoids lifetime issues with stack-allocated pointers.
+                        // Strategy: store struct to stack, bitcast to i64*, load as i64.
+                        let struct_type = sv.get_type();
+                        let alloca = self.builder
+                            .build_alloca(struct_type, "resume_struct")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        self.builder.build_store(alloca, sv)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                        // Bitcast the struct pointer to i64 pointer and load as i64
+                        let i64_ptr_type = i64_type.ptr_type(inkwell::AddressSpace::default());
+                        let i64_ptr = self.builder
+                            .build_pointer_cast(alloca, i64_ptr_type, "resume_i64_ptr")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        self.builder
+                            .build_load(i64_ptr, "resume_struct_bits")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .into_int_value()
                     }
                     BasicValueEnum::FloatValue(fv) => {
                         self.builder
@@ -661,6 +719,29 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .build_int_to_ptr(phi_value, expected_llvm_ty.into_pointer_type(), "resume_ptr")
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                     .into()
+            } else if expected_llvm_ty.is_struct_type() {
+                // For struct types (including enums), the bits are packed into the i64.
+                // Unpack by storing i64 to stack, bitcasting to struct*, and loading.
+                let dest_struct_ty = expected_llvm_ty.into_struct_type();
+
+                // Allocate temp storage for the i64
+                let temp_alloca = self.builder.build_alloca(i64_type, "resume_temp")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                // Store the i64 (which contains packed struct bits)
+                self.builder.build_store(temp_alloca, phi_value)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                // Bitcast i64* to struct*
+                let struct_ptr = self.builder.build_pointer_cast(
+                    temp_alloca,
+                    dest_struct_ty.ptr_type(inkwell::AddressSpace::default()),
+                    "resume_struct_ptr"
+                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                // Load the struct value
+                self.builder.build_load(struct_ptr, "resume_struct")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
             } else {
                 // Default: return as-is (may need more cases)
                 phi_value.into()
@@ -818,9 +899,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
         // Call the return clause to transform the result
-        // The return clause function is named handler_{handler_id.index}_return
+        // The return clause function is named {handler_name}_return (content-based naming)
         // It may be in a separate compilation unit (handler registration), so we declare it if needed
-        let return_fn_name = format!("handler_{}_return", handler_id.index);
+        let handler_name = self.handler_defs.get(&handler_id)
+            .map(|info| info.name.as_str())
+            .unwrap_or("unknown_handler");
+        let return_fn_name = format!("{}_return", handler_name);
         eprintln!("DEBUG compile_handle: handler_id={:?}, return_fn_name={}", handler_id, return_fn_name);
         let return_fn = self.module.get_function(&return_fn_name).unwrap_or_else(|| {
             // Declare the return clause function as external

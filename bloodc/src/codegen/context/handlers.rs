@@ -122,8 +122,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Return clause function signature: fn(result: i64, state_ptr: *void) -> i64
         let ret_clause_type = i64_type.fn_type(&[i64_type.into(), i8_ptr_type.into()], false);
-        // Use handler_id index for consistent naming with compile_handle lookup
-        let fn_name = format!("handler_{}_return", _handler_id.index);
+        // Use handler name for content-based naming (enables cache sharing across files)
+        let fn_name = format!("{}_return", _handler_name);
         let fn_value = self.module.add_function(&fn_name, ret_clause_type, None);
 
         // Create entry block
@@ -264,18 +264,24 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .into_int_value()
                 }
                 BasicValueEnum::StructValue(sv) => {
-                    // Tuple/struct return: allocate on stack and return pointer as i64
-                    // Note: For proper effects implementation, this should use a region allocator
-                    // or the caller should pre-allocate space for the return value.
+                    // For small structs that fit in 64 bits, pack the bits directly into i64.
+                    // This avoids lifetime issues with stack-allocated pointers.
                     let struct_type = sv.get_type();
                     let alloca = self.builder
-                        .build_alloca(struct_type, "ret_tuple")
+                        .build_alloca(struct_type, "ret_struct")
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
                     self.builder.build_store(alloca, sv)
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+                    // Bitcast to i64* and load as i64
+                    let i64_ptr_type = i64_type.ptr_type(inkwell::AddressSpace::default());
+                    let i64_ptr = self.builder
+                        .build_pointer_cast(alloca, i64_ptr_type, "ret_i64_ptr")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
                     self.builder
-                        .build_ptr_to_int(alloca, i64_type, "ret_tuple_ptr")
+                        .build_load(i64_ptr, "ret_struct_bits")
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                        .into_int_value()
                 }
                 BasicValueEnum::ArrayValue(av) => {
                     // Array return: allocate on stack and return pointer as i64
@@ -582,16 +588,24 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .into_int_value()
                     }
                     BasicValueEnum::StructValue(sv) => {
-                        // Tuple/struct return: allocate on stack and return pointer as i64
+                        // For small structs that fit in 64 bits, pack the bits directly into i64.
+                        // This avoids lifetime issues with stack-allocated pointers.
                         let struct_type = sv.get_type();
                         let alloca = self.builder
-                            .build_alloca(struct_type, "ret_tuple")
+                            .build_alloca(struct_type, "ret_struct")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
                         self.builder.build_store(alloca, sv)
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+                        // Bitcast to i64* and load as i64
+                        let i64_ptr_type = i64_type.ptr_type(inkwell::AddressSpace::default());
+                        let i64_ptr = self.builder
+                            .build_pointer_cast(alloca, i64_ptr_type, "ret_i64_ptr")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
                         self.builder
-                            .build_ptr_to_int(alloca, i64_type, "ret_tuple_ptr")
+                            .build_load(i64_ptr, "ret_struct_bits")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                            .into_int_value()
                     }
                     BasicValueEnum::ArrayValue(av) => {
                         // Array return: allocate on stack and return pointer as i64

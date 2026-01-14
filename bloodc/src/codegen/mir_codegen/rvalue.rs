@@ -1131,6 +1131,33 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 Ok(str_val.into())
             }
 
+            ConstantKind::ByteString(bytes) => {
+                // Create global byte array constant and byte slice {ptr, len}
+                let array_type = self.context.i8_type().array_type(bytes.len() as u32);
+                let global = self.module.add_global(array_type, None, "bytes");
+                global.set_initializer(&self.context.const_string(bytes, false));
+                global.set_constant(true);
+
+                // Cast array pointer to i8*
+                let ptr = self.builder.build_pointer_cast(
+                    global.as_pointer_value(),
+                    self.context.i8_type().ptr_type(inkwell::AddressSpace::default()),
+                    "bytes_ptr"
+                ).map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM pointer cast error: {}", e), Span::dummy()
+                )])?;
+                let len = self.context.i64_type().const_int(bytes.len() as u64, false);
+
+                // Create byte slice struct {ptr, len}
+                let slice_type = self.context.struct_type(
+                    &[self.context.i8_type().ptr_type(inkwell::AddressSpace::default()).into(),
+                      self.context.i64_type().into()],
+                    false
+                );
+                let slice_val = slice_type.const_named_struct(&[ptr.into(), len.into()]);
+                Ok(slice_val.into())
+            }
+
             ConstantKind::Unit => {
                 Ok(self.context.i8_type().const_int(0, false).into())
             }

@@ -230,7 +230,7 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // Else: Stack-allocated value - skip generation check (optimization)
             }
 
-            StatementKind::PushHandler { handler_id, state_place, state_kind, allocation_tier } => {
+            StatementKind::PushHandler { handler_id, state_place, state_kind, allocation_tier, inline_mode } => {
                 // Push effect handler onto the evidence vector with instance state
                 //
                 // STATIC EVIDENCE OPTIMIZATION (EFF-OPT-001):
@@ -247,8 +247,16 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // We can skip cloning the evidence vector (blood_evidence_create)
                 // and push directly onto the existing one, avoiding heap allocation.
                 //
-                // TODO: Implement optimized paths for static handlers.
+                // INLINE EVIDENCE OPTIMIZATION (EFF-OPT-003/004):
+                // When inline_mode is Inline or SpecializedPair, the handler evidence
+                // can potentially be passed directly without going through the vector.
+                // - Inline: Single handler in scope, can use direct passing
+                // - SpecializedPair: Two handlers, can use fixed-size pair structure
+                // - Vector: Three or more handlers, must use heap-allocated vector
+                //
+                // TODO: Implement optimized paths for static and inline handlers.
                 let _ = state_kind; // Suppress unused warning until static optimization is implemented
+                let _ = inline_mode; // Suppress unused warning until inline optimization is implemented
 
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
@@ -517,13 +525,14 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     )])?;
             }
 
-            StatementKind::CallReturnClause { handler_id, body_result, state_place, destination } => {
+            StatementKind::CallReturnClause { handler_id: _, handler_name, body_result, state_place, destination } => {
                 // Call the handler's return clause to transform the body result
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
 
-                // Generate return clause function name
-                let return_fn_name = format!("handler_{}_return", handler_id.index);
+                // Generate return clause function name (content-based naming for cache compatibility)
+                // The handler_name is embedded in MIR for proper content hashing
+                let return_fn_name = format!("{}_return", handler_name);
 
                 // Declare or get the return clause function
                 let return_fn = self.module.get_function(&return_fn_name)

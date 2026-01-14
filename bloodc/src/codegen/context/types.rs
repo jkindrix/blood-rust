@@ -212,6 +212,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Unit type - use i8 as placeholder
                 self.context.i8_type().into()
             }
+            PrimitiveTy::Never => {
+                // Never type (!) - use void-like type
+                // This should never be instantiated at runtime
+                self.context.i8_type().into()
+            }
         }
     }
 

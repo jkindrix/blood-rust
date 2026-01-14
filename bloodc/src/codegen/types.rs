@@ -88,6 +88,7 @@ fn primitive_size(prim: &PrimitiveTy) -> usize {
         PrimitiveTy::Str => 16, // fat pointer (ptr + len)
         PrimitiveTy::String => 24, // ptr + len + cap
         PrimitiveTy::Unit => 0, // zero-sized type
+        PrimitiveTy::Never => 0, // never type is zero-sized
     }
 }
 
