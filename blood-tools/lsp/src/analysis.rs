@@ -458,6 +458,25 @@ impl SemanticAnalyzer {
                     }
                 }
             }
+            Declaration::Macro(macro_decl) => {
+                // Collect macro symbol
+                let name = self.resolve_symbol(&macro_decl.name.node, interner);
+                let description = format!("macro {}!", name);
+
+                let idx = symbols.len();
+                symbols.push(SymbolInfo {
+                    name: name.clone(),
+                    kind: SymbolKind::FUNCTION, // Use FUNCTION as closest approximation for macros
+                    def_span: macro_decl.name.span,
+                    description,
+                    doc: None,
+                    references: Vec::new(),
+                });
+
+                for offset in macro_decl.name.span.start..macro_decl.name.span.end {
+                    symbol_at_offset.insert(offset, idx);
+                }
+            }
         }
     }
 
@@ -759,6 +778,10 @@ impl SemanticAnalyzer {
                     }
                     ast::MacroCallKind::Dbg(inner) => {
                         self.collect_expr_symbols(inner, source, interner, symbols, symbol_at_offset);
+                    }
+                    ast::MacroCallKind::Matches { expr, pattern: _ } => {
+                        // Collect symbols from the expression; patterns don't contribute new symbols
+                        self.collect_expr_symbols(expr, source, interner, symbols, symbol_at_offset);
                     }
                     ast::MacroCallKind::Custom { .. } => {
                         // Custom macros are opaque - no symbols to collect
