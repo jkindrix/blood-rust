@@ -190,7 +190,16 @@ impl<'src> Parser<'src> {
     /// These keywords are reserved but can appear as identifiers in certain contexts
     /// (field names, parameter names, function names, etc.).
     fn is_contextual_keyword(kind: TokenKind) -> bool {
-        matches!(kind, TokenKind::Default | TokenKind::Handle)
+        matches!(
+            kind,
+            TokenKind::Default
+                | TokenKind::Handle
+                | TokenKind::Handler
+                | TokenKind::Effect
+                | TokenKind::Op
+                | TokenKind::Deep
+                | TokenKind::Shallow
+        )
     }
 
     /// Check if the current token is an identifier or a contextual keyword.
