@@ -21,7 +21,7 @@ use crate::mir::types::{
 };
 
 use super::LoopContext;
-use super::util::{convert_binop, lower_literal_to_constant, is_irrefutable_pattern};
+use super::util::{convert_binop, lower_literal_to_constant, is_irrefutable_pattern, ExprLowering, LoopContextInfo};
 
 // ============================================================================
 // Function Lowering
@@ -351,52 +351,13 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         }
     }
 
-    /// Lower a literal to an operand.
-    fn lower_literal(&mut self, lit: &LiteralValue, ty: &Type) -> Result<Operand, Vec<Diagnostic>> {
-        let kind = match lit {
-            LiteralValue::Int(v) => ConstantKind::Int(*v),
-            LiteralValue::Uint(v) => ConstantKind::Uint(*v),
-            LiteralValue::Float(v) => ConstantKind::Float(*v),
-            LiteralValue::Bool(v) => ConstantKind::Bool(*v),
-            LiteralValue::Char(v) => ConstantKind::Char(*v),
-            LiteralValue::String(v) => ConstantKind::String(v.clone()),
-        };
-        Ok(Operand::Constant(Constant::new(ty.clone(), kind)))
-    }
-
-    /// Lower a binary operation.
-    fn lower_binary(
-        &mut self,
-        op: BinOp,
-        left: &Expr,
-        right: &Expr,
-        ty: &Type,
-        span: Span,
-    ) -> Result<Operand, Vec<Diagnostic>> {
-        // Special handling for pipe operator: `a |> f` becomes `f(a)`
-        if matches!(op, BinOp::Pipe) {
-            return self.lower_pipe(left, right, ty, span);
-        }
-
-        let left_op = self.lower_expr(left)?;
-        let right_op = self.lower_expr(right)?;
-
-        let mir_op = convert_binop(op);
-        let temp = self.new_temp(ty.clone(), span);
-        let rvalue = Rvalue::BinaryOp {
-            op: mir_op,
-            left: left_op,
-            right: right_op,
-        };
-        self.push_assign(Place::local(temp), rvalue);
-        Ok(Operand::Copy(Place::local(temp)))
-    }
+    // lower_literal and lower_binary are now provided by ExprLowering trait
 
     /// Lower a pipe expression: `a |> f` becomes `f(a)`.
     ///
     /// The pipe operator passes the left operand as the first argument
     /// to the function on the right-hand side.
-    fn lower_pipe(
+    fn lower_pipe_impl(
         &mut self,
         arg: &Expr,
         func: &Expr,
@@ -2380,5 +2341,92 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         );
 
         Ok(Operand::Copy(Place::local(temp)))
+    }
+}
+
+// ============================================================================
+// ExprLowering Trait Implementation
+// ============================================================================
+
+impl<'hir, 'ctx> ExprLowering for FunctionLowering<'hir, 'ctx> {
+    fn builder_mut(&mut self) -> &mut MirBodyBuilder {
+        &mut self.builder
+    }
+
+    fn builder(&self) -> &MirBodyBuilder {
+        &self.builder
+    }
+
+    fn body(&self) -> &Body {
+        self.body
+    }
+
+    fn hir(&self) -> &HirCrate {
+        self.hir
+    }
+
+    fn local_map_mut(&mut self) -> &mut HashMap<LocalId, LocalId> {
+        &mut self.local_map
+    }
+
+    fn local_map(&self) -> &HashMap<LocalId, LocalId> {
+        &self.local_map
+    }
+
+    fn current_block_mut(&mut self) -> &mut BasicBlockId {
+        &mut self.current_block
+    }
+
+    fn current_block(&self) -> BasicBlockId {
+        self.current_block
+    }
+
+    fn temp_counter_mut(&mut self) -> &mut u32 {
+        &mut self.temp_counter
+    }
+
+    fn pending_closures_mut(&mut self) -> &mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)> {
+        self.pending_closures
+    }
+
+    fn closure_counter_mut(&mut self) -> &mut u32 {
+        self.closure_counter
+    }
+
+    fn push_loop_context(&mut self, label: Option<hir::LoopId>, ctx: LoopContextInfo) {
+        self.loop_stack.push(LoopContext {
+            break_block: ctx.break_block,
+            continue_block: ctx.continue_block,
+            label,
+        });
+    }
+
+    fn pop_loop_context(&mut self, _label: Option<hir::LoopId>) {
+        self.loop_stack.pop();
+    }
+
+    fn get_loop_context(&self, label: Option<hir::LoopId>) -> Option<LoopContextInfo> {
+        let ctx = if let Some(label) = label {
+            self.loop_stack.iter().rev().find(|c| c.label == Some(label))
+        } else {
+            self.loop_stack.last()
+        };
+
+        ctx.map(|c| LoopContextInfo {
+            break_block: c.break_block,
+            continue_block: c.continue_block,
+            result_place: None, // FunctionLowering doesn't track result place in LoopContext
+        })
+    }
+
+    fn lower_pipe(
+        &mut self,
+        arg: &Expr,
+        func: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Option<Result<Operand, Vec<Diagnostic>>> {
+        // FunctionLowering supports the pipe operator: `a |> f` becomes `f(a)`
+        Some(self.lower_pipe_impl(arg, func, ty, span))
     }
 }

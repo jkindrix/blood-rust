@@ -20,7 +20,7 @@ use crate::mir::types::{
     BinOp as MirBinOp, UnOp as MirUnOp, AggregateKind, SwitchTargets,
 };
 
-use super::util::{convert_binop, lower_literal_to_constant, is_irrefutable_pattern};
+use super::util::{convert_binop, lower_literal_to_constant, is_irrefutable_pattern, ExprLowering, LoopContextInfo};
 
 // ============================================================================
 // Closure Lowering
@@ -2116,4 +2116,93 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
     fn terminate(&mut self, kind: TerminatorKind) {
         self.builder.terminate(Terminator::new(kind, Span::dummy()));
     }
+}
+
+// ============================================================================
+// ExprLowering Trait Implementation
+// ============================================================================
+
+impl<'hir, 'ctx> ExprLowering for ClosureLowering<'hir, 'ctx> {
+    fn builder_mut(&mut self) -> &mut MirBodyBuilder {
+        &mut self.builder
+    }
+
+    fn builder(&self) -> &MirBodyBuilder {
+        &self.builder
+    }
+
+    fn body(&self) -> &Body {
+        self.body
+    }
+
+    fn hir(&self) -> &HirCrate {
+        self.hir
+    }
+
+    fn local_map_mut(&mut self) -> &mut HashMap<LocalId, LocalId> {
+        &mut self.local_map
+    }
+
+    fn local_map(&self) -> &HashMap<LocalId, LocalId> {
+        &self.local_map
+    }
+
+    fn current_block_mut(&mut self) -> &mut BasicBlockId {
+        &mut self.current_block
+    }
+
+    fn current_block(&self) -> BasicBlockId {
+        self.current_block
+    }
+
+    fn temp_counter_mut(&mut self) -> &mut u32 {
+        &mut self.temp_counter
+    }
+
+    fn pending_closures_mut(&mut self) -> &mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)> {
+        self.pending_closures
+    }
+
+    fn closure_counter_mut(&mut self) -> &mut u32 {
+        self.closure_counter
+    }
+
+    fn push_loop_context(&mut self, label: Option<LoopId>, ctx: LoopContextInfo) {
+        let loop_ctx = (ctx.break_block, ctx.continue_block, ctx.result_place);
+        self.current_loop = Some(loop_ctx.clone());
+        if let Some(label) = label {
+            self.loop_contexts.insert(label, loop_ctx);
+        }
+    }
+
+    fn pop_loop_context(&mut self, label: Option<LoopId>) {
+        if let Some(label) = label {
+            self.loop_contexts.remove(&label);
+        }
+        self.current_loop = None;
+    }
+
+    fn get_loop_context(&self, label: Option<LoopId>) -> Option<LoopContextInfo> {
+        let ctx = if let Some(label) = label {
+            self.loop_contexts.get(&label).cloned()
+        } else {
+            self.current_loop.clone()
+        };
+
+        ctx.map(|(break_block, continue_block, result_place)| LoopContextInfo {
+            break_block,
+            continue_block,
+            result_place,
+        })
+    }
+
+    fn get_capture_field(&self, local_id: LocalId) -> Option<usize> {
+        self.capture_map.get(&local_id).copied()
+    }
+
+    fn get_env_local(&self) -> Option<LocalId> {
+        self.env_local
+    }
+
+    // ClosureLowering does NOT support the pipe operator (returns None, so trait default applies)
 }

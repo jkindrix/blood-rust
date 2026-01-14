@@ -1,8 +1,12 @@
-//! Utility functions for MIR lowering.
+//! Utility functions and traits for MIR lowering.
 //!
-//! This module provides shared utility functions for HIR→MIR lowering.
-//! These functions are used by both `FunctionLowering` and `ClosureLowering`
-//! to avoid code duplication.
+//! This module provides shared utility functions and traits for HIR→MIR lowering.
+//! These are used by both `FunctionLowering` and `ClosureLowering` to avoid code
+//! duplication.
+//!
+//! ## Traits
+//!
+//! - [`ExprLowering`]: Core trait for expression lowering shared between functions and closures
 //!
 //! ## Functions
 //!
@@ -11,9 +15,21 @@
 //! - [`lower_literal_to_constant`]: Convert HIR literal to MIR constant
 //! - [`is_irrefutable_pattern`]: Check if a pattern always matches
 
+use std::collections::HashMap;
+
 use crate::ast::{BinOp, UnaryOp};
-use crate::hir::{LiteralValue, Pattern, PatternKind, Type};
-use crate::mir::types::{BinOp as MirBinOp, UnOp as MirUnOp, Constant, ConstantKind};
+use crate::diagnostics::Diagnostic;
+use crate::hir::{
+    self, Body, Crate as HirCrate, DefId, Expr, ExprKind, FieldExpr, LocalId,
+    LiteralValue, LoopId, MatchArm, Pattern, PatternKind, RecordFieldExpr, Stmt, Type, TypeKind,
+};
+use crate::mir::body::MirBodyBuilder;
+use crate::mir::types::{
+    BasicBlockId, Statement, StatementKind, Terminator, TerminatorKind,
+    Place, PlaceElem, Operand, Rvalue, Constant, ConstantKind, AggregateKind, SwitchTargets,
+    BinOp as MirBinOp, UnOp as MirUnOp,
+};
+use crate::span::Span;
 
 // ============================================================================
 // Operator Conversion
@@ -123,6 +139,2031 @@ pub fn is_irrefutable_pattern(pattern: &Pattern) -> bool {
             prefix.iter().all(is_irrefutable_pattern) &&
             suffix.iter().all(is_irrefutable_pattern)
         }
+    }
+}
+
+// ============================================================================
+// Loop Context
+// ============================================================================
+
+/// Unified loop context information.
+///
+/// This struct provides a unified view of loop context that works for both
+/// `FunctionLowering` (which uses a Vec stack) and `ClosureLowering` (which uses
+/// a HashMap for labeled loops).
+#[derive(Debug, Clone)]
+pub struct LoopContextInfo {
+    /// Block to jump to on break.
+    pub break_block: BasicBlockId,
+    /// Block to jump to on continue.
+    pub continue_block: BasicBlockId,
+    /// Optional place to store break values.
+    pub result_place: Option<Place>,
+}
+
+// ============================================================================
+// Expression Lowering Trait
+// ============================================================================
+
+/// Core trait for expression lowering shared between functions and closures.
+///
+/// This trait provides:
+/// - Abstract accessor methods for accessing lowering state
+/// - Default implementations for all expression lowering methods
+/// - Context-specific behavior through required methods
+///
+/// Both `FunctionLowering` and `ClosureLowering` implement this trait,
+/// overriding only the context-specific methods.
+pub trait ExprLowering {
+    // ========================================================================
+    // Required Accessor Methods
+    // ========================================================================
+
+    /// Get a mutable reference to the MIR body builder.
+    fn builder_mut(&mut self) -> &mut MirBodyBuilder;
+
+    /// Get an immutable reference to the MIR body builder.
+    fn builder(&self) -> &MirBodyBuilder;
+
+    /// Get the HIR body being lowered.
+    fn body(&self) -> &Body;
+
+    /// Get the HIR crate.
+    fn hir(&self) -> &HirCrate;
+
+    /// Get a mutable reference to the local map.
+    fn local_map_mut(&mut self) -> &mut HashMap<LocalId, LocalId>;
+
+    /// Get an immutable reference to the local map.
+    fn local_map(&self) -> &HashMap<LocalId, LocalId>;
+
+    /// Get a mutable reference to the current block.
+    fn current_block_mut(&mut self) -> &mut BasicBlockId;
+
+    /// Get the current block.
+    fn current_block(&self) -> BasicBlockId;
+
+    /// Get a mutable reference to the temp counter.
+    fn temp_counter_mut(&mut self) -> &mut u32;
+
+    /// Get a mutable reference to pending closures.
+    fn pending_closures_mut(&mut self) -> &mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>;
+
+    /// Get a mutable reference to the closure counter.
+    fn closure_counter_mut(&mut self) -> &mut u32;
+
+    // ========================================================================
+    // Loop Context Methods (required - different implementations)
+    // ========================================================================
+
+    /// Push a loop context for the given label.
+    fn push_loop_context(&mut self, label: Option<LoopId>, ctx: LoopContextInfo);
+
+    /// Pop the current loop context.
+    fn pop_loop_context(&mut self, label: Option<LoopId>);
+
+    /// Get the loop context for break/continue (by label or current).
+    fn get_loop_context(&self, label: Option<LoopId>) -> Option<LoopContextInfo>;
+
+    // ========================================================================
+    // Capture Methods (optional - only closures implement)
+    // ========================================================================
+
+    /// Check if a local is a captured variable and return its field index.
+    /// Returns None for function lowering, Some(field_idx) for closure lowering.
+    fn get_capture_field(&self, _local_id: LocalId) -> Option<usize> {
+        None
+    }
+
+    /// Get the environment local for captured variables.
+    /// Returns None for function lowering, Some(local_id) for closure lowering.
+    fn get_env_local(&self) -> Option<LocalId> {
+        None
+    }
+
+    // ========================================================================
+    // Binary Expression Special Handling (optional)
+    // ========================================================================
+
+    /// Handle pipe operator specifically. Returns None if not supported.
+    /// FunctionLowering handles this, ClosureLowering returns None.
+    fn lower_pipe(
+        &mut self,
+        _arg: &Expr,
+        _func: &Expr,
+        _ty: &Type,
+        _span: Span,
+    ) -> Option<Result<Operand, Vec<Diagnostic>>> {
+        None
+    }
+
+    // ========================================================================
+    // Helper Methods (default implementations)
+    // ========================================================================
+
+    /// Generate a synthetic DefId for a closure.
+    fn next_closure_def_id(&mut self) -> DefId {
+        let id = *self.closure_counter_mut();
+        *self.closure_counter_mut() += 1;
+        DefId::new(0xFFFF_0000 + id)
+    }
+
+    /// Map a HIR local to a MIR local, creating if necessary.
+    fn map_local(&mut self, hir_local: LocalId) -> LocalId {
+        if let Some(&mir_local) = self.local_map().get(&hir_local) {
+            mir_local
+        } else {
+            let local = self.body().get_local(hir_local)
+                .expect("ICE: HIR local not found in body during MIR lowering");
+            let ty = local.ty.clone();
+            let span = local.span;
+            let mir_id = self.builder_mut().new_temp(ty, span);
+            self.local_map_mut().insert(hir_local, mir_id);
+            mir_id
+        }
+    }
+
+    /// Create a new temporary local.
+    fn new_temp(&mut self, ty: Type, span: Span) -> LocalId {
+        *self.temp_counter_mut() += 1;
+        self.builder_mut().new_temp(ty, span)
+    }
+
+    /// Push a statement to the current block.
+    fn push_stmt(&mut self, kind: StatementKind) {
+        self.builder_mut().push_stmt(Statement::new(kind, Span::dummy()));
+    }
+
+    /// Push an assignment statement.
+    fn push_assign(&mut self, place: Place, rvalue: Rvalue) {
+        self.push_stmt(StatementKind::Assign(place, rvalue));
+    }
+
+    /// Terminate the current block.
+    fn terminate(&mut self, kind: TerminatorKind) {
+        self.builder_mut().terminate(Terminator::new(kind, Span::dummy()));
+    }
+
+    /// Check if the current block is terminated.
+    fn is_terminated(&self) -> bool {
+        self.builder().is_current_terminated()
+    }
+
+    // ========================================================================
+    // Expression Lowering Methods (default implementations)
+    // ========================================================================
+
+    /// Lower an expression to an operand.
+    fn lower_expr(&mut self, expr: &Expr) -> Result<Operand, Vec<Diagnostic>> {
+        match &expr.kind {
+            ExprKind::Literal(lit) => self.lower_literal(lit, &expr.ty),
+
+            ExprKind::Local(local_id) => {
+                // Check if this local is a captured variable
+                if let Some(field_idx) = self.get_capture_field(*local_id) {
+                    // Captured variable: access via field projection on environment
+                    if let Some(env_local) = self.get_env_local() {
+                        let env_place = Place::local(env_local);
+                        let capture_place = env_place.project(PlaceElem::Field(field_idx as u32));
+                        Ok(Operand::Copy(capture_place))
+                    } else {
+                        Err(vec![Diagnostic::error(
+                            "internal error: captured variable but no environment".to_string(),
+                            expr.span,
+                        )])
+                    }
+                } else {
+                    // Regular local: use normal mapping
+                    let mir_local = self.map_local(*local_id);
+                    Ok(Operand::Copy(Place::local(mir_local)))
+                }
+            }
+
+            ExprKind::Def(def_id) => {
+                let constant_kind = if let Some(item) = self.hir().get_item(*def_id) {
+                    match &item.kind {
+                        hir::ItemKind::Const { .. } => ConstantKind::ConstDef(*def_id),
+                        hir::ItemKind::Static { .. } => ConstantKind::StaticDef(*def_id),
+                        _ => ConstantKind::FnDef(*def_id),
+                    }
+                } else {
+                    ConstantKind::FnDef(*def_id)
+                };
+                let constant = Constant::new(expr.ty.clone(), constant_kind);
+                Ok(Operand::Constant(constant))
+            }
+
+            ExprKind::Binary { op, left, right } => {
+                self.lower_binary(*op, left, right, &expr.ty, expr.span)
+            }
+
+            ExprKind::Unary { op, operand } => {
+                self.lower_unary(*op, operand, &expr.ty, expr.span)
+            }
+
+            ExprKind::Call { callee, args } => {
+                self.lower_call(callee, args, &expr.ty, expr.span)
+            }
+
+            ExprKind::Block { stmts, expr: tail } => {
+                self.lower_block(stmts, tail.as_deref(), &expr.ty, expr.span)
+            }
+
+            ExprKind::If { condition, then_branch, else_branch } => {
+                self.lower_if(condition, then_branch, else_branch.as_deref(), &expr.ty, expr.span)
+            }
+
+            ExprKind::Match { scrutinee, arms } => {
+                self.lower_match(scrutinee, arms, &expr.ty, expr.span)
+            }
+
+            ExprKind::Loop { body, label } => {
+                self.lower_loop(body, *label, &expr.ty, expr.span)
+            }
+
+            ExprKind::While { condition, body, label } => {
+                self.lower_while(condition, body, *label, &expr.ty, expr.span)
+            }
+
+            ExprKind::Break { label, value } => {
+                self.lower_break(*label, value.as_deref(), expr.span)
+            }
+
+            ExprKind::Continue { label } => {
+                self.lower_continue(*label, expr.span)
+            }
+
+            ExprKind::Return(value) => {
+                self.lower_return(value.as_deref(), expr.span)
+            }
+
+            ExprKind::Assign { target, value } => {
+                self.lower_assign(target, value, expr.span)
+            }
+
+            ExprKind::Tuple(elems) => {
+                self.lower_tuple(elems, &expr.ty, expr.span)
+            }
+
+            ExprKind::Array(elems) => {
+                self.lower_array(elems, &expr.ty, expr.span)
+            }
+
+            ExprKind::Struct { def_id, fields, base } => {
+                self.lower_struct(*def_id, fields, base.as_deref(), &expr.ty, expr.span)
+            }
+
+            ExprKind::Field { base, field_idx } => {
+                self.lower_field(base, *field_idx, &expr.ty, expr.span)
+            }
+
+            ExprKind::Index { base, index } => {
+                self.lower_index(base, index, &expr.ty, expr.span)
+            }
+
+            ExprKind::Borrow { expr: inner, mutable } => {
+                self.lower_borrow(inner, *mutable, &expr.ty, expr.span)
+            }
+
+            ExprKind::Deref(inner) => {
+                self.lower_deref(inner, &expr.ty, expr.span)
+            }
+
+            ExprKind::Cast { expr: inner, target_ty } => {
+                self.lower_cast(inner, target_ty, expr.span)
+            }
+
+            ExprKind::Repeat { value, count } => {
+                self.lower_repeat(value, *count, &expr.ty, expr.span)
+            }
+
+            ExprKind::Variant { def_id, variant_idx, fields } => {
+                self.lower_variant(*def_id, *variant_idx, fields, &expr.ty, expr.span)
+            }
+
+            ExprKind::Closure { body_id, captures } => {
+                self.lower_closure(*body_id, captures, &expr.ty, expr.span)
+            }
+
+            ExprKind::AddrOf { expr: inner, mutable } => {
+                self.lower_addr_of(inner, *mutable, &expr.ty, expr.span)
+            }
+
+            ExprKind::Let { pattern, init } => {
+                self.lower_let(pattern, init, &expr.ty, expr.span)
+            }
+
+            ExprKind::Unsafe(inner) => {
+                self.lower_expr(inner)
+            }
+
+            ExprKind::Perform { effect_id, op_index, args } => {
+                self.lower_perform(*effect_id, *op_index, args, &expr.ty, expr.span)
+            }
+
+            ExprKind::Resume { value } => {
+                self.lower_resume(value.as_deref(), expr.span)
+            }
+
+            ExprKind::Handle { body, handler_id, handler_instance } => {
+                self.lower_handle(body, *handler_id, handler_instance, &expr.ty, expr.span)
+            }
+
+            ExprKind::Range { start, end, inclusive } => {
+                self.lower_range(start.as_deref(), end.as_deref(), *inclusive, &expr.ty, expr.span)
+            }
+
+            ExprKind::Record { fields } => {
+                self.lower_record(fields, &expr.ty, expr.span)
+            }
+
+            ExprKind::Default => {
+                let temp = self.new_temp(expr.ty.clone(), expr.span);
+                let rvalue = Rvalue::ZeroInit(expr.ty.clone());
+                self.push_assign(Place::local(temp), rvalue);
+                Ok(Operand::Copy(Place::local(temp)))
+            }
+
+            ExprKind::Error => {
+                Err(vec![Diagnostic::error("lowering error expression".to_string(), expr.span)])
+            }
+
+            ExprKind::MethodCall { .. } => {
+                Err(vec![Diagnostic::error(
+                    "MIR lowering: method calls should be desugared before MIR lowering".to_string(),
+                    expr.span,
+                )])
+            }
+
+            ExprKind::MethodFamily { name, candidates } => {
+                Err(vec![Diagnostic::error(
+                    format!(
+                        "cannot reference method family '{}' without a call (has {} overloads)",
+                        name,
+                        candidates.len()
+                    ),
+                    expr.span,
+                )])
+            }
+
+            ExprKind::MacroExpansion { macro_name, .. } => {
+                Err(vec![Diagnostic::error(
+                    format!("macro expansion '{}!' should be expanded before MIR lowering", macro_name),
+                    expr.span,
+                )])
+            }
+            ExprKind::VecLiteral(_) => {
+                Err(vec![Diagnostic::error(
+                    "vec! macro should be expanded before MIR lowering".to_string(),
+                    expr.span,
+                )])
+            }
+            ExprKind::VecRepeat { .. } => {
+                Err(vec![Diagnostic::error(
+                    "vec! repeat macro should be expanded before MIR lowering".to_string(),
+                    expr.span,
+                )])
+            }
+            ExprKind::Assert { .. } => {
+                Err(vec![Diagnostic::error(
+                    "assert! macro should be expanded before MIR lowering".to_string(),
+                    expr.span,
+                )])
+            }
+            ExprKind::Dbg(_) => {
+                Err(vec![Diagnostic::error(
+                    "dbg! macro should be expanded before MIR lowering".to_string(),
+                    expr.span,
+                )])
+            }
+        }
+    }
+
+    /// Lower a literal to an operand.
+    fn lower_literal(&mut self, lit: &LiteralValue, ty: &Type) -> Result<Operand, Vec<Diagnostic>> {
+        let kind = match lit {
+            LiteralValue::Int(v) => ConstantKind::Int(*v),
+            LiteralValue::Uint(v) => ConstantKind::Uint(*v),
+            LiteralValue::Float(v) => ConstantKind::Float(*v),
+            LiteralValue::Bool(v) => ConstantKind::Bool(*v),
+            LiteralValue::Char(v) => ConstantKind::Char(*v),
+            LiteralValue::String(v) => ConstantKind::String(v.clone()),
+        };
+        Ok(Operand::Constant(Constant::new(ty.clone(), kind)))
+    }
+
+    /// Lower a binary operation.
+    fn lower_binary(
+        &mut self,
+        op: BinOp,
+        left: &Expr,
+        right: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Check if this is a pipe operator that should be handled specially
+        if matches!(op, BinOp::Pipe) {
+            if let Some(result) = self.lower_pipe(left, right, ty, span) {
+                return result;
+            }
+            // Fall through to regular binary op if pipe is not supported
+        }
+
+        let left_op = self.lower_expr(left)?;
+        let right_op = self.lower_expr(right)?;
+
+        let mir_op = convert_binop(op);
+        let temp = self.new_temp(ty.clone(), span);
+        let rvalue = Rvalue::BinaryOp {
+            op: mir_op,
+            left: left_op,
+            right: right_op,
+        };
+        self.push_assign(Place::local(temp), rvalue);
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a unary operation.
+    fn lower_unary(
+        &mut self,
+        op: UnaryOp,
+        operand: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let operand_val = self.lower_expr(operand)?;
+
+        let mir_op = match op {
+            UnaryOp::Neg => MirUnOp::Neg,
+            UnaryOp::Not => MirUnOp::Not,
+            UnaryOp::Deref => {
+                let temp = self.new_temp(ty.clone(), span);
+                if let Some(place) = operand_val.place() {
+                    let deref_place = place.project(PlaceElem::Deref);
+                    self.push_assign(Place::local(temp), Rvalue::Use(Operand::Copy(deref_place)));
+                }
+                return Ok(Operand::Copy(Place::local(temp)));
+            }
+            UnaryOp::Ref | UnaryOp::RefMut => {
+                let mutable = matches!(op, UnaryOp::RefMut);
+                let place = if let Some(p) = operand_val.place() {
+                    p.clone()
+                } else {
+                    let temp = self.new_temp(operand.ty.clone(), span);
+                    self.push_assign(Place::local(temp), Rvalue::Use(operand_val));
+                    Place::local(temp)
+                };
+                let ref_temp = self.new_temp(ty.clone(), span);
+                self.push_assign(Place::local(ref_temp), Rvalue::Ref { place, mutable });
+                return Ok(Operand::Copy(Place::local(ref_temp)));
+            }
+        };
+
+        let temp = self.new_temp(ty.clone(), span);
+        let rvalue = Rvalue::UnaryOp {
+            op: mir_op,
+            operand: operand_val,
+        };
+        self.push_assign(Place::local(temp), rvalue);
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a function call.
+    fn lower_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let func = self.lower_expr(callee)?;
+        let mut arg_ops = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_ops.push(self.lower_expr(arg)?);
+        }
+
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        let next_block = self.builder_mut().new_block();
+
+        self.terminate(TerminatorKind::Call {
+            func,
+            args: arg_ops,
+            destination: dest_place.clone(),
+            target: Some(next_block),
+            unwind: None,
+        });
+
+        self.builder_mut().switch_to(next_block);
+        *self.current_block_mut() = next_block;
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower a block expression.
+    fn lower_block(
+        &mut self,
+        stmts: &[Stmt],
+        tail: Option<&Expr>,
+        _ty: &Type,
+        _span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        for stmt in stmts {
+            self.lower_stmt(stmt)?;
+        }
+
+        if let Some(expr) = tail {
+            self.lower_expr(expr)
+        } else {
+            Ok(Operand::Constant(Constant::unit()))
+        }
+    }
+
+    /// Lower a statement.
+    ///
+    /// Note: This is a simplified default implementation. Implementors may override
+    /// this for more complex handling (e.g., tuple destructuring patterns).
+    fn lower_stmt(&mut self, stmt: &Stmt) -> Result<(), Vec<Diagnostic>> {
+        match stmt {
+            Stmt::Let { local_id, init } => {
+                // Get or create the MIR local
+                let mir_local = self.map_local(*local_id);
+
+                // Storage live
+                self.push_stmt(StatementKind::StorageLive(mir_local));
+
+                // Initialize if there's an init expression
+                if let Some(init) = init {
+                    let init_val = self.lower_expr(init)?;
+                    self.push_assign(Place::local(mir_local), Rvalue::Use(init_val));
+                }
+            }
+            Stmt::Expr(expr) => {
+                let _ = self.lower_expr(expr)?;
+            }
+            Stmt::Item(_) => {
+                // Item statements are handled elsewhere
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower an if expression.
+    fn lower_if(
+        &mut self,
+        condition: &Expr,
+        then_branch: &Expr,
+        else_branch: Option<&Expr>,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let cond = self.lower_expr(condition)?;
+
+        let then_block = self.builder_mut().new_block();
+        let else_block = self.builder_mut().new_block();
+        let join_block = self.builder_mut().new_block();
+
+        let result = self.new_temp(ty.clone(), span);
+
+        self.terminate(TerminatorKind::SwitchInt {
+            discr: cond,
+            targets: SwitchTargets::new(vec![(1, then_block)], else_block),
+        });
+
+        // Then branch
+        self.builder_mut().switch_to(then_block);
+        *self.current_block_mut() = then_block;
+        let then_val = self.lower_expr(then_branch)?;
+        self.push_assign(Place::local(result), Rvalue::Use(then_val));
+        if !self.is_terminated() {
+            self.terminate(TerminatorKind::Goto { target: join_block });
+        }
+
+        // Else branch
+        self.builder_mut().switch_to(else_block);
+        *self.current_block_mut() = else_block;
+        if let Some(else_expr) = else_branch {
+            let else_val = self.lower_expr(else_expr)?;
+            self.push_assign(Place::local(result), Rvalue::Use(else_val));
+        } else {
+            self.push_assign(Place::local(result), Rvalue::Use(Operand::Constant(Constant::unit())));
+        }
+        if !self.is_terminated() {
+            self.terminate(TerminatorKind::Goto { target: join_block });
+        }
+
+        // Join
+        self.builder_mut().switch_to(join_block);
+        *self.current_block_mut() = join_block;
+
+        Ok(Operand::Copy(Place::local(result)))
+    }
+
+    /// Lower a loop expression.
+    fn lower_loop(
+        &mut self,
+        body: &Expr,
+        label: Option<LoopId>,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let loop_block = self.builder_mut().new_block();
+        let exit_block = self.builder_mut().new_block();
+
+        let result = self.new_temp(ty.clone(), span);
+
+        // Push loop context
+        self.push_loop_context(label, LoopContextInfo {
+            break_block: exit_block,
+            continue_block: loop_block,
+            result_place: Some(Place::local(result)),
+        });
+
+        // Jump to loop
+        self.terminate(TerminatorKind::Goto { target: loop_block });
+
+        // Loop body
+        self.builder_mut().switch_to(loop_block);
+        *self.current_block_mut() = loop_block;
+        let _ = self.lower_expr(body)?;
+
+        // Loop back
+        if !self.is_terminated() {
+            self.terminate(TerminatorKind::Goto { target: loop_block });
+        }
+
+        // Pop loop context
+        self.pop_loop_context(label);
+
+        // Continue at exit
+        self.builder_mut().switch_to(exit_block);
+        *self.current_block_mut() = exit_block;
+
+        Ok(Operand::Copy(Place::local(result)))
+    }
+
+    /// Lower a while loop.
+    fn lower_while(
+        &mut self,
+        condition: &Expr,
+        body: &Expr,
+        label: Option<LoopId>,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let cond_block = self.builder_mut().new_block();
+        let body_block = self.builder_mut().new_block();
+        let exit_block = self.builder_mut().new_block();
+
+        let result = self.new_temp(ty.clone(), span);
+
+        // Push loop context
+        self.push_loop_context(label, LoopContextInfo {
+            break_block: exit_block,
+            continue_block: cond_block,
+            result_place: Some(Place::local(result)),
+        });
+
+        // Jump to condition
+        self.terminate(TerminatorKind::Goto { target: cond_block });
+
+        // Condition block
+        self.builder_mut().switch_to(cond_block);
+        *self.current_block_mut() = cond_block;
+        let cond = self.lower_expr(condition)?;
+        self.terminate(TerminatorKind::SwitchInt {
+            discr: cond,
+            targets: SwitchTargets::new(vec![(1, body_block)], exit_block),
+        });
+
+        // Body block
+        self.builder_mut().switch_to(body_block);
+        *self.current_block_mut() = body_block;
+        let _ = self.lower_expr(body)?;
+        if !self.is_terminated() {
+            self.terminate(TerminatorKind::Goto { target: cond_block });
+        }
+
+        // Pop loop context
+        self.pop_loop_context(label);
+
+        // Exit
+        self.builder_mut().switch_to(exit_block);
+        *self.current_block_mut() = exit_block;
+
+        Ok(Operand::Copy(Place::local(result)))
+    }
+
+    /// Lower a break expression.
+    fn lower_break(
+        &mut self,
+        label: Option<LoopId>,
+        value: Option<&Expr>,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let ctx = self.get_loop_context(label);
+
+        if let Some(ctx) = ctx {
+            if let Some(value) = value {
+                let val = self.lower_expr(value)?;
+                if let Some(rp) = &ctx.result_place {
+                    self.push_assign(rp.clone(), Rvalue::Use(val));
+                }
+            }
+            self.terminate(TerminatorKind::Goto { target: ctx.break_block });
+        } else {
+            return Err(vec![Diagnostic::error("break outside of loop".to_string(), span)]);
+        }
+
+        // Unreachable after break
+        let next = self.builder_mut().new_block();
+        self.builder_mut().switch_to(next);
+        *self.current_block_mut() = next;
+
+        Ok(Operand::Constant(Constant::unit()))
+    }
+
+    /// Lower a continue expression.
+    fn lower_continue(
+        &mut self,
+        label: Option<LoopId>,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let ctx = self.get_loop_context(label);
+
+        if let Some(ctx) = ctx {
+            self.terminate(TerminatorKind::Goto { target: ctx.continue_block });
+        } else {
+            return Err(vec![Diagnostic::error("continue outside of loop".to_string(), span)]);
+        }
+
+        let next = self.builder_mut().new_block();
+        self.builder_mut().switch_to(next);
+        *self.current_block_mut() = next;
+
+        Ok(Operand::Constant(Constant::unit()))
+    }
+
+    /// Lower a return expression.
+    fn lower_return(
+        &mut self,
+        value: Option<&Expr>,
+        _span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let return_place = Place::local(LocalId::new(0));
+
+        if let Some(value) = value {
+            let val = self.lower_expr(value)?;
+            self.push_assign(return_place, Rvalue::Use(val));
+        } else {
+            self.push_assign(return_place, Rvalue::Use(Operand::Constant(Constant::unit())));
+        }
+
+        self.terminate(TerminatorKind::Return);
+
+        let next = self.builder_mut().new_block();
+        self.builder_mut().switch_to(next);
+        *self.current_block_mut() = next;
+
+        Ok(Operand::Constant(Constant::unit()))
+    }
+
+    /// Lower an assignment expression.
+    fn lower_assign(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+        _span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let place = self.lower_place(target)?;
+        let val = self.lower_expr(value)?;
+        self.push_assign(place, Rvalue::Use(val));
+        Ok(Operand::Constant(Constant::unit()))
+    }
+
+    /// Lower a tuple expression.
+    fn lower_tuple(
+        &mut self,
+        elems: &[Expr],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let mut operands = Vec::with_capacity(elems.len());
+        for elem in elems {
+            operands.push(self.lower_expr(elem)?);
+        }
+
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Tuple,
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower an array expression.
+    fn lower_array(
+        &mut self,
+        elems: &[Expr],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let mut operands = Vec::with_capacity(elems.len());
+        for elem in elems {
+            operands.push(self.lower_expr(elem)?);
+        }
+
+        // Get element type from array type or first element
+        let elem_ty = match ty.kind() {
+            TypeKind::Array { element, .. } => element.clone(),
+            _ => {
+                if let Some(first) = elems.first() {
+                    first.ty.clone()
+                } else {
+                    Type::unit()
+                }
+            }
+        };
+
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Array(elem_ty),
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a field access expression.
+    fn lower_field(
+        &mut self,
+        base: &Expr,
+        field_idx: u32,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let base_place = self.lower_place(base)?;
+        let field_place = base_place.project(PlaceElem::Field(field_idx));
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(Place::local(temp), Rvalue::Use(Operand::Copy(field_place)));
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower an index expression.
+    fn lower_index(
+        &mut self,
+        base: &Expr,
+        index: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let base_place = self.lower_place(base)?;
+        let index_op = self.lower_expr(index)?;
+
+        let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
+            p.local
+        } else {
+            let temp = self.new_temp(Type::u64(), span);
+            self.push_assign(Place::local(temp), Rvalue::Use(index_op));
+            temp
+        };
+
+        let index_place = base_place.project(PlaceElem::Index(index_local));
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(Place::local(temp), Rvalue::Use(Operand::Copy(index_place)));
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a borrow expression.
+    fn lower_borrow(
+        &mut self,
+        inner: &Expr,
+        mutable: bool,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let place = self.lower_place(inner)?;
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(Place::local(temp), Rvalue::Ref { place, mutable });
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a dereference expression with generation validation.
+    ///
+    /// This emits a generation validation check before the dereference to detect
+    /// use-after-free errors at runtime. The generation check compares the
+    /// expected generation (captured when the reference was created) against
+    /// the current generation of the memory slot.
+    fn lower_deref(
+        &mut self,
+        inner: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let inner_val = self.lower_expr(inner)?;
+        let inner_place = if let Some(p) = inner_val.place() {
+            p.clone()
+        } else {
+            let temp = self.new_temp(inner.ty.clone(), span);
+            self.push_assign(Place::local(temp), Rvalue::Use(inner_val));
+            Place::local(temp)
+        };
+
+        // For generational pointers (BloodPtr), we:
+        // 1. Extract the captured generation from the pointer
+        // 2. Validate it against the current generation in the slot registry
+        // 3. Panic if stale (use-after-free detected)
+        //
+        // Note: Thin pointers (stack-allocated) skip this check at codegen time
+        // based on escape analysis results.
+        let gen_temp = self.new_temp(Type::u32(), span);
+        self.push_assign(
+            Place::local(gen_temp),
+            Rvalue::ReadGeneration(inner_place.clone()),
+        );
+        self.push_stmt(StatementKind::ValidateGeneration {
+            ptr: inner_place.clone(),
+            expected_gen: Operand::Copy(Place::local(gen_temp)),
+        });
+
+        let deref_place = inner_place.project(PlaceElem::Deref);
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(Place::local(temp), Rvalue::Use(Operand::Copy(deref_place)));
+
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a cast expression.
+    fn lower_cast(
+        &mut self,
+        inner: &Expr,
+        target_ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let inner_val = self.lower_expr(inner)?;
+        let temp = self.new_temp(target_ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Cast {
+                operand: inner_val,
+                target_ty: target_ty.clone(),
+            },
+        );
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower an array repeat expression `[value; count]`.
+    ///
+    /// Creates an array by repeating the value `count` times.
+    fn lower_repeat(
+        &mut self,
+        value: &Expr,
+        count: u64,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Lower the repeated value
+        let value_op = self.lower_expr(value)?;
+
+        // Create destination for the array
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        // Get the element type from the array type
+        let elem_ty = match ty.kind() {
+            TypeKind::Array { element, .. } => element.clone(),
+            _ => value.ty.clone(),
+        };
+
+        // Create an aggregate array with repeated values
+        // We expand [x; N] into [x, x, x, ..., x] with N copies
+        let operands: Vec<Operand> = (0..count).map(|_| value_op.clone()).collect();
+
+        self.push_assign(
+            dest_place.clone(),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Array(elem_ty),
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower a variant construction expression.
+    fn lower_variant(
+        &mut self,
+        def_id: DefId,
+        variant_idx: u32,
+        fields: &[Expr],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let mut operands = Vec::with_capacity(fields.len());
+        for field in fields {
+            operands.push(self.lower_expr(field)?);
+        }
+
+        // Extract type arguments from the ADT type
+        let type_args = if let TypeKind::Adt { args, .. } = ty.kind() {
+            args.clone()
+        } else {
+            vec![]
+        };
+
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Adt {
+                    def_id,
+                    variant_idx: Some(variant_idx),
+                    type_args,
+                },
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower an address-of expression.
+    fn lower_addr_of(
+        &mut self,
+        inner: &Expr,
+        mutable: bool,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let place = self.lower_place(inner)?;
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::AddressOf { place, mutable },
+        );
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a let expression.
+    fn lower_let(
+        &mut self,
+        pattern: &Pattern,
+        init: &Expr,
+        _ty: &Type,
+        _span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let init_val = self.lower_expr(init)?;
+        let temp = self.new_temp(init.ty.clone(), init.span);
+        self.push_assign(Place::local(temp), Rvalue::Use(init_val));
+        self.bind_pattern(pattern, &Place::local(temp))?;
+        Ok(Operand::Constant(Constant::unit()))
+    }
+
+    /// Lower a struct construction expression.
+    fn lower_struct(
+        &mut self,
+        def_id: DefId,
+        fields: &[FieldExpr],
+        _base: Option<&Expr>,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let mut operands = Vec::with_capacity(fields.len());
+        for field in fields {
+            operands.push(self.lower_expr(&field.value)?);
+        }
+
+        // Extract type arguments from the struct type
+        let type_args = if let TypeKind::Adt { args, .. } = ty.kind() {
+            args.clone()
+        } else {
+            vec![]
+        };
+
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Adt {
+                    def_id,
+                    variant_idx: None,
+                    type_args,
+                },
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a record (anonymous struct) expression.
+    fn lower_record(
+        &mut self,
+        fields: &[RecordFieldExpr],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let mut operands = Vec::with_capacity(fields.len());
+        for field in fields {
+            operands.push(self.lower_expr(&field.value)?);
+        }
+
+        let temp = self.new_temp(ty.clone(), span);
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Tuple, // Records are structurally tuples
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower a range expression `start..end` or `start..=end`.
+    ///
+    /// Range expressions are lowered to aggregate construction:
+    /// - Range<T>: { start, end }
+    /// - RangeInclusive<T>: { start, end, exhausted: false }
+    fn lower_range(
+        &mut self,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        inclusive: bool,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Create destination for the range
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        // Get the element type from the Range type
+        let elem_ty = match ty.kind() {
+            TypeKind::Range { element, .. } => element.clone(),
+            _ => {
+                // Fallback: infer from start or end
+                if let Some(s) = start {
+                    s.ty.clone()
+                } else if let Some(e) = end {
+                    e.ty.clone()
+                } else {
+                    Type::unit()
+                }
+            }
+        };
+
+        // Build operands for the range struct
+        let mut operands = Vec::new();
+
+        // Lower start if present, otherwise use default value
+        if let Some(s) = start {
+            let start_op = self.lower_expr(s)?;
+            operands.push(start_op);
+        } else {
+            // For RangeTo (..end), start is not present
+            // Use minimum value for the type (requires type info)
+            operands.push(Operand::Constant(Constant::new(
+                elem_ty.clone(),
+                ConstantKind::Int(0), // Default start for now
+            )));
+        }
+
+        // Lower end if present
+        if let Some(e) = end {
+            let end_op = self.lower_expr(e)?;
+            operands.push(end_op);
+        } else {
+            // For RangeFrom (start..), end is not present
+            // Use maximum value for the type (requires type info)
+            operands.push(Operand::Constant(Constant::new(
+                elem_ty.clone(),
+                ConstantKind::Int(i64::MAX as i128), // Default end for now
+            )));
+        }
+
+        // For inclusive ranges, add the exhausted field
+        if inclusive {
+            operands.push(Operand::Constant(Constant::new(
+                Type::bool(),
+                ConstantKind::Bool(false),
+            )));
+        }
+
+        // Create the aggregate
+        self.push_assign(
+            dest_place.clone(),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Range { element: elem_ty, inclusive },
+                operands,
+            },
+        );
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower a perform expression (effect operation).
+    fn lower_perform(
+        &mut self,
+        effect_id: DefId,
+        op_index: u32,
+        args: &[Expr],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Lower all argument expressions
+        let mut arg_ops = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_ops.push(self.lower_expr(arg)?);
+        }
+
+        // Create destination for the result
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        // Create continuation block
+        let next_block = self.builder_mut().new_block();
+
+        // Generate perform terminator
+        // Note: is_tail_resumptive defaults to false, meaning this might suspend
+        self.terminate(TerminatorKind::Perform {
+            effect_id,
+            op_index,
+            args: arg_ops,
+            destination: dest_place.clone(),
+            target: next_block,
+            is_tail_resumptive: false,
+        });
+
+        // Continue in the new block
+        self.builder_mut().switch_to(next_block);
+        *self.current_block_mut() = next_block;
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower a resume expression.
+    fn lower_resume(
+        &mut self,
+        value: Option<&Expr>,
+        _span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let resume_value = if let Some(v) = value {
+            self.lower_expr(v)?
+        } else {
+            Operand::Constant(Constant::unit())
+        };
+
+        // Create unreachable block (resume doesn't return normally)
+        let unreachable_block = self.builder_mut().new_block();
+
+        self.terminate(TerminatorKind::Resume { value: Some(resume_value) });
+
+        self.builder_mut().switch_to(unreachable_block);
+        *self.current_block_mut() = unreachable_block;
+
+        // Resume never returns, so we return a never-type placeholder
+        Ok(Operand::Constant(Constant::unit()))
+    }
+
+    /// Lower a handle expression (effect handler).
+    fn lower_handle(
+        &mut self,
+        body: &Expr,
+        handler_id: DefId,
+        handler_instance: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // Step 1: Lower the handler instance to get the state
+        let state_operand = self.lower_expr(handler_instance)?;
+
+        // Store state in a temp local (we need a Place for the state)
+        let state_local = self.new_temp(handler_instance.ty.clone(), span);
+        let state_place = Place::local(state_local);
+        self.push_assign(state_place.clone(), Rvalue::Use(state_operand));
+
+        // Step 2: Push the handler onto the evidence vector with state
+        self.push_stmt(StatementKind::PushHandler { handler_id, state_place: state_place.clone() });
+
+        // Step 3: Lower the body expression with the handler installed
+        let body_result = self.lower_expr(body)?;
+
+        // Step 4: Pop the handler from the evidence vector
+        self.push_stmt(StatementKind::PopHandler);
+
+        // Step 5: Call the return clause to transform the body result
+        let dest = self.new_temp(ty.clone(), span);
+        let dest_place = Place::local(dest);
+
+        self.push_stmt(StatementKind::CallReturnClause {
+            handler_id,
+            state_place,
+            body_result,
+            destination: dest_place.clone(),
+        });
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower an expression to a place (for assignment targets).
+    fn lower_place(&mut self, expr: &Expr) -> Result<Place, Vec<Diagnostic>> {
+        match &expr.kind {
+            ExprKind::Local(local_id) => {
+                // Check for captured variable
+                if let Some(field_idx) = self.get_capture_field(*local_id) {
+                    if let Some(env_local) = self.get_env_local() {
+                        let env_place = Place::local(env_local);
+                        Ok(env_place.project(PlaceElem::Field(field_idx as u32)))
+                    } else {
+                        Err(vec![Diagnostic::error(
+                            "internal error: captured variable but no environment".to_string(),
+                            expr.span,
+                        )])
+                    }
+                } else {
+                    let mir_local = self.map_local(*local_id);
+                    Ok(Place::local(mir_local))
+                }
+            }
+            ExprKind::Field { base, field_idx } => {
+                let base_place = self.lower_place(base)?;
+                Ok(base_place.project(PlaceElem::Field(*field_idx)))
+            }
+            ExprKind::Index { base, index } => {
+                let base_place = self.lower_place(base)?;
+                let index_op = self.lower_expr(index)?;
+                let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
+                    p.local
+                } else {
+                    let temp = self.new_temp(Type::u64(), expr.span);
+                    self.push_assign(Place::local(temp), Rvalue::Use(index_op));
+                    temp
+                };
+                Ok(base_place.project(PlaceElem::Index(index_local)))
+            }
+            ExprKind::Deref(inner) => {
+                let inner_place = self.lower_place(inner)?;
+                Ok(inner_place.project(PlaceElem::Deref))
+            }
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+                let inner_place = self.lower_place(operand)?;
+                Ok(inner_place.project(PlaceElem::Deref))
+            }
+            _ => {
+                let val = self.lower_expr(expr)?;
+                if let Some(place) = val.place() {
+                    Ok(place.clone())
+                } else {
+                    let temp = self.new_temp(expr.ty.clone(), expr.span);
+                    self.push_assign(Place::local(temp), Rvalue::Use(val));
+                    Ok(Place::local(temp))
+                }
+            }
+        }
+    }
+
+    /// Lower a match expression.
+    fn lower_match(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let scrutinee_val = self.lower_expr(scrutinee)?;
+
+        // Materialize scrutinee to a place
+        let scrutinee_place = if let Some(place) = scrutinee_val.place() {
+            place.clone()
+        } else {
+            let temp = self.new_temp(scrutinee.ty.clone(), scrutinee.span);
+            self.push_assign(Place::local(temp), Rvalue::Use(scrutinee_val));
+            Place::local(temp)
+        };
+
+        // Create result place
+        let result = self.new_temp(ty.clone(), span);
+        let join_block = self.builder_mut().new_block();
+
+        // Create blocks for each arm
+        let mut arm_blocks: Vec<BasicBlockId> = Vec::with_capacity(arms.len());
+        for _ in arms {
+            arm_blocks.push(self.builder_mut().new_block());
+        }
+        let fallthrough_block = self.builder_mut().new_block();
+
+        // Lower pattern tests
+        let mut current_test_block = self.current_block();
+        for (i, arm) in arms.iter().enumerate() {
+            let arm_block = arm_blocks[i];
+            let next_test_block = if i + 1 < arms.len() {
+                self.builder_mut().new_block()
+            } else {
+                fallthrough_block
+            };
+
+            self.builder_mut().switch_to(current_test_block);
+            *self.current_block_mut() = current_test_block;
+
+            let matches = self.test_pattern(&arm.pattern, &scrutinee_place)?;
+
+            self.terminate(TerminatorKind::SwitchInt {
+                discr: matches,
+                targets: SwitchTargets::new(vec![(1, arm_block)], next_test_block),
+            });
+
+            current_test_block = next_test_block;
+        }
+
+        // Fallthrough unreachable
+        self.builder_mut().switch_to(fallthrough_block);
+        *self.current_block_mut() = fallthrough_block;
+        self.terminate(TerminatorKind::Unreachable);
+
+        // Lower arm bodies
+        for (i, arm) in arms.iter().enumerate() {
+            self.builder_mut().switch_to(arm_blocks[i]);
+            *self.current_block_mut() = arm_blocks[i];
+
+            self.bind_pattern(&arm.pattern, &scrutinee_place)?;
+
+            // Handle guard
+            if let Some(guard) = &arm.guard {
+                let guard_pass = self.builder_mut().new_block();
+                let guard_fail = if i + 1 < arms.len() {
+                    arm_blocks[i + 1]
+                } else {
+                    fallthrough_block
+                };
+
+                let guard_result = self.lower_expr(guard)?;
+                self.terminate(TerminatorKind::SwitchInt {
+                    discr: guard_result,
+                    targets: SwitchTargets::new(vec![(1, guard_pass)], guard_fail),
+                });
+
+                self.builder_mut().switch_to(guard_pass);
+                *self.current_block_mut() = guard_pass;
+            }
+
+            let arm_val = self.lower_expr(&arm.body)?;
+            self.push_assign(Place::local(result), Rvalue::Use(arm_val));
+            self.terminate(TerminatorKind::Goto { target: join_block });
+        }
+
+        self.builder_mut().switch_to(join_block);
+        *self.current_block_mut() = join_block;
+
+        Ok(Operand::Copy(Place::local(result)))
+    }
+
+    /// Test a pattern against a place, returning a boolean operand.
+    fn test_pattern(&mut self, pattern: &Pattern, place: &Place) -> Result<Operand, Vec<Diagnostic>> {
+        match &pattern.kind {
+            PatternKind::Wildcard => {
+                Ok(Operand::Constant(Constant::new(Type::bool(), ConstantKind::Bool(true))))
+            }
+            PatternKind::Binding { subpattern, .. } => {
+                if let Some(sub) = subpattern {
+                    self.test_pattern(sub, place)
+                } else {
+                    Ok(Operand::Constant(Constant::new(Type::bool(), ConstantKind::Bool(true))))
+                }
+            }
+            PatternKind::Literal(lit) => {
+                let lit_const = lower_literal_to_constant(lit, &pattern.ty);
+                let lit_op = Operand::Constant(lit_const);
+                let place_val = Operand::Copy(place.clone());
+
+                let result = self.new_temp(Type::bool(), pattern.span);
+                self.push_assign(
+                    Place::local(result),
+                    Rvalue::BinaryOp {
+                        op: MirBinOp::Eq,
+                        left: place_val,
+                        right: lit_op,
+                    },
+                );
+                Ok(Operand::Copy(Place::local(result)))
+            }
+            PatternKind::Tuple(pats) => {
+                self.test_pattern_tuple(pats, place, pattern.span)
+            }
+            PatternKind::Variant { variant_idx, fields, .. } => {
+                self.test_pattern_variant(*variant_idx, fields, place, pattern.span)
+            }
+            PatternKind::Struct { fields, .. } => {
+                self.test_pattern_struct(fields, place, pattern.span)
+            }
+            PatternKind::Or(alts) => {
+                self.test_pattern_or(alts, place, pattern.span)
+            }
+            PatternKind::Slice { prefix, slice, suffix } => {
+                self.test_pattern_slice(prefix, slice.as_deref(), suffix, place, pattern.span)
+            }
+            PatternKind::Range { start, end, inclusive } => {
+                self.test_pattern_range(start.as_ref(), end.as_ref(), *inclusive, place, &pattern.ty, pattern.span)
+            }
+            PatternKind::Ref { inner, .. } => {
+                let deref_place = place.project(PlaceElem::Deref);
+                self.test_pattern(inner, &deref_place)
+            }
+        }
+    }
+
+    /// Test a tuple pattern.
+    fn test_pattern_tuple(
+        &mut self,
+        pats: &[Pattern],
+        place: &Place,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        if pats.is_empty() {
+            return Ok(Operand::Constant(Constant::new(Type::bool(), ConstantKind::Bool(true))));
+        }
+
+        let mut result = self.test_pattern(&pats[0], &place.project(PlaceElem::Field(0)))?;
+
+        for (i, pat) in pats.iter().enumerate().skip(1) {
+            let field_place = place.project(PlaceElem::Field(i as u32));
+            let field_result = self.test_pattern(pat, &field_place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitAnd,
+                    left: result,
+                    right: field_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        Ok(result)
+    }
+
+    /// Test a variant pattern.
+    fn test_pattern_variant(
+        &mut self,
+        variant_idx: u32,
+        fields: &[Pattern],
+        place: &Place,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        // First check discriminant using Rvalue::Discriminant
+        let discr_temp = self.new_temp(Type::u32(), span);
+        self.push_assign(Place::local(discr_temp), Rvalue::Discriminant(place.clone()));
+
+        let expected = Operand::Constant(Constant::new(Type::u32(), ConstantKind::Int(variant_idx as i128)));
+
+        let discr_matches = self.new_temp(Type::bool(), span);
+        self.push_assign(
+            Place::local(discr_matches),
+            Rvalue::BinaryOp {
+                op: MirBinOp::Eq,
+                left: Operand::Copy(Place::local(discr_temp)),
+                right: expected,
+            },
+        );
+
+        if fields.is_empty() {
+            return Ok(Operand::Copy(Place::local(discr_matches)));
+        }
+
+        // Then check fields
+        let variant_place = place.project(PlaceElem::Downcast(variant_idx));
+        let mut result = Operand::Copy(Place::local(discr_matches));
+
+        for (i, field_pat) in fields.iter().enumerate() {
+            let field_place = variant_place.project(PlaceElem::Field(i as u32));
+            let field_result = self.test_pattern(field_pat, &field_place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitAnd,
+                    left: result,
+                    right: field_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        Ok(result)
+    }
+
+    /// Test a struct pattern.
+    fn test_pattern_struct(
+        &mut self,
+        fields: &[hir::FieldPattern],
+        place: &Place,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        if fields.is_empty() {
+            return Ok(Operand::Constant(Constant::new(Type::bool(), ConstantKind::Bool(true))));
+        }
+
+        let mut result = self.test_pattern(
+            &fields[0].pattern,
+            &place.project(PlaceElem::Field(fields[0].field_idx)),
+        )?;
+
+        for field in fields.iter().skip(1) {
+            let field_place = place.project(PlaceElem::Field(field.field_idx));
+            let field_result = self.test_pattern(&field.pattern, &field_place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitAnd,
+                    left: result,
+                    right: field_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        Ok(result)
+    }
+
+    /// Test an or-pattern.
+    fn test_pattern_or(
+        &mut self,
+        alts: &[Pattern],
+        place: &Place,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        if alts.is_empty() {
+            return Ok(Operand::Constant(Constant::new(Type::bool(), ConstantKind::Bool(false))));
+        }
+
+        let mut result = self.test_pattern(&alts[0], place)?;
+
+        for alt in alts.iter().skip(1) {
+            let alt_result = self.test_pattern(alt, place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitOr,
+                    left: result,
+                    right: alt_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        Ok(result)
+    }
+
+    /// Test a slice pattern.
+    fn test_pattern_slice(
+        &mut self,
+        prefix: &[Pattern],
+        slice: Option<&Pattern>,
+        suffix: &[Pattern],
+        place: &Place,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let min_len = prefix.len() + suffix.len();
+
+        // Get slice length using Rvalue::Len
+        let len_temp = self.new_temp(Type::u64(), span);
+        self.push_assign(Place::local(len_temp), Rvalue::Len(place.clone()));
+
+        // Check minimum length
+        let min_len_const = Operand::Constant(Constant::new(Type::u64(), ConstantKind::Int(min_len as i128)));
+
+        let len_check = if slice.is_some() {
+            // With rest pattern: length >= min_len
+            let check = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(check),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::Ge,
+                    left: Operand::Copy(Place::local(len_temp)),
+                    right: min_len_const,
+                },
+            );
+            Operand::Copy(Place::local(check))
+        } else {
+            // Without rest: length == min_len
+            let check = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(check),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::Eq,
+                    left: Operand::Copy(Place::local(len_temp)),
+                    right: min_len_const,
+                },
+            );
+            Operand::Copy(Place::local(check))
+        };
+
+        let mut result = len_check;
+
+        // Check prefix patterns
+        for (i, pat) in prefix.iter().enumerate() {
+            let elem_place = place.project(PlaceElem::ConstantIndex {
+                offset: i as u64,
+                min_length: min_len as u64,
+                from_end: false,
+            });
+            let pat_result = self.test_pattern(pat, &elem_place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitAnd,
+                    left: result,
+                    right: pat_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        // Check suffix patterns
+        for (i, pat) in suffix.iter().enumerate() {
+            let offset_from_end = (suffix.len() - 1 - i) as u64;
+            let elem_place = place.project(PlaceElem::ConstantIndex {
+                offset: offset_from_end,
+                min_length: min_len as u64,
+                from_end: true,
+            });
+            let pat_result = self.test_pattern(pat, &elem_place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitAnd,
+                    left: result,
+                    right: pat_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        // Check rest pattern if present
+        if let Some(rest_pat) = slice {
+            let subslice_place = place.project(PlaceElem::Subslice {
+                from: prefix.len() as u64,
+                to: suffix.len() as u64,
+                from_end: true,
+            });
+            let rest_result = self.test_pattern(rest_pat, &subslice_place)?;
+
+            let combined = self.new_temp(Type::bool(), span);
+            self.push_assign(
+                Place::local(combined),
+                Rvalue::BinaryOp {
+                    op: MirBinOp::BitAnd,
+                    left: result,
+                    right: rest_result,
+                },
+            );
+            result = Operand::Copy(Place::local(combined));
+        }
+
+        Ok(result)
+    }
+
+    /// Test a range pattern.
+    fn test_pattern_range(
+        &mut self,
+        start: Option<&Box<Pattern>>,
+        end: Option<&Box<Pattern>>,
+        inclusive: bool,
+        place: &Place,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let place_val = Operand::Copy(place.clone());
+
+        let mut result: Option<Operand> = None;
+
+        // Check start bound: value >= start
+        if let Some(start_pat) = start {
+            if let PatternKind::Literal(lit) = &start_pat.kind {
+                let start_const = lower_literal_to_constant(lit, ty);
+                let start_check = self.new_temp(Type::bool(), span);
+                self.push_assign(
+                    Place::local(start_check),
+                    Rvalue::BinaryOp {
+                        op: MirBinOp::Ge,
+                        left: place_val.clone(),
+                        right: Operand::Constant(start_const),
+                    },
+                );
+                result = Some(Operand::Copy(Place::local(start_check)));
+            }
+        }
+
+        // Check end bound: value < end or value <= end
+        if let Some(end_pat) = end {
+            if let PatternKind::Literal(lit) = &end_pat.kind {
+                let end_const = lower_literal_to_constant(lit, ty);
+                let end_op = if inclusive { MirBinOp::Le } else { MirBinOp::Lt };
+                let end_check = self.new_temp(Type::bool(), span);
+                self.push_assign(
+                    Place::local(end_check),
+                    Rvalue::BinaryOp {
+                        op: end_op,
+                        left: place_val,
+                        right: Operand::Constant(end_const),
+                    },
+                );
+
+                if let Some(prev) = result {
+                    let combined = self.new_temp(Type::bool(), span);
+                    self.push_assign(
+                        Place::local(combined),
+                        Rvalue::BinaryOp {
+                            op: MirBinOp::BitAnd,
+                            left: prev,
+                            right: Operand::Copy(Place::local(end_check)),
+                        },
+                    );
+                    result = Some(Operand::Copy(Place::local(combined)));
+                } else {
+                    result = Some(Operand::Copy(Place::local(end_check)));
+                }
+            }
+        }
+
+        Ok(result.unwrap_or_else(|| Operand::Constant(Constant::new(Type::bool(), ConstantKind::Bool(true)))))
+    }
+
+    /// Bind pattern variables to a place.
+    fn bind_pattern(&mut self, pattern: &Pattern, place: &Place) -> Result<(), Vec<Diagnostic>> {
+        match &pattern.kind {
+            PatternKind::Wildcard => {
+                // Nothing to bind
+            }
+            PatternKind::Binding { local_id, subpattern, .. } => {
+                let mir_local = self.map_local(*local_id);
+                self.push_assign(Place::local(mir_local), Rvalue::Use(Operand::Copy(place.clone())));
+
+                if let Some(sub) = subpattern {
+                    self.bind_pattern(sub, place)?;
+                }
+            }
+            PatternKind::Literal(_) => {
+                // Literals don't bind
+            }
+            PatternKind::Tuple(pats) => {
+                for (i, pat) in pats.iter().enumerate() {
+                    let field_place = place.project(PlaceElem::Field(i as u32));
+                    self.bind_pattern(pat, &field_place)?;
+                }
+            }
+            PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    let field_place = place.project(PlaceElem::Field(field.field_idx));
+                    self.bind_pattern(&field.pattern, &field_place)?;
+                }
+            }
+            PatternKind::Variant { variant_idx, fields, .. } => {
+                let variant_place = place.project(PlaceElem::Downcast(*variant_idx));
+                for (i, field_pat) in fields.iter().enumerate() {
+                    let field_place = variant_place.project(PlaceElem::Field(i as u32));
+                    self.bind_pattern(field_pat, &field_place)?;
+                }
+            }
+            PatternKind::Slice { prefix, slice, suffix } => {
+                let min_length = (prefix.len() + suffix.len()) as u64;
+
+                for (i, pat) in prefix.iter().enumerate() {
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: i as u64,
+                        min_length,
+                        from_end: false,
+                    });
+                    self.bind_pattern(pat, &idx_place)?;
+                }
+
+                for (i, pat) in suffix.iter().enumerate() {
+                    let offset_from_end = (suffix.len() - 1 - i) as u64;
+                    let idx_place = place.project(PlaceElem::ConstantIndex {
+                        offset: offset_from_end,
+                        min_length,
+                        from_end: true,
+                    });
+                    self.bind_pattern(pat, &idx_place)?;
+                }
+
+                if let Some(rest_pat) = slice {
+                    let subslice_place = place.project(PlaceElem::Subslice {
+                        from: prefix.len() as u64,
+                        to: suffix.len() as u64,
+                        from_end: true,
+                    });
+                    self.bind_pattern(rest_pat, &subslice_place)?;
+                }
+            }
+            PatternKind::Or(alternatives) => {
+                if let Some(first_alt) = alternatives.first() {
+                    self.bind_pattern(first_alt, place)?;
+                }
+            }
+            PatternKind::Ref { inner, .. } => {
+                let deref_place = place.project(PlaceElem::Deref);
+                self.bind_pattern(inner, &deref_place)?;
+            }
+            PatternKind::Range { .. } => {
+                // Range patterns don't bind variables
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a closure expression.
+    fn lower_closure(
+        &mut self,
+        body_id: hir::BodyId,
+        captures: &[hir::Capture],
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let closure_def_id = self.next_closure_def_id();
+
+        let mut capture_operands = Vec::with_capacity(captures.len());
+        let mut captures_with_types = Vec::with_capacity(captures.len());
+
+        for capture in captures {
+            // For closures, we need to handle both local and captured variables
+            let operand = if let Some(field_idx) = self.get_capture_field(capture.local_id) {
+                // This is a re-capture of an outer closure's capture
+                if let Some(env_local) = self.get_env_local() {
+                    let env_place = Place::local(env_local);
+                    let capture_place = env_place.project(PlaceElem::Field(field_idx as u32));
+                    if capture.by_move {
+                        Operand::Move(capture_place)
+                    } else {
+                        Operand::Copy(capture_place)
+                    }
+                } else {
+                    return Err(vec![Diagnostic::error(
+                        "internal error: captured variable but no environment".to_string(),
+                        span,
+                    )]);
+                }
+            } else {
+                // Regular local
+                let mir_local = self.map_local(capture.local_id);
+                let place = Place::local(mir_local);
+                if capture.by_move {
+                    Operand::Move(place)
+                } else {
+                    Operand::Copy(place)
+                }
+            };
+
+            let capture_ty = self.body().get_local(capture.local_id)
+                .map(|l| l.ty.clone())
+                .unwrap_or_else(Type::error);
+
+            capture_operands.push(operand);
+            captures_with_types.push((capture.clone(), capture_ty));
+        }
+
+        self.pending_closures_mut().push((body_id, closure_def_id, captures_with_types));
+
+        let closure_ty = match ty.kind() {
+            TypeKind::Fn { params, ret } => {
+                Type::new(TypeKind::Closure {
+                    def_id: closure_def_id,
+                    params: params.clone(),
+                    ret: ret.clone(),
+                })
+            }
+            _ => ty.clone(),
+        };
+
+        let temp = self.new_temp(closure_ty, span);
+
+        self.push_assign(
+            Place::local(temp),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Closure { def_id: closure_def_id },
+                operands: capture_operands,
+            },
+        );
+
+        Ok(Operand::Copy(Place::local(temp)))
     }
 }
 
