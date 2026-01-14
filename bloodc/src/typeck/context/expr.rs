@@ -1365,11 +1365,13 @@ impl<'a> TypeContext<'a> {
                     Some(ast::IntSuffix::I32) => Type::i32(),
                     Some(ast::IntSuffix::I64) => Type::i64(),
                     Some(ast::IntSuffix::I128) => Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I128))),
+                    Some(ast::IntSuffix::Isize) => Type::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::Isize))),
                     Some(ast::IntSuffix::U8) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U8))),
                     Some(ast::IntSuffix::U16) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U16))),
                     Some(ast::IntSuffix::U32) => Type::u32(),
                     Some(ast::IntSuffix::U64) => Type::u64(),
                     Some(ast::IntSuffix::U128) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U128))),
+                    Some(ast::IntSuffix::Usize) => Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::Usize))),
                     None => Type::i32(),
                 };
                 (hir::LiteralValue::Int(*value as i128), ty)
@@ -1384,6 +1386,12 @@ impl<'a> TypeContext<'a> {
             ast::LiteralKind::Bool(b) => (hir::LiteralValue::Bool(*b), Type::bool()),
             ast::LiteralKind::Char(c) => (hir::LiteralValue::Char(*c), Type::char()),
             ast::LiteralKind::String(s) => (hir::LiteralValue::String(s.clone()), Type::str()),
+            ast::LiteralKind::ByteString(bytes) => {
+                // Byte string is typed as [u8] slice (fat pointer like str)
+                let u8_ty = Type::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U8)));
+                let slice_ty = Type::slice(u8_ty);
+                (hir::LiteralValue::ByteString(bytes.clone()), slice_ty)
+            }
         };
 
         Ok(hir::Expr::new(
@@ -3334,6 +3342,11 @@ impl<'a> TypeContext<'a> {
                 self.expand_dbg_macro(expr, span)
             }
 
+            // matches! macro
+            ast::MacroCallKind::Matches { expr, pattern } => {
+                self.expand_matches_macro(expr, pattern, span)
+            }
+
             // Custom/user-defined macros - not yet supported
             ast::MacroCallKind::Custom { .. } => {
                 Err(TypeError::new(
@@ -3527,6 +3540,65 @@ impl<'a> TypeContext<'a> {
         Ok(hir::Expr::new(
             hir::ExprKind::Dbg(Box::new(inner_expr)),
             ty,
+            span,
+        ))
+    }
+
+    /// Expand matches! macro - returns true if expression matches pattern
+    ///
+    /// Transforms `matches!(expr, pattern)` into:
+    /// ```text
+    /// match expr { pattern => true, _ => false }
+    /// ```
+    fn expand_matches_macro(
+        &mut self,
+        expr: &ast::Expr,
+        pattern: &ast::Pattern,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Type-check the scrutinee expression
+        let scrutinee = self.infer_expr(expr)?;
+        let scrutinee_ty = scrutinee.ty.clone();
+
+        // Lower the pattern and check against scrutinee type
+        let hir_pattern = self.lower_pattern(pattern, &scrutinee_ty)?;
+
+        // Create true arm: pattern => true
+        let true_expr = hir::Expr::new(
+            hir::ExprKind::Literal(hir::LiteralValue::Bool(true)),
+            hir::Type::bool(),
+            span,
+        );
+        let true_arm = hir::MatchArm {
+            pattern: hir_pattern,
+            guard: None,
+            body: true_expr,
+        };
+
+        // Create false arm: _ => false
+        let wildcard_pattern = hir::Pattern {
+            kind: hir::PatternKind::Wildcard,
+            ty: scrutinee_ty.clone(),
+            span,
+        };
+        let false_expr = hir::Expr::new(
+            hir::ExprKind::Literal(hir::LiteralValue::Bool(false)),
+            hir::Type::bool(),
+            span,
+        );
+        let false_arm = hir::MatchArm {
+            pattern: wildcard_pattern,
+            guard: None,
+            body: false_expr,
+        };
+
+        // Create the match expression
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![true_arm, false_arm],
+            },
+            hir::Type::bool(),
             span,
         ))
     }

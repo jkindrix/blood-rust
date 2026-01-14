@@ -393,6 +393,8 @@ pub enum LiteralValue {
     Char(char),
     /// String literal.
     String(String),
+    /// Byte string literal.
+    ByteString(Vec<u8>),
 }
 
 impl LiteralValue {
@@ -408,6 +410,7 @@ impl LiteralValue {
                         | Some(crate::ast::IntSuffix::U32)
                         | Some(crate::ast::IntSuffix::U64)
                         | Some(crate::ast::IntSuffix::U128)
+                        | Some(crate::ast::IntSuffix::Usize)
                 ) {
                     LiteralValue::Uint(*value)
                 } else {
@@ -418,6 +421,7 @@ impl LiteralValue {
             LiteralKind::Bool(b) => LiteralValue::Bool(*b),
             LiteralKind::Char(c) => LiteralValue::Char(*c),
             LiteralKind::String(s) => LiteralValue::String(s.clone()),
+            LiteralKind::ByteString(bytes) => LiteralValue::ByteString(bytes.clone()),
         }
     }
 }

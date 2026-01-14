@@ -357,6 +357,16 @@ impl Type {
         Self::new(TypeKind::Primitive(PrimitiveTy::Bool))
     }
 
+    /// Create an i8 type.
+    pub fn i8() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I8)))
+    }
+
+    /// Create an i16 type.
+    pub fn i16() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I16)))
+    }
+
     /// Create an i32 type.
     pub fn i32() -> Self {
         Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I32)))
@@ -367,9 +377,24 @@ impl Type {
         Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I64)))
     }
 
+    /// Create an i128 type.
+    pub fn i128() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::I128)))
+    }
+
+    /// Create an isize type.
+    pub fn isize() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Int(IntTy::Isize)))
+    }
+
     /// Create a u8 type.
     pub fn u8() -> Self {
         Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U8)))
+    }
+
+    /// Create a u16 type.
+    pub fn u16() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U16)))
     }
 
     /// Create a u32 type.
@@ -380,6 +405,11 @@ impl Type {
     /// Create a u64 type.
     pub fn u64() -> Self {
         Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U64)))
+    }
+
+    /// Create a u128 type.
+    pub fn u128() -> Self {
+        Self::new(TypeKind::Primitive(PrimitiveTy::Uint(UintTy::U128)))
     }
 
     /// Create a usize type.
@@ -748,6 +778,8 @@ pub enum PrimitiveTy {
     String,
     /// Unit type: `()`
     Unit,
+    /// Never type: `!` (bottom type, for expressions that never return)
+    Never,
 }
 
 impl fmt::Display for PrimitiveTy {
@@ -761,6 +793,7 @@ impl fmt::Display for PrimitiveTy {
             PrimitiveTy::Str => write!(f, "str"),
             PrimitiveTy::String => write!(f, "String"),
             PrimitiveTy::Unit => write!(f, "()"),
+            PrimitiveTy::Never => write!(f, "!"),
         }
     }
 }
@@ -863,6 +896,7 @@ impl PrimitiveTy {
             PrimitiveTy::Char => 32,
             PrimitiveTy::Str | PrimitiveTy::String => return None, // Unsized/heap-allocated
             PrimitiveTy::Unit => 0, // Zero-sized type
+            PrimitiveTy::Never => 0, // Uninhabited type
         })
     }
 }

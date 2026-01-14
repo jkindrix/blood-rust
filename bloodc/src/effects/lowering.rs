@@ -131,6 +131,8 @@ pub struct EvidenceRequirement {
 pub struct HandlerInfo {
     /// Handler definition ID.
     pub def_id: DefId,
+    /// Handler name (used for content-based function naming).
+    pub name: String,
     /// The effect being handled.
     pub effect_id: DefId,
     /// Handler kind (deep/shallow).
@@ -298,6 +300,7 @@ impl EffectLowering {
 
                 let info = HandlerInfo {
                     def_id: item.def_id,
+                    name: item.name.clone(),
                     effect_id,
                     kind: handler_kind,
                     op_impls,

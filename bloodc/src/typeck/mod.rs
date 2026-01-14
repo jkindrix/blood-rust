@@ -75,6 +75,9 @@ pub fn check_program(
     // Phase 1: Resolve names and collect items
     ctx.resolve_program(program)?;
 
+    // Phase 1.5: Expand derive macros
+    ctx.expand_derives();
+
     // Phase 2: Type-check all bodies
     ctx.check_all_bodies()?;
 

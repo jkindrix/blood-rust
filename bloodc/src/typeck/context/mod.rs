@@ -145,6 +145,8 @@ pub struct TypeContext<'a> {
     pub(crate) loop_stack: Vec<hir::LoopId>,
     /// Mapping from label names to LoopIds for labeled loops.
     pub(crate) loop_labels: HashMap<String, hir::LoopId>,
+    /// Pending derive macro requests to expand during into_hir().
+    pub(crate) pending_derives: Vec<crate::derive::DeriveRequest>,
 }
 
 /// Information about a struct.
@@ -621,6 +623,7 @@ impl<'a> TypeContext<'a> {
             next_loop_id: 0,
             loop_stack: Vec::new(),
             loop_labels: HashMap::new(),
+            pending_derives: Vec::new(),
         };
         ctx.register_builtins();
         ctx
@@ -1095,6 +1098,9 @@ impl<'a> TypeContext<'a> {
 
     /// Convert to HIR crate.
     pub fn into_hir(self) -> hir::Crate {
+        // Note: derive expansion should be done via expand_derives() before check_all_bodies()
+        // At this point, derived methods are already in impl_blocks, fn_sigs, and bodies
+
         let mut items = HashMap::new();
 
         // Convert collected definitions to HIR items

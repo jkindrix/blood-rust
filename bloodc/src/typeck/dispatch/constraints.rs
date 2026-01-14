@@ -283,6 +283,7 @@ impl<'a> ConstraintChecker<'a> {
                 PrimitiveTy::Str => true,
                 PrimitiveTy::String => true,
                 PrimitiveTy::Unit => true,
+                PrimitiveTy::Never => true, // Never type vacuously satisfies Ord
             },
             // Tuples are Ord if all elements are Ord
             TypeKind::Tuple(elements) => elements.iter().all(|e| self.type_is_ord(e)),
@@ -309,6 +310,7 @@ impl<'a> ConstraintChecker<'a> {
                 PrimitiveTy::Str => true,
                 PrimitiveTy::String => true,
                 PrimitiveTy::Unit => true,
+                PrimitiveTy::Never => true, // Never type vacuously satisfies Eq
             },
             TypeKind::Tuple(elements) => elements.iter().all(|e| self.type_is_eq(e)),
             TypeKind::Array { element, .. } => self.type_is_eq(element),
@@ -331,6 +333,7 @@ impl<'a> ConstraintChecker<'a> {
                 PrimitiveTy::Str => true,
                 PrimitiveTy::String => true,
                 PrimitiveTy::Unit => true,
+                PrimitiveTy::Never => true, // Never type vacuously satisfies Hash
             },
             TypeKind::Tuple(elements) => elements.iter().all(|e| self.type_is_hash(e)),
             TypeKind::Array { element, .. } => self.type_is_hash(element),
@@ -352,6 +355,7 @@ impl<'a> ConstraintChecker<'a> {
                 PrimitiveTy::Unit => true, // ()
                 PrimitiveTy::Str => false, // &str doesn't have Default
                 PrimitiveTy::String => true, // String::new()
+                PrimitiveTy::Never => false, // Never type cannot be constructed
             },
             TypeKind::Tuple(elements) => elements.iter().all(|e| self.type_is_default(e)),
             TypeKind::Array { element, .. } => self.type_is_default(element),

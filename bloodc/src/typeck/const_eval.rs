@@ -151,6 +151,7 @@ fn eval_literal(lit: &ast::Literal, span: Span) -> Result<ConstResult, TypeError
                     | Some(ast::IntSuffix::U32)
                     | Some(ast::IntSuffix::U64)
                     | Some(ast::IntSuffix::U128)
+                    | Some(ast::IntSuffix::Usize)
             );
 
             if is_unsigned {

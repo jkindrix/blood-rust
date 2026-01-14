@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::ast::Visibility;
 use crate::hir::{DefId, DefKind, LocalId, Type, PrimitiveTy};
 // Type primitives imported if needed for future expansion
 use crate::span::Span;
@@ -46,6 +47,8 @@ pub struct DefInfo {
     pub ty: Option<Type>,
     /// The parent definition (for associated items).
     pub parent: Option<DefId>,
+    /// The visibility of this definition.
+    pub visibility: Visibility,
 }
 
 /// A scope containing bindings.
@@ -233,6 +236,7 @@ impl<'a> Resolver<'a> {
             span,
             ty: None,
             parent: None,
+            visibility: Visibility::Public,
         });
 
         self.current_scope_mut()
@@ -247,6 +251,34 @@ impl<'a> Resolver<'a> {
         Ok(def_id)
     }
 
+    /// Define a namespaced item that is NOT added to the global scope.
+    ///
+    /// Used for items like bridge functions that are accessed via namespace
+    /// syntax (e.g., `libc::abs`) rather than direct name lookup.
+    /// This avoids conflicts with global builtins that have the same name.
+    pub fn define_namespaced_item(
+        &mut self,
+        name: String,
+        kind: DefKind,
+        span: Span,
+    ) -> DefId {
+        let def_id = self.next_def_id();
+
+        self.def_info.insert(def_id, DefInfo {
+            kind,
+            name,
+            span,
+            ty: None,
+            parent: None,
+            visibility: Visibility::Public,
+        });
+
+        // Note: Do NOT add to current scope bindings or globals.
+        // Namespaced items are accessed via their namespace (e.g., bridge_name::fn_name).
+
+        def_id
+    }
+
     /// Define a function in the current scope, supporting multiple dispatch.
     ///
     /// Unlike `define_item`, this allows multiple functions with the same name.
@@ -258,6 +290,7 @@ impl<'a> Resolver<'a> {
         &mut self,
         name: String,
         span: Span,
+        visibility: Visibility,
     ) -> Result<DefId, TypeError> {
         let def_id = self.next_def_id();
 
@@ -267,6 +300,7 @@ impl<'a> Resolver<'a> {
             span,
             ty: None,
             parent: None,
+            visibility,
         });
 
         // Check if a binding with this name already exists

@@ -20,6 +20,57 @@ use super::super::error::{TypeError, TypeErrorKind};
 use super::super::resolve::{Binding, ScopeKind};
 
 impl<'a> TypeContext<'a> {
+    /// Expand derive macros after collection but before type checking bodies.
+    ///
+    /// This generates impl blocks with derived methods (Debug, Clone, Eq, etc.)
+    /// for all types with #[derive(...)] attributes. Must be called after
+    /// resolve_program() and before check_all_bodies().
+    pub fn expand_derives(&mut self) {
+        if self.pending_derives.is_empty() {
+            return;
+        }
+
+        // Calculate next DefId by finding max existing DefId + 1
+        let next_def_id = self.resolver.def_info.keys()
+            .map(|d| d.index)
+            .max()
+            .unwrap_or(0) + 1;
+
+        let mut expander = crate::derive::DeriveExpander::new(
+            &self.struct_defs,
+            &self.enum_defs,
+            &mut self.impl_blocks,
+            &mut self.fn_sigs,
+            &mut self.bodies,
+            &mut self.method_self_types,
+            &mut self.fn_bodies,
+            next_def_id,
+            self.next_body_id,
+        );
+
+        let pending = std::mem::take(&mut self.pending_derives);
+        let generated_methods = expander.expand_all(pending);
+
+        // Update next_body_id to avoid conflicts with bodies created during check_all_bodies
+        self.next_body_id = expander.next_body_id();
+
+        // Register generated methods with the resolver so they appear in HIR
+        use super::super::resolve::DefInfo;
+        use crate::hir::DefKind;
+        use crate::ast::Visibility;
+
+        for method in generated_methods {
+            self.resolver.def_info.insert(method.def_id, DefInfo {
+                kind: DefKind::Fn,
+                name: method.name,
+                span: method.span,
+                ty: None, // Type is in fn_sigs
+                parent: None,
+                visibility: Visibility::Public,
+            });
+        }
+    }
+
     /// Resolve names in a program.
     pub fn resolve_program(&mut self, program: &ast::Program) -> Result<(), Vec<Diagnostic>> {
         // First pass: collect all top-level definitions
@@ -314,13 +365,22 @@ impl<'a> TypeContext<'a> {
 
     /// Get all public items from a module.
     fn get_module_public_items(&self, module_id: DefId) -> Vec<(String, DefId)> {
+        use crate::ast::Visibility;
+
         let mut items = Vec::new();
 
         if let Some(module_def) = self.module_defs.get(&module_id) {
             for &item_id in &module_def.items {
                 if let Some(info) = self.resolver.def_info.get(&item_id) {
-                    // TODO: Check visibility (for now, assume all are public)
-                    items.push((info.name.clone(), item_id));
+                    // Only include public items (Public or PublicCrate from outside)
+                    match info.visibility {
+                        Visibility::Public | Visibility::PublicCrate => {
+                            items.push((info.name.clone(), item_id));
+                        }
+                        Visibility::Private | Visibility::PublicSuper | Visibility::PublicSelf => {
+                            // Private items are not exported
+                        }
+                    }
                 }
             }
         }
@@ -343,7 +403,18 @@ impl<'a> TypeContext<'a> {
             ast::Declaration::Trait(t) => self.collect_trait(t),
             ast::Declaration::Bridge(b) => self.collect_bridge(b),
             ast::Declaration::Module(m) => self.collect_module(m),
+            ast::Declaration::Macro(m) => self.collect_macro(m),
         }
+    }
+
+    /// Collect a macro declaration.
+    ///
+    /// Macros are expanded before type checking, so this just registers the macro
+    /// name in the current scope for later lookup during expansion.
+    pub(crate) fn collect_macro(&mut self, _macro_decl: &ast::MacroDecl) -> Result<(), TypeError> {
+        // TODO: Register macro in macro namespace for expansion phase
+        // For now, macros are handled separately in the expansion phase
+        Ok(())
     }
 
     /// Collect a bridge declaration (FFI).
@@ -384,11 +455,13 @@ impl<'a> TypeContext<'a> {
                 }
                 ast::BridgeItem::Function(func) => {
                     let name = self.symbol_to_string(func.name.node);
-                    let def_id = self.resolver.define_item(
+                    // Use define_namespaced_item to avoid conflicts with global builtins.
+                    // Bridge functions are accessed via namespace (e.g., libc::abs).
+                    let def_id = self.resolver.define_namespaced_item(
                         name.clone(),
                         hir::DefKind::Fn,
                         func.span,
-                    )?;
+                    );
 
                     // Convert parameter types
                     let params: Vec<_> = func.params.iter()
@@ -559,11 +632,13 @@ impl<'a> TypeContext<'a> {
                 }
                 ast::BridgeItem::Const(c) => {
                     let name = self.symbol_to_string(c.name.node);
-                    let def_id = self.resolver.define_item(
+                    // Use define_namespaced_item to avoid conflicts with global names.
+                    // Bridge constants are accessed via namespace (e.g., libc::MAX_VALUE).
+                    let def_id = self.resolver.define_namespaced_item(
                         name.clone(),
                         hir::DefKind::Const,
                         c.span,
-                    )?;
+                    );
                     let ty = self.ast_type_to_hir_type(&c.ty)?;
                     // Convert literal to i64
                     let value = Self::literal_to_i64(&c.value).unwrap_or(0);
@@ -702,6 +777,35 @@ impl<'a> TypeContext<'a> {
         None
     }
 
+    /// Extract derive macros from attributes.
+    ///
+    /// Parses: `#[derive(Debug, Clone, Eq, PartialEq, Default, Hash)]`
+    fn extract_derives(&self, attrs: &[ast::Attribute]) -> Vec<crate::derive::DeriveKind> {
+        use crate::derive::DeriveKind;
+
+        let mut derives = Vec::new();
+
+        for attr in attrs {
+            if attr.path.len() == 1 {
+                let name = self.symbol_to_string(attr.path[0].node);
+                if name == "derive" {
+                    if let Some(ast::AttributeArgs::List(args)) = &attr.args {
+                        for arg in args {
+                            if let ast::AttributeArg::Ident(ident) = arg {
+                                let ident_name = self.symbol_to_string(ident.node);
+                                if let Some(kind) = DeriveKind::from_str(&ident_name) {
+                                    derives.push(kind);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        derives
+    }
+
     /// Convert a literal to i64 if possible.
     fn literal_to_i64(lit: &ast::Literal) -> Option<i64> {
         match &lit.kind {
@@ -721,6 +825,7 @@ impl<'a> TypeContext<'a> {
         let def_id = self.resolver.define_function(
             name.clone(),
             func.span,
+            func.vis,
         )?;
 
         // Register generic type parameters before processing parameter types
@@ -882,10 +987,21 @@ impl<'a> TypeContext<'a> {
         self.lifetime_params = saved_lifetime_params;
 
         self.struct_defs.insert(def_id, StructInfo {
-            name,
+            name: name.clone(),
             fields,
             generics: generics_vec,
         });
+
+        // Extract derive macros from attributes
+        let derives = self.extract_derives(&struct_decl.attrs);
+        if !derives.is_empty() {
+            self.pending_derives.push(crate::derive::DeriveRequest {
+                type_def_id: def_id,
+                type_name: name,
+                derives,
+                span: struct_decl.span,
+            });
+        }
 
         Ok(())
     }
@@ -1063,10 +1179,21 @@ impl<'a> TypeContext<'a> {
         self.lifetime_params = saved_lifetime_params;
 
         self.enum_defs.insert(def_id, EnumInfo {
-            name,
+            name: name.clone(),
             variants,
             generics: generics_vec,
         });
+
+        // Extract derive macros from attributes
+        let derives = self.extract_derives(&enum_decl.attrs);
+        if !derives.is_empty() {
+            self.pending_derives.push(crate::derive::DeriveRequest {
+                type_def_id: def_id,
+                type_name: name,
+                derives,
+                span: enum_decl.span,
+            });
+        }
 
         Ok(())
     }
@@ -1187,6 +1314,7 @@ impl<'a> TypeContext<'a> {
                 span: op.span,
                 ty: None,
                 parent: Some(def_id),  // Parent is the effect
+                visibility: crate::ast::Visibility::Public,
             });
 
             // Collect parameter types

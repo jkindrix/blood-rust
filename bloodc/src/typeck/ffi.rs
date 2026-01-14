@@ -308,6 +308,11 @@ impl FfiValidator {
 
             // Unit is void
             PrimitiveTy::Unit => FfiSafety::Safe,
+
+            // Never type is uninhabited
+            PrimitiveTy::Never => FfiSafety::Unsafe(
+                "never type (!) is uninhabited and cannot be used in FFI".to_string(),
+            ),
         }
     }
 
