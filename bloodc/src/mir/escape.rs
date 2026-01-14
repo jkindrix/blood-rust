@@ -208,6 +208,208 @@ impl Default for EscapeResults {
 }
 
 // ============================================================================
+// Escape Statistics (PERF-V-002)
+// ============================================================================
+
+/// Comprehensive statistics for escape analysis.
+///
+/// Used to validate the claim: ">95% stack allocation" (PERF-V-002)
+#[derive(Debug, Clone, Default)]
+pub struct EscapeStatistics {
+    /// Total number of locals analyzed.
+    pub total_locals: usize,
+    /// Number of locals that can be stack-allocated.
+    pub stack_promotable: usize,
+    /// Number of locals that require heap allocation (Region tier).
+    pub heap_required: usize,
+    /// Number of locals captured by effect operations.
+    pub effect_captured: usize,
+    /// Number of locals captured by closures.
+    pub closure_captured: usize,
+    /// Breakdown by escape state.
+    pub by_state: EscapeStateBreakdown,
+    /// Number of functions analyzed.
+    pub functions_analyzed: usize,
+}
+
+/// Breakdown of locals by escape state.
+#[derive(Debug, Clone, Default)]
+pub struct EscapeStateBreakdown {
+    /// Locals with NoEscape state.
+    pub no_escape: usize,
+    /// Locals with ArgEscape state.
+    pub arg_escape: usize,
+    /// Locals with GlobalEscape state.
+    pub global_escape: usize,
+}
+
+impl EscapeStatistics {
+    /// Create new empty statistics.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Compute statistics from escape analysis results.
+    pub fn from_results(results: &EscapeResults) -> Self {
+        let mut stats = Self::new();
+        stats.add_results(results);
+        stats
+    }
+
+    /// Add results from one function to the aggregate statistics.
+    pub fn add_results(&mut self, results: &EscapeResults) {
+        self.functions_analyzed += 1;
+        self.total_locals += results.states.len();
+        self.stack_promotable += results.stack_promotable.len();
+        self.effect_captured += results.effect_captured.len();
+        self.closure_captured += results.captured_by_closure.len();
+
+        // Count by escape state
+        for state in results.states.values() {
+            match state {
+                EscapeState::NoEscape => self.by_state.no_escape += 1,
+                EscapeState::ArgEscape => self.by_state.arg_escape += 1,
+                EscapeState::GlobalEscape => self.by_state.global_escape += 1,
+            }
+        }
+
+        // Heap required = total - stack_promotable
+        self.heap_required = self.total_locals.saturating_sub(self.stack_promotable);
+    }
+
+    /// Merge another statistics object into this one.
+    pub fn merge(&mut self, other: &EscapeStatistics) {
+        self.total_locals += other.total_locals;
+        self.stack_promotable += other.stack_promotable;
+        self.heap_required += other.heap_required;
+        self.effect_captured += other.effect_captured;
+        self.closure_captured += other.closure_captured;
+        self.by_state.no_escape += other.by_state.no_escape;
+        self.by_state.arg_escape += other.by_state.arg_escape;
+        self.by_state.global_escape += other.by_state.global_escape;
+        self.functions_analyzed += other.functions_analyzed;
+    }
+
+    /// Calculate the stack allocation percentage.
+    ///
+    /// This is the key metric for PERF-V-002: ">95% stack allocation"
+    pub fn stack_percentage(&self) -> f64 {
+        if self.total_locals == 0 {
+            return 100.0; // No locals = 100% stack (trivially)
+        }
+        (self.stack_promotable as f64 / self.total_locals as f64) * 100.0
+    }
+
+    /// Calculate the heap allocation percentage.
+    pub fn heap_percentage(&self) -> f64 {
+        100.0 - self.stack_percentage()
+    }
+
+    /// Check if the ">95% stack allocation" claim holds.
+    pub fn meets_95_percent_target(&self) -> bool {
+        self.stack_percentage() >= 95.0
+    }
+
+    /// Format a detailed statistics report.
+    pub fn format_report(&self) -> String {
+        let mut report = String::new();
+
+        report.push_str("╔══════════════════════════════════════════════════════════════════╗\n");
+        report.push_str("║           ESCAPE ANALYSIS STATISTICS (PERF-V-002)                ║\n");
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+        report.push_str(&format!(
+            "║  Functions analyzed:           {:>6}                            ║\n",
+            self.functions_analyzed
+        ));
+        report.push_str(&format!(
+            "║  Total locals:                 {:>6}                            ║\n",
+            self.total_locals
+        ));
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+        report.push_str("║  ALLOCATION TIER BREAKDOWN                                       ║\n");
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+        report.push_str(&format!(
+            "║  Stack-promotable (Tier 0):    {:>6} ({:>5.1}%)                   ║\n",
+            self.stack_promotable,
+            self.stack_percentage()
+        ));
+        report.push_str(&format!(
+            "║  Heap-required (Tier 1/2):     {:>6} ({:>5.1}%)                   ║\n",
+            self.heap_required,
+            self.heap_percentage()
+        ));
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+        report.push_str("║  ESCAPE STATE BREAKDOWN                                          ║\n");
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+
+        let no_escape_pct = if self.total_locals > 0 {
+            (self.by_state.no_escape as f64 / self.total_locals as f64) * 100.0
+        } else {
+            0.0
+        };
+        let arg_escape_pct = if self.total_locals > 0 {
+            (self.by_state.arg_escape as f64 / self.total_locals as f64) * 100.0
+        } else {
+            0.0
+        };
+        let global_escape_pct = if self.total_locals > 0 {
+            (self.by_state.global_escape as f64 / self.total_locals as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        report.push_str(&format!(
+            "║  NoEscape:                     {:>6} ({:>5.1}%)                   ║\n",
+            self.by_state.no_escape, no_escape_pct
+        ));
+        report.push_str(&format!(
+            "║  ArgEscape:                    {:>6} ({:>5.1}%)                   ║\n",
+            self.by_state.arg_escape, arg_escape_pct
+        ));
+        report.push_str(&format!(
+            "║  GlobalEscape:                 {:>6} ({:>5.1}%)                   ║\n",
+            self.by_state.global_escape, global_escape_pct
+        ));
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+        report.push_str("║  SPECIAL CAPTURES                                                ║\n");
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+        report.push_str(&format!(
+            "║  Effect-captured:              {:>6}                            ║\n",
+            self.effect_captured
+        ));
+        report.push_str(&format!(
+            "║  Closure-captured:             {:>6}                            ║\n",
+            self.closure_captured
+        ));
+        report.push_str("╠══════════════════════════════════════════════════════════════════╣\n");
+
+        let target_met = self.meets_95_percent_target();
+        let status = if target_met { "✓ PASS" } else { "✗ FAIL" };
+        let status_line = format!(
+            "║  TARGET (>95% stack):          {:>5.1}%  {}                      ║\n",
+            self.stack_percentage(),
+            status
+        );
+        report.push_str(&status_line);
+        report.push_str("╚══════════════════════════════════════════════════════════════════╝\n");
+
+        report
+    }
+
+    /// Format a compact single-line summary.
+    pub fn format_summary(&self) -> String {
+        format!(
+            "{} functions, {} locals: {:.1}% stack-promotable ({} stack, {} heap)",
+            self.functions_analyzed,
+            self.total_locals,
+            self.stack_percentage(),
+            self.stack_promotable,
+            self.heap_required
+        )
+    }
+}
+
+// ============================================================================
 // Escape Analyzer
 // ============================================================================
 

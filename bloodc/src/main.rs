@@ -1070,9 +1070,15 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 })
                 .collect();
 
+            // Compute aggregate escape analysis statistics (PERF-V-002)
+            let mut escape_stats = mir::EscapeStatistics::new();
+            for results in escape_results.values() {
+                escape_stats.add_results(results);
+            }
+
             if verbosity > 1 {
-                eprintln!("Escape analysis complete. {} functions analyzed.", escape_results.len());
-                // Report tier recommendations
+                eprintln!("Escape analysis complete. {}", escape_stats.format_summary());
+                // Report tier recommendations per function
                 for (&def_id, results) in &escape_results {
                     let stack_count = results.stack_promotable.len();
                     let effect_captured = results.effect_captured.len();
@@ -1081,6 +1087,11 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                             def_id, stack_count, effect_captured);
                     }
                 }
+            }
+
+            // At high verbosity, print full statistics report
+            if verbosity > 2 {
+                eprintln!("{}", escape_stats.format_report());
             }
 
             // Run closure analysis to identify inline optimization candidates
