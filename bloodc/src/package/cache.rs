@@ -122,7 +122,7 @@ impl PackageCache {
     }
 
     /// Get a cached git checkout path if it exists.
-    pub fn get_git_cached(&self, name: &str, revision: &str) -> Option<PathBuf> {
+    pub fn get_git_cached(&self, _name: &str, revision: &str) -> Option<PathBuf> {
         // Search for the package in git cache
         let git_dir = self.git_dir();
         if !git_dir.exists() {

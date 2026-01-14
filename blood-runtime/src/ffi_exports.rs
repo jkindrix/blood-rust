@@ -910,7 +910,8 @@ pub unsafe extern "C" fn blood_perform(
                         // The handler signature is: fn(state: *void, args: *i64, arg_count: i64, continuation: i64) -> i64
                         type OpHandler = unsafe extern "C" fn(*mut c_void, *const i64, i64, i64) -> i64;
                         let handler: OpHandler = std::mem::transmute(op_fn);
-                        return handler(instance_state, args, arg_count, continuation);
+                        let result = handler(instance_state, args, arg_count, continuation);
+                        return result;
                     }
                 }
             }

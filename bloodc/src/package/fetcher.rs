@@ -29,6 +29,7 @@ use super::version::Version;
 
 /// Package fetcher for downloading packages from various sources.
 #[derive(Debug)]
+#[allow(dead_code)] // Infrastructure for package registry
 pub struct Fetcher {
     /// Package cache for storing downloaded packages.
     cache: PackageCache,

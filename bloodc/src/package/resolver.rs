@@ -554,6 +554,7 @@ impl Default for Resolver {
 
 /// Internal representation of a dependency requirement.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Infrastructure for package resolution
 struct DependencyReq {
     version: Option<VersionReq>,
     git: Option<String>,
