@@ -590,7 +590,7 @@ Compiler is written in Rust, not Blood.
   - Public `tokenize()` function producing token array
   - Handles: escape sequences, nested block comments, doc comments, number literals with exponents
 - [x] **SELF-003**: Implement parser in Blood
-  - Created `blood-std/std/compiler/parser.blood` with 2300+ lines
+  - Created `blood-std/std/compiler/parser.blood` with 2992 lines
   - Full recursive descent parser with Pratt parsing for expressions
   - Complete AST types: Program, Declaration, Expr, Pattern, Type, Statement
   - Parses all major constructs: functions, structs, enums, traits, impls, effects, handlers
@@ -935,19 +935,21 @@ Project appears to have single maintainer.
 
 ## Summary Statistics
 
-**Status as of 2026-01-13 (Updated):**
+**Status as of 2026-01-14 (Audited):**
 
 | Category | P0 | P1 | P2 | P3 | Completed | Remaining |
 |----------|----|----|----|----|-----------|-----------|
-| Missing Features | ~~14~~ ✅0 | ~~3~~ ✅1 | 0 | 0 | 17 | **1** |
-| Validation Gaps | ~~9~~ ✅0 | ~~7~~ ✅0 | 0 | 0 | 24 | **0** |
-| Code Quality | 0 | 0 | ~~3~~ ✅0 | ~~1~~ ✅0 | 13 | **0** |
-| Design Concerns | 0 | ~~3~~ ✅2 | ~~10~~ ✅0 | 0 | 15 | **1** |
-| Ecosystem | 0 | ~~5~~ ✅2 | ~~11~~ ✅0 | 0 | 20 | **2** |
-| Safety | 0 | 0 | ~~5~~ ✅4 | 4 | 6 | **8** |
-| Documentation | 0 | 0 | ~~1~~ ✅0 | ~~3~~ ✅0 | 9 | **0** |
-| Risk Mitigation | 0 | 0 | 1 | 0 | 9 | **1** |
-| **Total** | **0** | **5** | **3** | **4** | **114** | **12** |
+| Missing Features | 0 | 0 | 0 | 0 | 17 | **1 partial** |
+| Validation Gaps | 0 | 0 | 0 | 0 | 23 | **0** |
+| Code Quality | 0 | 0 | 0 | 0 | 13 | **0** |
+| Design Concerns | 0 | 0 | 0 | 0 | 16 | **0** |
+| Ecosystem | 0 | 2 | 0 | 0 | 20 | **2** |
+| Safety | 0 | 0 | 0 | 4 | 10 | **4** |
+| Documentation | 0 | 0 | 0 | 0 | 9 | **0** |
+| Risk Mitigation | 0 | 0 | 0 | 0 | 10 | **0** |
+| **Total** | **0** | **2** | **0** | **4** | **118** | **6 + 1 partial** |
+
+**Note:** Some items marked "complete" were research/investigation tasks with follow-up implementation work. Those implementation tasks are tracked in ACTION_ITEMS.md (v2).
 
 **Key Progress:**
 - ✅ All P0 items complete (IMPL-001-007, FFI-001-007, TEST-001-009)

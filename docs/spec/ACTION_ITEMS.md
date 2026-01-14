@@ -1,7 +1,7 @@
 # Blood Compiler: Action Items Checklist (v2)
 
 **Generated**: 2026-01-14
-**Predecessor**: ACTION_ITEMS_V1_COMPLETED.md (114 items completed)
+**Predecessor**: ACTION_ITEMS_V1_COMPLETED.md (118 items completed, 1 partial)
 **Status**: Active tracking document
 
 ---
@@ -126,7 +126,7 @@ SELF-001-003 complete. Continue toward full self-hosting.
 ### 4.1 Blood Parser Verification [P2]
 
 - [ ] **SELF-VERIFY-001**: Verify `blood-std/std/compiler/parser.blood` manually
-  - Review 2300+ line parser implementation for correctness
+  - Review 2992-line parser implementation for correctness
   - Cannot run until self-hosting progresses
   - Document any identified issues for fixing
 - [ ] **SELF-VERIFY-002**: Create test suite in Blood for parser
