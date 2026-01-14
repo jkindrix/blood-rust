@@ -1044,10 +1044,29 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             }
 
             // Run escape analysis on MIR bodies
+            // Create ADT field lookup closure for Copy detection
+            let adt_fields = |def_id: bloodc::hir::DefId| -> Option<Vec<bloodc::hir::Type>> {
+                let item = hir_crate.items.get(&def_id)?;
+                if let bloodc::hir::ItemKind::Struct(struct_def) = &item.kind {
+                    match &struct_def.kind {
+                        bloodc::hir::item::StructKind::Record(fields) => {
+                            Some(fields.iter().map(|f| f.ty.clone()).collect())
+                        }
+                        bloodc::hir::item::StructKind::Tuple(fields) => {
+                            Some(fields.iter().map(|f| f.ty.clone()).collect())
+                        }
+                        bloodc::hir::item::StructKind::Unit => Some(Vec::new()),
+                    }
+                } else {
+                    // Enums and other ADTs are not Copy by default
+                    None
+                }
+            };
+
             let escape_results: std::collections::HashMap<_, _> = mir_bodies.iter()
                 .map(|(&def_id, body)| {
                     let mut analyzer = mir::EscapeAnalyzer::new();
-                    (def_id, analyzer.analyze(body))
+                    (def_id, analyzer.analyze_with_adt_lookup(body, &adt_fields))
                 })
                 .collect();
 

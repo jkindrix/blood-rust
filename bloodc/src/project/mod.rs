@@ -12,7 +12,7 @@ mod graph;
 mod file_cache;
 mod compiler;
 
-pub use manifest::{Manifest, Package, BinTarget, LibTarget, Edition, ManifestError};
+pub use manifest::{Manifest, Package, BinTarget, LibTarget, Edition, ManifestError, Dependency, DetailedDependency};
 pub use resolve::{ModuleResolver, ModuleTree, ModuleId, Module};
 pub use graph::{DependencyGraph, GraphError};
 pub use file_cache::{FileCache, FileCacheEntry, FileCacheStats, FileCacheError, FileStatus};

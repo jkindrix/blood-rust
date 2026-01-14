@@ -212,6 +212,98 @@ impl Type {
         matches!(self.kind(), TypeKind::Error)
     }
 
+    /// Check if this type implements Copy semantics.
+    ///
+    /// A type is Copy if its values can be duplicated by simple bitwise copy
+    /// without any special behavior. This includes:
+    /// - Primitives (integers, floats, bool, char)
+    /// - Unit and Never types
+    /// - Tuples and arrays where all elements are Copy
+    /// - Structs where all fields are Copy (requires ADT lookup)
+    ///
+    /// The `adt_fields` callback is used to look up field types for ADTs.
+    /// It takes a DefId and returns the field types if the ADT is a struct.
+    /// For enums, it should return None (enums are not Copy by default).
+    pub fn is_copy<F>(&self, adt_fields: &F) -> bool
+    where
+        F: Fn(DefId) -> Option<Vec<Type>>,
+    {
+        match self.kind() {
+            // Primitives are always Copy (except String which is heap-allocated)
+            TypeKind::Primitive(prim) => !matches!(prim, PrimitiveTy::String),
+
+            // Unit and Never are trivially Copy
+            TypeKind::Tuple(tys) if tys.is_empty() => true,
+            TypeKind::Never => true,
+
+            // Tuples are Copy if all elements are Copy
+            TypeKind::Tuple(tys) => tys.iter().all(|t| t.is_copy(adt_fields)),
+
+            // Arrays are Copy if the element type is Copy
+            TypeKind::Array { element, .. } => element.is_copy(adt_fields),
+
+            // References are NOT Copy (they have identity and lifetime concerns)
+            // Note: In Rust, &T is Copy but &mut T is not. Blood treats all refs as non-Copy
+            // for simplicity in the memory model.
+            TypeKind::Ref { .. } => false,
+
+            // Raw pointers are Copy (like in C)
+            TypeKind::Ptr { .. } => true,
+
+            // Slices are NOT Copy (they are unsized)
+            TypeKind::Slice { .. } => false,
+
+            // Functions are Copy (function pointers)
+            TypeKind::Fn { .. } => true,
+
+            // Closures are NOT Copy (they capture environment)
+            TypeKind::Closure { .. } => false,
+
+            // ADTs: look up fields and check if all are Copy
+            TypeKind::Adt { def_id, args: _ } => {
+                // Try to get field types. If we can't look them up, assume not Copy.
+                if let Some(field_types) = adt_fields(*def_id) {
+                    field_types.iter().all(|t| t.is_copy(adt_fields))
+                } else {
+                    // Enums or unknown ADTs are not Copy
+                    false
+                }
+            }
+
+            // Ranges are Copy if the element is Copy
+            TypeKind::Range { element, .. } => element.is_copy(adt_fields),
+
+            // Trait objects are NOT Copy (they are unsized and have vtables)
+            TypeKind::DynTrait { .. } => false,
+
+            // Records are Copy if all fields are Copy
+            TypeKind::Record { fields, row_var } => {
+                // Open records (with row_var) are not Copy
+                row_var.is_none() && fields.iter().all(|f| f.ty.is_copy(adt_fields))
+            }
+
+            // Forall types: check the body
+            TypeKind::Forall { body, .. } => body.is_copy(adt_fields),
+
+            // Ownership-qualified types delegate to inner
+            TypeKind::Ownership { inner, .. } => inner.is_copy(adt_fields),
+
+            // Type variables and inference vars: conservatively not Copy
+            TypeKind::Infer(_) | TypeKind::Param(_) => false,
+
+            // Error types: treat as Copy to avoid cascading errors
+            TypeKind::Error => true,
+        }
+    }
+
+    /// Check if this type is Copy without ADT lookup.
+    ///
+    /// This is a simpler version that only handles primitives and built-in types.
+    /// For full Copy detection including structs, use `is_copy` with an ADT lookup.
+    pub fn is_trivially_copy(&self) -> bool {
+        self.is_copy(&|_| None)
+    }
+
     /// Check if this type contains any type variables.
     pub fn has_type_vars(&self) -> bool {
         match self.kind() {

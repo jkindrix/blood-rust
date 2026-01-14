@@ -265,7 +265,22 @@ impl EscapeAnalyzer {
     }
 
     /// Analyze a MIR body and return escape results.
+    ///
+    /// This is a convenience method that uses primitive-only Copy detection.
+    /// For full Copy detection including structs, use `analyze_with_adt_lookup`.
     pub fn analyze(&mut self, body: &MirBody) -> EscapeResults {
+        self.analyze_with_adt_lookup(body, &|_| None)
+    }
+
+    /// Analyze a MIR body with ADT field lookup for Copy detection.
+    ///
+    /// The `adt_fields` callback is used to look up field types for ADTs.
+    /// It takes a DefId and returns the field types if the ADT is a struct.
+    /// This enables full Copy detection for struct types.
+    pub fn analyze_with_adt_lookup<F>(&mut self, body: &MirBody, adt_fields: &F) -> EscapeResults
+    where
+        F: Fn(DefId) -> Option<Vec<crate::hir::Type>>,
+    {
         self.states.clear();
         self.effect_captured.clear();
         self.closure_captures.clear();
@@ -348,11 +363,12 @@ impl EscapeAnalyzer {
             let ty = local_types.get(local);
 
             // Can stack-allocate if:
-            // 1. Type is primitive/Copy (values are copied, not referenced)
+            // 1. Type is Copy (values are copied, not referenced)
             //    - For Copy types, escape state only tracks value flow, not storage
             //    - Storage can always be on the stack since values are copied on use
+            //    - This includes primitives, unit, and structs with only Copy fields
             // 2. OR NoEscape state AND not captured by effect operations or closures
-            let is_copy_type = ty.map(|t| t.is_primitive() || t.is_unit()).unwrap_or(false);
+            let is_copy_type = ty.map(|t| t.is_copy(adt_fields)).unwrap_or(false);
             let escape_allows = state.can_stack_allocate()
                 && !self.effect_captured.contains(local)
                 && !self.is_captured_by_escaping_closure(*local);
@@ -596,7 +612,10 @@ mod tests {
     /// because they are copied by value, not referenced. To test that escape analysis
     /// correctly prevents stack allocation, we need non-primitive types.
     fn non_primitive_ty() -> Type {
-        Type::tuple(vec![Type::i32()])
+        // Use a reference type which is NOT Copy in Blood's model
+        // (unlike Rust where &T is Copy, Blood treats references as non-Copy
+        // to ensure proper generation checking)
+        Type::reference(Type::i32(), false)
     }
 
     #[test]
@@ -674,6 +693,50 @@ mod tests {
         // Unused temp should not escape
         assert_eq!(results.get(temp), EscapeState::NoEscape);
         assert!(results.can_stack_allocate(temp));
+    }
+
+    #[test]
+    fn test_nonescape_struct_is_stack_promotable() {
+        // Verify that a non-primitive (struct/tuple) local that doesn't escape
+        // IS stack-promotable. This is critical for performance.
+        let mut body = MirBody::new(dummy_def_id(), Span::dummy());
+
+        // Use a non-primitive type (tuple)
+        let struct_ty = non_primitive_ty();
+
+        // Return place with primitive type (so it doesn't affect struct's escape state)
+        body.new_local(Type::i32(), LocalKind::ReturnPlace, Span::dummy());
+
+        // Add a struct temporary that doesn't escape
+        let struct_local = body.new_local(struct_ty.clone(), LocalKind::Temp, Span::dummy());
+
+        // Create block with just an assignment to the struct (no escape)
+        let bb = body.new_block();
+        body.push_statement(bb, Statement::new(
+            StatementKind::Assign(
+                Place::local(struct_local),
+                Rvalue::Aggregate { kind: AggregateKind::Tuple, operands: vec![] },
+            ),
+            Span::dummy(),
+        ));
+        body.set_terminator(bb, Terminator::new(TerminatorKind::Return, Span::dummy()));
+
+        let mut analyzer = EscapeAnalyzer::new();
+        let results = analyzer.analyze(&body);
+
+        // The struct local should be NoEscape
+        assert_eq!(results.get(struct_local), EscapeState::NoEscape,
+            "Non-escaping struct should have NoEscape state");
+
+        // CRITICAL: Non-escaping struct MUST be stack-promotable
+        assert!(results.can_stack_allocate(struct_local),
+            "Non-escaping struct should be stack-promotable! \
+             This is critical for performance - structs that don't escape \
+             should use stack allocation, not blood_alloc_or_abort.");
+
+        // Verify the recommended tier is Stack
+        assert_eq!(results.recommended_tier(struct_local), MemoryTier::Stack,
+            "Non-escaping struct should recommend Stack tier");
     }
 
     #[test]

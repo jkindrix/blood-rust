@@ -101,6 +101,7 @@ pub mod expand;
 pub mod hir;
 pub mod lexer;
 pub mod mir;
+pub mod package;
 pub mod parser;
 pub mod project;
 pub mod span;
