@@ -148,27 +148,8 @@ fn potential_energy(b1: &Body, b2: &Body) -> f64 {
     (b1.mass * b2.mass) / dist
 }
 
-// Square root approximation using Newton-Raphson
-fn sqrt(x: f64) -> f64 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-
-    // Initial guess
-    let mut guess = x / 2.0;
-    if guess < 1.0 {
-        guess = 1.0;
-    }
-
-    // Newton-Raphson iterations
-    let mut i = 0;
-    while i < 15 {
-        guess = (guess + x / guess) / 2.0;
-        i = i + 1;
-    }
-
-    guess
-}
+// sqrt is now a builtin that maps to LLVM's hardware sqrt intrinsic
+// No need to define it - it's available as sqrt(f64) -> f64
 
 // Advance the simulation by one timestep
 fn advance(
