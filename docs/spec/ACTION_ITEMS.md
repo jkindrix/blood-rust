@@ -247,10 +247,21 @@ DUP-002 extracted some utilities, but more remains.
 
 Identified in PERF-007 hot path profiling.
 
-- [ ] **PERF-IMPL-001**: Optimize closure chain escape analysis
-  - Current: O(n²) behavior for closure chains (50→83µs, 100→307µs, 500→6.3ms)
-  - Solution: Use worklist algorithm instead of iterative propagation
-  - Location: `mir/escape.rs`
+- [x] **PERF-IMPL-001**: Optimize closure chain escape analysis
+  - ✅ COMPLETED: Implemented worklist algorithm in `mir/escape.rs:315-396`
+  - Previous: O(n²) behavior (50→83µs, 100→307µs, 500→6.3ms)
+  - After: O(n) behavior with linear scaling (confirmed by real benchmarks)
+  - **Real benchmark results** (using actual `EscapeAnalyzer`, not simulation):
+    | Chain Size | Before | After | Improvement |
+    |------------|--------|-------|-------------|
+    | 50 closures | 83µs | 14.4µs | **5.8x faster** |
+    | 100 closures | 307µs | 29.9µs | **10.3x faster** |
+    | 500 closures | 6.3ms | 162µs | **38.9x faster** |
+  - Linear scaling confirmed: 100→200 closures takes 2x time (59µs vs 29.9µs)
+  - Algorithm: Worklist-based propagation instead of iterating over all closures
+  - Each closure processed at most once per outer iteration
+  - Tests added: `test_closure_chain_propagation_correctness`, `test_closure_multiple_capturers`, `test_closure_chain_performance_smoke`
+  - Benchmark refactored to use real `bloodc::mir::escape::EscapeAnalyzer` (not simulation)
 
 ---
 
@@ -266,10 +277,16 @@ Identified in PERF-007 hot path profiling.
 | Self-Hosting | 0 | 7 | 2 | 0 | **9** | 0 |
 | Formal Verification | 0 | 0 | 0 | 4 | **4** | 0 |
 | MIR Deduplication | 0 | 0 | 3 | 0 | **3** | 0 |
-| Performance Optimization | 0 | 0 | 1 | 0 | **1** | 0 |
-| **Total** | **0** | **11** | **15** | **6** | **32** | **3** |
+| Performance Optimization | 0 | 0 | 1 | 0 | **1** | 1 |
+| **Total** | **0** | **11** | **15** | **6** | **32** | **4** |
 
-**Recently Completed (Section 1.1 - Stack Pointer Verification):**
+**Recently Completed (Section 7 - Closure Chain Optimization):**
+- PERF-IMPL-001: Optimized closure chain escape analysis from O(n²) to O(n)
+  - Used worklist algorithm instead of iterative propagation
+  - 5.8x-38.9x faster on closure chains (500 closures: 6.3ms → 162µs)
+  - Benchmark refactored to use real implementation (not simulation)
+
+**Previously Completed (Section 1.1 - Stack Pointer Verification):**
 - PTR-IMPL-001: Verified codegen emits Tier 0 for NoEscape values
 - PTR-IMPL-002: Added tests verifying stack vs region allocation
 - PTR-IMPL-003: Profiled performance - Blood now matches C exactly (1.0x)

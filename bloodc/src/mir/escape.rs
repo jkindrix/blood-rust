@@ -53,7 +53,7 @@
 //!
 //! Iteration continues until a fixed point is reached.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::hir::{DefId, LocalId};
 use super::body::MirBody;
@@ -312,10 +312,19 @@ impl EscapeAnalyzer {
             }
         }
 
-        // Iterate to fixed point
+        // Iterate to fixed point using a worklist algorithm for closure propagation.
+        //
+        // The naive approach of iterating over ALL closures on every iteration is O(n²)
+        // for closure chains. The worklist approach is O(n) amortized.
+        //
+        // Algorithm:
+        // 1. Run statement/terminator analysis to propagate escape states
+        // 2. Use a worklist to propagate escapes through closure capture chains
+        // 3. Repeat until stable
         loop {
             let mut changed = false;
 
+            // Phase 1: Statement and terminator analysis
             for (_bb_id, block) in body.blocks() {
                 for stmt in &block.statements {
                     changed |= self.analyze_statement(&stmt.kind);
@@ -326,24 +335,58 @@ impl EscapeAnalyzer {
                 }
             }
 
-            // Propagate escape state to closure captures:
-            // If a closure escapes, its captured values must also escape
-            // Collect updates first to avoid borrow conflict
-            let updates: Vec<_> = self.closure_captures.iter()
-                .filter_map(|(closure_local, captures)| {
-                    let closure_state = self.states.get(closure_local).copied()
-                        .unwrap_or(EscapeState::NoEscape);
-                    if closure_state != EscapeState::NoEscape {
-                        Some((captures.clone(), closure_state))
-                    } else {
-                        None
-                    }
+            // Phase 2: Worklist-based closure propagation
+            //
+            // Instead of iterating over ALL closures every time, we:
+            // 1. Initialize worklist with closures that currently escape
+            // 2. Process each closure, propagating escape to its captures
+            // 3. If a captured local is itself a closure and its state changed, add to worklist
+            //
+            // This is O(n) because each closure is processed at most once per outer iteration,
+            // and the outer loop runs at most 3 times (bounded by escape state levels).
+            let mut worklist: VecDeque<LocalId> = self.closure_captures.keys()
+                .filter(|c| {
+                    self.states.get(c).copied().unwrap_or(EscapeState::NoEscape)
+                        != EscapeState::NoEscape
                 })
+                .copied()
                 .collect();
+            let mut processed: HashSet<LocalId> = HashSet::new();
 
-            for (captures, state) in updates {
+            while let Some(closure) = worklist.pop_front() {
+                // Skip if already processed in this propagation phase
+                if processed.contains(&closure) {
+                    continue;
+                }
+                processed.insert(closure);
+
+                let closure_state = self.states.get(&closure).copied()
+                    .unwrap_or(EscapeState::NoEscape);
+
+                // Only propagate if closure escapes
+                if closure_state == EscapeState::NoEscape {
+                    continue;
+                }
+
+                // Get captures (clone to avoid borrow conflict)
+                let captures = match self.closure_captures.get(&closure) {
+                    Some(caps) => caps.clone(),
+                    None => continue,
+                };
+
+                // Propagate escape state to all captured locals
                 for captured in captures {
-                    changed |= self.update_state(captured, state);
+                    if self.update_state(captured, closure_state) {
+                        changed = true;
+
+                        // If the captured local is itself a closure and hasn't been
+                        // processed yet, add it to the worklist
+                        if self.closure_captures.contains_key(&captured)
+                            && !processed.contains(&captured)
+                        {
+                            worklist.push_back(captured);
+                        }
+                    }
                 }
             }
 
@@ -1471,6 +1514,256 @@ mod tests {
             });
             count += 1;
             assert!(count <= 3, "lattice chain exceeded expected bound");
+        }
+    }
+
+    // ========================================================================
+    // Closure Chain Tests (PERF-IMPL-001)
+    // ========================================================================
+
+    /// Test closure chain escape propagation correctness.
+    ///
+    /// This test verifies that when the last closure in a chain escapes,
+    /// all closures captured transitively also escape correctly.
+    ///
+    /// PERF-IMPL-001: Closure chain escape analysis was optimized from O(n²)
+    /// to O(n) using a worklist algorithm.
+    #[test]
+    fn test_closure_chain_propagation_correctness() {
+        // Test with chains of various sizes
+        for chain_length in [5, 10, 20, 50] {
+            let mut body = MirBody::new(dummy_def_id(), Span::dummy());
+
+            // _0: return place
+            body.new_local(Type::unit(), LocalKind::ReturnPlace, Span::dummy());
+
+            // Create locals that will be captured by closures
+            let mut captured_locals: Vec<LocalId> = Vec::with_capacity(chain_length);
+            for _ in 0..chain_length {
+                let local = body.new_local(non_primitive_ty(), LocalKind::Temp, Span::dummy());
+                captured_locals.push(local);
+            }
+
+            // Create chain of closures where each captures a local
+            let mut closure_locals: Vec<LocalId> = Vec::with_capacity(chain_length);
+            for _ in 0..chain_length {
+                let closure = body.new_local(Type::unit(), LocalKind::Temp, Span::dummy());
+                closure_locals.push(closure);
+            }
+
+            let bb = body.new_block();
+
+            // First closure captures captured_locals[0]
+            body.push_statement(bb, Statement::new(
+                StatementKind::Assign(
+                    Place::local(closure_locals[0]),
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Closure { def_id: DefId::new(100) },
+                        operands: vec![Operand::Copy(Place::local(captured_locals[0]))],
+                    },
+                ),
+                Span::dummy(),
+            ));
+
+            // Each subsequent closure captures the previous closure
+            for i in 1..chain_length {
+                body.push_statement(bb, Statement::new(
+                    StatementKind::Assign(
+                        Place::local(closure_locals[i]),
+                        Rvalue::Aggregate {
+                            kind: AggregateKind::Closure { def_id: DefId::new(100 + i as u32) },
+                            operands: vec![Operand::Copy(Place::local(closure_locals[i - 1]))],
+                        },
+                    ),
+                    Span::dummy(),
+                ));
+            }
+
+            // Make the LAST closure escape (return it)
+            body.push_statement(bb, Statement::new(
+                StatementKind::Assign(
+                    Place::local(LocalId::new(0)),
+                    Rvalue::Use(Operand::Copy(Place::local(closure_locals[chain_length - 1]))),
+                ),
+                Span::dummy(),
+            ));
+
+            body.set_terminator(bb, Terminator::new(TerminatorKind::Return, Span::dummy()));
+
+            // Run analysis
+            let mut analyzer = EscapeAnalyzer::new();
+            let results = analyzer.analyze(&body);
+
+            // Verify: ALL closures in the chain should escape
+            for (i, &closure) in closure_locals.iter().enumerate() {
+                let state = results.get(closure);
+                assert_eq!(
+                    state, EscapeState::ArgEscape,
+                    "Closure {} in chain of {} should escape (got {:?})",
+                    i, chain_length, state
+                );
+            }
+
+            // Verify: The first captured local should also escape
+            // (it's captured by the first closure which escapes transitively)
+            let first_captured_state = results.get(captured_locals[0]);
+            assert_eq!(
+                first_captured_state, EscapeState::ArgEscape,
+                "First captured local should escape (got {:?})",
+                first_captured_state
+            );
+        }
+    }
+
+    /// Test that worklist algorithm handles complex closure capture patterns.
+    ///
+    /// Creates a pattern where multiple closures capture the same local,
+    /// and only some closures escape.
+    #[test]
+    fn test_closure_multiple_capturers() {
+        let mut body = MirBody::new(dummy_def_id(), Span::dummy());
+
+        body.new_local(Type::unit(), LocalKind::ReturnPlace, Span::dummy());
+
+        // Create a shared captured local
+        let shared_local = body.new_local(non_primitive_ty(), LocalKind::Temp, Span::dummy());
+
+        // Create three closures that all capture the shared local
+        let closure1 = body.new_local(Type::unit(), LocalKind::Temp, Span::dummy());
+        let closure2 = body.new_local(Type::unit(), LocalKind::Temp, Span::dummy());
+        let closure3 = body.new_local(Type::unit(), LocalKind::Temp, Span::dummy());
+
+        let bb = body.new_block();
+
+        // All three closures capture the same local
+        for (closure, def_id) in [(closure1, 100), (closure2, 101), (closure3, 102)] {
+            body.push_statement(bb, Statement::new(
+                StatementKind::Assign(
+                    Place::local(closure),
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Closure { def_id: DefId::new(def_id) },
+                        operands: vec![Operand::Copy(Place::local(shared_local))],
+                    },
+                ),
+                Span::dummy(),
+            ));
+        }
+
+        // Only closure2 escapes
+        body.push_statement(bb, Statement::new(
+            StatementKind::Assign(
+                Place::local(LocalId::new(0)),
+                Rvalue::Use(Operand::Copy(Place::local(closure2))),
+            ),
+            Span::dummy(),
+        ));
+
+        body.set_terminator(bb, Terminator::new(TerminatorKind::Return, Span::dummy()));
+
+        let mut analyzer = EscapeAnalyzer::new();
+        let results = analyzer.analyze(&body);
+
+        // closure1 and closure3 don't escape
+        assert_eq!(results.get(closure1), EscapeState::NoEscape);
+        assert_eq!(results.get(closure3), EscapeState::NoEscape);
+
+        // closure2 escapes
+        assert_eq!(results.get(closure2), EscapeState::ArgEscape);
+
+        // shared_local escapes because closure2 escapes and captures it
+        assert_eq!(results.get(shared_local), EscapeState::ArgEscape);
+
+        // shared_local cannot be stack allocated
+        assert!(!results.can_stack_allocate(shared_local));
+    }
+
+    /// Performance smoke test for closure chains.
+    ///
+    /// This test verifies that analysis completes in reasonable time
+    /// for large closure chains, validating the O(n) worklist algorithm.
+    #[test]
+    fn test_closure_chain_performance_smoke() {
+        use std::time::Instant;
+
+        // Test with 500 closures - should complete quickly with O(n) algorithm
+        // With O(n²) algorithm, this would take ~6.3ms according to original profiling
+        // With O(n) algorithm, should take <1ms
+        let chain_length = 500;
+
+        let mut body = MirBody::new(dummy_def_id(), Span::dummy());
+        body.new_local(Type::unit(), LocalKind::ReturnPlace, Span::dummy());
+
+        let mut closure_locals: Vec<LocalId> = Vec::with_capacity(chain_length);
+        for _ in 0..chain_length {
+            let closure = body.new_local(Type::unit(), LocalKind::Temp, Span::dummy());
+            closure_locals.push(closure);
+        }
+
+        let bb = body.new_block();
+
+        // First closure captures a dummy local
+        let captured = body.new_local(Type::i32(), LocalKind::Temp, Span::dummy());
+        body.push_statement(bb, Statement::new(
+            StatementKind::Assign(
+                Place::local(closure_locals[0]),
+                Rvalue::Aggregate {
+                    kind: AggregateKind::Closure { def_id: DefId::new(100) },
+                    operands: vec![Operand::Copy(Place::local(captured))],
+                },
+            ),
+            Span::dummy(),
+        ));
+
+        // Chain: each closure captures the previous one
+        for i in 1..chain_length {
+            body.push_statement(bb, Statement::new(
+                StatementKind::Assign(
+                    Place::local(closure_locals[i]),
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Closure { def_id: DefId::new(100 + i as u32) },
+                        operands: vec![Operand::Copy(Place::local(closure_locals[i - 1]))],
+                    },
+                ),
+                Span::dummy(),
+            ));
+        }
+
+        // Make last closure escape
+        body.push_statement(bb, Statement::new(
+            StatementKind::Assign(
+                Place::local(LocalId::new(0)),
+                Rvalue::Use(Operand::Copy(Place::local(closure_locals[chain_length - 1]))),
+            ),
+            Span::dummy(),
+        ));
+
+        body.set_terminator(bb, Terminator::new(TerminatorKind::Return, Span::dummy()));
+
+        // Measure analysis time
+        let start = Instant::now();
+        let mut analyzer = EscapeAnalyzer::new();
+        let results = analyzer.analyze(&body);
+        let elapsed = start.elapsed();
+
+        // Verify correctness
+        assert_eq!(results.get(closure_locals[chain_length - 1]), EscapeState::ArgEscape);
+        assert_eq!(results.get(closure_locals[0]), EscapeState::ArgEscape);
+
+        // Performance assertion: should complete in <100ms even on slow machines
+        // (With O(n²), 500 closures took 6.3ms; with O(n) should be much faster)
+        assert!(
+            elapsed.as_millis() < 100,
+            "Closure chain analysis took {:?}, expected <100ms. \
+             This suggests the worklist optimization may not be working.",
+            elapsed
+        );
+
+        // For informational purposes (not a hard assertion)
+        if elapsed.as_micros() > 1000 {
+            eprintln!(
+                "Note: Closure chain of {} took {:?} (expected <1ms with O(n) algorithm)",
+                chain_length, elapsed
+            );
         }
     }
 }
