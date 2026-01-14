@@ -121,12 +121,17 @@ Derived from EFF-001 audit findings. EFF-002 (caching) already implemented.
 
 CLOS-003 from v1 is partially complete. Infrastructure exists, full optimization deferred.
 
+**Assessment (2026-01-14):** ClosureAnalyzer is now integrated into the pipeline (use `-vv`
+for reports). Inline optimization requires significant ABI changes across multiple modules.
+Given Blood now matches C performance (1.0x), this optimization is lower priority.
+
 ### 3.1 Inline Small Closures [P1]
 
 - [ ] **CLOS-IMPL-001**: Modify closure ABI to inline small environments
   - Current: `{ fn_ptr: i8*, env_ptr: i8* }` with separate alloca
   - Optimal: `{ fn_ptr: i8*, env: [captures inline] }` for ≤16 bytes
   - Threshold identified by `ClosureAnalyzer` (CLOS-001)
+  - **Complexity**: Requires variable-sized closure types, coordinated changes
 - [ ] **CLOS-IMPL-002**: Update `codegen/mir_codegen/rvalue.rs` for inline captures
   - Emit inline capture storage instead of separate allocation
   - Handle both inline and pointer-based based on environment size
