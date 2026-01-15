@@ -151,6 +151,11 @@ pub struct TypeContext<'a> {
     pub(crate) option_def_id: Option<DefId>,
     /// DefId for the built-in Result<T, E> type.
     pub(crate) result_def_id: Option<DefId>,
+    /// DefId for the built-in Vec<T> type.
+    pub(crate) vec_def_id: Option<DefId>,
+    /// Builtin methods for primitive and builtin types.
+    /// Maps (type discriminant, method name) -> method info.
+    pub(crate) builtin_methods: Vec<BuiltinMethodInfo>,
 }
 
 /// Information about a struct.
@@ -317,6 +322,38 @@ pub struct ImplAssocConstInfo {
     pub name: String,
     /// The type of the constant.
     pub ty: Type,
+}
+
+/// Discriminant for matching builtin methods against types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuiltinMethodType {
+    /// Matches `str` type.
+    Str,
+    /// Matches `char` type.
+    Char,
+    /// Matches `String` type.
+    String,
+    /// Matches `Option<T>` type.
+    Option,
+    /// Matches `Vec<T>` type.
+    Vec,
+    /// Matches `&str` type.
+    StrRef,
+}
+
+/// Information about a builtin method for primitive/builtin types.
+#[derive(Debug, Clone)]
+pub struct BuiltinMethodInfo {
+    /// The type this method applies to.
+    pub type_match: BuiltinMethodType,
+    /// The method name.
+    pub name: String,
+    /// The method's DefId.
+    pub def_id: DefId,
+    /// Whether this is a static method (no self parameter).
+    pub is_static: bool,
+    /// The runtime function name for codegen.
+    pub runtime_name: String,
 }
 
 /// Information about a trait declaration.
@@ -630,9 +667,12 @@ impl<'a> TypeContext<'a> {
             pending_derives: Vec::new(),
             option_def_id: None,
             result_def_id: None,
+            vec_def_id: None,
+            builtin_methods: Vec::new(),
         };
         ctx.register_builtins();
         ctx.register_builtin_types();
+        ctx.register_builtin_methods();
         ctx
     }
 

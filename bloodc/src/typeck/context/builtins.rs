@@ -453,6 +453,8 @@ impl<'a> TypeContext<'a> {
             generics: vec![vec_t_var_id],
         });
 
+        self.vec_def_id = Some(vec_def_id);
+
         // Register Box<T> as a built-in struct (opaque for now)
         let box_def_id = self.resolver.define_item(
             "Box".to_string(),
@@ -471,6 +473,356 @@ impl<'a> TypeContext<'a> {
             name: "Box".to_string(),
             fields: vec![],  // opaque - no exposed fields
             generics: vec![box_t_var_id],
+        });
+    }
+
+    /// Register built-in methods for primitive and builtin types.
+    ///
+    /// This registers methods like `str.to_string()`, `char.is_whitespace()`,
+    /// `String.len()`, `Option.unwrap()`, etc. that are available without
+    /// importing the standard library.
+    pub(crate) fn register_builtin_methods(&mut self) {
+        use super::BuiltinMethodType;
+
+        let _unit_ty = Type::unit();
+        let bool_ty = Type::bool();
+        let usize_ty = Type::usize();
+        let string_ty = Type::string();
+
+        // === str methods ===
+
+        // str.to_string(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "to_string",
+            false,  // not static, has self
+            vec![Type::reference(Type::str(), false)],  // &self
+            string_ty.clone(),
+            "str_to_string",
+        );
+
+        // &str.to_string(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "to_string",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            string_ty.clone(),
+            "str_to_string",
+        );
+
+        // str.len(&self) -> usize
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "len",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            usize_ty.clone(),
+            "str_len_usize",
+        );
+
+        // &str.len(&self) -> usize
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "len",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            usize_ty.clone(),
+            "str_len_usize",
+        );
+
+        // === char methods ===
+
+        // char.is_whitespace(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_whitespace",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_whitespace",
+        );
+
+        // char.is_alphabetic(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_alphabetic",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_alphabetic",
+        );
+
+        // char.is_alphanumeric(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_alphanumeric",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_alphanumeric",
+        );
+
+        // char.is_ascii_digit(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_ascii_digit",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_ascii_digit",
+        );
+
+        // char.is_ascii_hexdigit(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_ascii_hexdigit",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_ascii_hexdigit",
+        );
+
+        // char.is_ascii_uppercase(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_ascii_uppercase",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_ascii_uppercase",
+        );
+
+        // char.is_ascii_lowercase(self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "is_ascii_lowercase",
+            false,
+            vec![Type::char()],
+            bool_ty.clone(),
+            "char_is_ascii_lowercase",
+        );
+
+        // char.to_string(self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "to_string",
+            false,
+            vec![Type::char()],
+            string_ty.clone(),
+            "char_to_string_owned",
+        );
+
+        // === String methods ===
+
+        // String.len(&self) -> usize
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "len",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            usize_ty.clone(),
+            "string_len",
+        );
+
+        // String.is_empty(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "is_empty",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            bool_ty.clone(),
+            "string_is_empty",
+        );
+
+        // String::new() -> String (static method)
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "new",
+            true,  // static method
+            vec![],
+            string_ty.clone(),
+            "string_new",
+        );
+
+        // String.push(&mut self, ch: char)
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "push",
+            false,
+            vec![Type::reference(string_ty.clone(), true), Type::char()],
+            Type::unit(),
+            "string_push",
+        );
+
+        // String.push_str(&mut self, s: &str)
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "push_str",
+            false,
+            vec![Type::reference(string_ty.clone(), true), Type::reference(Type::str(), false)],
+            Type::unit(),
+            "string_push_str",
+        );
+
+        // String.as_str(&self) -> &str
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "as_str",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            Type::reference(Type::str(), false),
+            "string_as_str",
+        );
+
+        // String.clear(&mut self)
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "clear",
+            false,
+            vec![Type::reference(string_ty.clone(), true)],
+            Type::unit(),
+            "string_clear",
+        );
+
+        // === Option methods ===
+        // Note: Option<T>.unwrap(self) -> T requires generic handling,
+        // which is done in find_builtin_method with type substitution.
+        // We register a placeholder here for method discovery.
+
+        // Get the Option and Vec DefIds
+        let option_def_id = self.option_def_id
+            .expect("BUG: option_def_id not set before register_builtin_methods");
+        let vec_def_id = self.vec_def_id
+            .expect("BUG: vec_def_id not set before register_builtin_methods");
+
+        // Option<T>.unwrap(self) -> T
+        // The actual return type is determined by the type argument
+        let t_var_id = TyVarId(9000);  // synthetic placeholder
+        let t_ty = Type::new(TypeKind::Param(t_var_id));
+        let option_t = Type::adt(option_def_id, vec![t_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "unwrap",
+            false,
+            vec![option_t.clone()],
+            t_ty.clone(),
+            "option_unwrap",
+        );
+
+        // Option<T>.is_some(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "is_some",
+            false,
+            vec![Type::reference(option_t.clone(), false)],
+            bool_ty.clone(),
+            "option_is_some",
+        );
+
+        // Option<T>.is_none(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "is_none",
+            false,
+            vec![Type::reference(option_t, false)],
+            bool_ty.clone(),
+            "option_is_none",
+        );
+
+        // === Vec methods ===
+
+        // Vec<T>::new() -> Vec<T> (static method)
+        let vec_t = Type::adt(vec_def_id, vec![t_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "new",
+            true,
+            vec![],
+            vec_t.clone(),
+            "vec_new",
+        );
+
+        // Vec<T>.len(&self) -> usize
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "len",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            usize_ty.clone(),
+            "vec_len",
+        );
+
+        // Vec<T>.is_empty(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "is_empty",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            bool_ty.clone(),
+            "vec_is_empty",
+        );
+
+        // Vec<T>.push(&mut self, value: T)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "push",
+            false,
+            vec![Type::reference(vec_t.clone(), true), t_ty.clone()],
+            Type::unit(),
+            "vec_push",
+        );
+    }
+
+    /// Register a single builtin method.
+    fn register_builtin_method(
+        &mut self,
+        type_match: super::BuiltinMethodType,
+        name: &str,
+        is_static: bool,
+        inputs: Vec<Type>,
+        output: Type,
+        runtime_name: &str,
+    ) {
+        // Create a DefId for this method
+        let method_name = format!("__builtin_{}_{}",
+            match &type_match {
+                super::BuiltinMethodType::Str => "str",
+                super::BuiltinMethodType::StrRef => "str_ref",
+                super::BuiltinMethodType::Char => "char",
+                super::BuiltinMethodType::String => "String",
+                super::BuiltinMethodType::Option => "Option",
+                super::BuiltinMethodType::Vec => "Vec",
+            },
+            name
+        );
+
+        let def_id = self.resolver.define_item(
+            method_name,
+            hir::DefKind::Fn,
+            Span::dummy(),
+        ).expect("BUG: builtin method registration failed");
+
+        // Register the function signature
+        self.fn_sigs.insert(def_id, hir::FnSig {
+            inputs,
+            output,
+            is_const: false,
+            is_async: false,
+            is_unsafe: false,
+            generics: Vec::new(),
+        });
+
+        // Track runtime function name
+        self.builtin_fns.insert(def_id, runtime_name.to_string());
+
+        // Add to builtin methods list
+        self.builtin_methods.push(super::BuiltinMethodInfo {
+            type_match,
+            name: name.to_string(),
+            def_id,
+            is_static,
+            runtime_name: runtime_name.to_string(),
         });
     }
 }

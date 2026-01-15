@@ -864,6 +864,140 @@ impl<'a> TypeContext<'a> {
             }
         }
 
+        // Fourth, look for builtin methods on primitive/builtin types
+        if let Some(result) = self.find_builtin_method(ty, method_name) {
+            return Some(result);
+        }
+
+        None
+    }
+
+    /// Find a builtin method for a type.
+    /// Returns (method_def_id, return type, first param type, impl generics, method generics).
+    fn find_builtin_method(&self, ty: &Type, method_name: &str) -> Option<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>)> {
+        use super::BuiltinMethodType;
+        use crate::hir::ty::PrimitiveTy;
+
+        // Determine which builtin type category this type matches
+        let type_match = match ty.kind() {
+            TypeKind::Primitive(PrimitiveTy::Str) => Some(BuiltinMethodType::Str),
+            TypeKind::Primitive(PrimitiveTy::Char) => Some(BuiltinMethodType::Char),
+            TypeKind::Primitive(PrimitiveTy::String) => Some(BuiltinMethodType::String),
+            TypeKind::Ref { inner, .. } => {
+                match inner.kind() {
+                    TypeKind::Primitive(PrimitiveTy::Str) => Some(BuiltinMethodType::StrRef),
+                    TypeKind::Primitive(PrimitiveTy::String) => Some(BuiltinMethodType::String),
+                    _ => None,
+                }
+            }
+            TypeKind::Adt { def_id, .. } => {
+                // Check if it's Option or Vec
+                if Some(*def_id) == self.option_def_id {
+                    Some(BuiltinMethodType::Option)
+                } else if Some(*def_id) == self.vec_def_id {
+                    Some(BuiltinMethodType::Vec)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        let type_match = type_match?;
+
+        // Search for matching builtin method
+        for builtin_method in &self.builtin_methods {
+            if builtin_method.type_match == type_match && builtin_method.name == method_name {
+                if let Some(sig) = self.fn_sigs.get(&builtin_method.def_id) {
+                    // For generic types (Option<T>, Vec<T>), we need to substitute
+                    // the type argument into the return type
+                    let return_type = match &type_match {
+                        BuiltinMethodType::Option | BuiltinMethodType::Vec => {
+                            // Extract the type argument from the ADT
+                            if let TypeKind::Adt { args, .. } = ty.kind() {
+                                if !args.is_empty() {
+                                    // For Option<T>.unwrap(), return type is T
+                                    if method_name == "unwrap" {
+                                        args[0].clone()
+                                    } else {
+                                        sig.output.clone()
+                                    }
+                                } else {
+                                    sig.output.clone()
+                                }
+                            } else {
+                                sig.output.clone()
+                            }
+                        }
+                        _ => sig.output.clone(),
+                    };
+
+                    let first_param = sig.inputs.first().cloned();
+                    return Some((
+                        builtin_method.def_id,
+                        return_type,
+                        first_param,
+                        Vec::new(),
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find a builtin static method (e.g., String::new(), Vec::new()).
+    /// Returns (method_def_id, function type).
+    fn find_builtin_static_method(&mut self, type_name: &str, method_name: &str) -> Option<(DefId, Type)> {
+        use super::BuiltinMethodType;
+
+        // Map type name to BuiltinMethodType
+        let type_match = match type_name {
+            "String" => Some(BuiltinMethodType::String),
+            "Vec" => Some(BuiltinMethodType::Vec),
+            "Option" => Some(BuiltinMethodType::Option),
+            _ => None,
+        };
+
+        let type_match = type_match?;
+
+        // Search for matching static builtin method
+        for builtin_method in &self.builtin_methods {
+            if builtin_method.type_match == type_match
+                && builtin_method.name == method_name
+                && builtin_method.is_static
+            {
+                if let Some(sig) = self.fn_sigs.get(&builtin_method.def_id).cloned() {
+                    // For generic static methods like Vec::new(), instantiate with fresh vars
+                    // The synthetic TyVarId(9000) placeholder needs to be replaced with fresh vars
+                    let needs_fresh_vars = matches!(&type_match, BuiltinMethodType::Vec | BuiltinMethodType::Option);
+
+                    let fn_ty = if needs_fresh_vars {
+                        // Create a fresh type variable to substitute for the placeholder
+                        let fresh_var = self.unifier.fresh_var();
+                        let placeholder_id = TyVarId(9000);
+
+                        // Create substitution map
+                        let mut subst = HashMap::new();
+                        subst.insert(placeholder_id, fresh_var);
+
+                        // Substitute in inputs and output
+                        let subst_inputs: Vec<Type> = sig.inputs.iter()
+                            .map(|ty| self.substitute_type_vars(ty, &subst))
+                            .collect();
+                        let subst_output = self.substitute_type_vars(&sig.output, &subst);
+
+                        Type::function(subst_inputs, subst_output)
+                    } else {
+                        Type::function(sig.inputs.clone(), sig.output.clone())
+                    };
+
+                    return Some((builtin_method.def_id, fn_ty));
+                }
+            }
+        }
+
         None
     }
 
@@ -1721,12 +1855,29 @@ impl<'a> TypeContext<'a> {
                         ));
                     }
 
-                    // Type found but no matching method
+                    // Type found but no impl block method - check builtin static methods
+                    if let Some((method_def_id, fn_ty)) = self.find_builtin_static_method(&first_name, &second_name) {
+                        return Ok(hir::Expr::new(
+                            hir::ExprKind::Def(method_def_id),
+                            fn_ty,
+                            span,
+                        ));
+                    }
+
                     return Err(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
                         span,
                     ));
                 }
+            }
+
+            // Check for builtin type static methods (e.g., String::new(), Vec::new())
+            if let Some((method_def_id, fn_ty)) = self.find_builtin_static_method(&first_name, &second_name) {
+                return Ok(hir::Expr::new(
+                    hir::ExprKind::Def(method_def_id),
+                    fn_ty,
+                    span,
+                ));
             }
 
             // Check for module namespace paths (module_name::item_name)
