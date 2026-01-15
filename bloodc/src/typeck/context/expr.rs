@@ -23,6 +23,21 @@ impl<'a> TypeContext<'a> {
             return self.check_literal(lit, expected, expr.span);
         }
 
+        // Special case for if expressions: propagate expected type to branches
+        if let ast::ExprKind::If { condition, then_branch, else_branch } = &expr.kind {
+            return self.check_if(condition, then_branch, else_branch.as_ref(), expected, expr.span);
+        }
+
+        // Special case for match expressions: propagate expected type to arms
+        if let ast::ExprKind::Match { scrutinee, arms } = &expr.kind {
+            return self.check_match(scrutinee, arms, expected, expr.span);
+        }
+
+        // Special case for block expressions: propagate expected type
+        if let ast::ExprKind::Block(block) = &expr.kind {
+            return self.check_block(block, expected);
+        }
+
         let inferred = self.infer_expr(expr)?;
 
         // Unify expected type with inferred - order matters for error messages
@@ -916,8 +931,8 @@ impl<'a> TypeContext<'a> {
                             // Extract the type argument from the ADT
                             if let TypeKind::Adt { args, .. } = ty.kind() {
                                 if !args.is_empty() {
-                                    // For Option<T>.unwrap(), return type is T
-                                    if method_name == "unwrap" {
+                                    // For Option<T>.unwrap() and Option<T>.try_(), return type is T
+                                    if method_name == "unwrap" || method_name == "try_" {
                                         args[0].clone()
                                     } else {
                                         sig.output.clone()
@@ -2088,7 +2103,15 @@ impl<'a> TypeContext<'a> {
         span: Span,
     ) -> Result<hir::Expr, TypeError> {
         let left_expr = self.infer_expr(left)?;
-        let right_expr = self.infer_expr(right)?;
+        // Use check_expr for right side to propagate left type for better literal inference
+        let right_expr = self.check_expr(right, &left_expr.ty).unwrap_or_else(|_| {
+            // Fall back to infer if check fails (types may legitimately differ)
+            self.infer_expr(right).unwrap_or_else(|_| hir::Expr::new(
+                hir::ExprKind::Literal(hir::LiteralValue::Int(0)),
+                Type::error(),
+                right.span,
+            ))
+        });
 
         let result_ty = match op {
             ast::BinOp::Add | ast::BinOp::Sub | ast::BinOp::Mul | ast::BinOp::Div | ast::BinOp::Rem => {
@@ -2454,6 +2477,48 @@ impl<'a> TypeContext<'a> {
         };
 
         let result_ty = self.unifier.resolve(&expected);
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::If {
+                condition: Box::new(cond_expr),
+                then_branch: Box::new(then_expr),
+                else_branch: else_expr,
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Check an if expression against an expected type.
+    /// This propagates the expected type to all branches for better type inference.
+    pub(crate) fn check_if(
+        &mut self,
+        condition: &ast::Expr,
+        then_branch: &ast::Block,
+        else_branch: Option<&ast::ElseBranch>,
+        expected: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let cond_expr = self.check_expr(condition, &Type::bool())?;
+
+        // Use expected type directly instead of fresh variable
+        let then_expr = self.check_block(then_branch, expected)?;
+
+        let else_expr = if let Some(else_branch) = else_branch {
+            match else_branch {
+                ast::ElseBranch::Block(block) => {
+                    Some(Box::new(self.check_block(block, expected)?))
+                }
+                ast::ElseBranch::If(if_expr) => {
+                    Some(Box::new(self.check_expr(if_expr, expected)?))
+                }
+            }
+        } else {
+            self.unifier.unify(expected, &Type::unit(), span)?;
+            None
+        };
+
+        let result_ty = self.unifier.resolve(expected);
 
         Ok(hir::Expr::new(
             hir::ExprKind::If {
@@ -3062,6 +3127,92 @@ impl<'a> TypeContext<'a> {
         ))
     }
 
+    /// Check a match expression against an expected type.
+    /// This propagates the expected type to all arm bodies for better type inference.
+    pub(crate) fn check_match(
+        &mut self,
+        scrutinee: &ast::Expr,
+        arms: &[ast::MatchArm],
+        expected: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let scrutinee_expr = self.infer_expr(scrutinee)?;
+
+        if arms.is_empty() {
+            return Ok(hir::Expr::new(
+                hir::ExprKind::Match {
+                    scrutinee: Box::new(scrutinee_expr),
+                    arms: Vec::new(),
+                },
+                Type::never(),
+                span,
+            ));
+        }
+
+        // Use expected type directly instead of fresh variable
+        let mut hir_arms = Vec::new();
+
+        for arm in arms {
+            self.resolver.push_scope(ScopeKind::MatchArm, arm.span);
+
+            let pattern = self.lower_pattern(&arm.pattern, &scrutinee_expr.ty)?;
+
+            let guard = if let Some(ref guard) = arm.guard {
+                Some(self.check_expr(guard, &Type::bool())?)
+            } else {
+                None
+            };
+
+            let body = self.check_expr(&arm.body, expected)?;
+
+            self.resolver.pop_scope();
+
+            hir_arms.push(hir::MatchArm {
+                pattern,
+                guard,
+                body,
+            });
+        }
+
+        // Check for exhaustiveness
+        let enum_info = self.get_enum_variant_info(&scrutinee_expr.ty);
+        let result = exhaustiveness::check_exhaustiveness(
+            &hir_arms,
+            &scrutinee_expr.ty,
+            enum_info.as_ref(),
+        );
+
+        if !result.is_exhaustive {
+            return Err(TypeError::new(
+                TypeErrorKind::NonExhaustivePatterns {
+                    missing: result.missing_patterns,
+                },
+                span,
+            ));
+        }
+
+        // Report unreachable patterns
+        for idx in result.unreachable_arms {
+            if let Some(arm) = arms.get(idx) {
+                self.errors.push(TypeError::new(
+                    TypeErrorKind::UnreachablePattern,
+                    arm.span,
+                ));
+            }
+        }
+
+        let final_ty = self.unifier.resolve(expected);
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(scrutinee_expr),
+                arms: hir_arms,
+            },
+            final_ty,
+            span,
+        ))
+    }
+
     /// Infer type of a record (struct) construction expression.
     pub(crate) fn infer_record(
         &mut self,
@@ -3170,17 +3321,17 @@ impl<'a> TypeContext<'a> {
 
                                     // Handle shorthand syntax: `{ x }` means `{ x: x }`
                                     let value_expr = if let Some(value) = &field.value {
-                                        let inferred = self.infer_expr(value)?;
-                                        self.unifier.unify(&inferred.ty, &expected_ty, value.span).map_err(|_| {
+                                        // Use check_expr to propagate expected type for better literal inference
+                                        self.check_expr(value, &expected_ty).map_err(|_| {
+                                            let found = self.infer_expr(value).map(|e| e.ty).unwrap_or_else(|_| Type::error());
                                             TypeError::new(
                                                 TypeErrorKind::Mismatch {
                                                     expected: self.unifier.resolve(&expected_ty),
-                                                    found: self.unifier.resolve(&inferred.ty),
+                                                    found: self.unifier.resolve(&found),
                                                 },
                                                 value.span,
                                             )
-                                        })?;
-                                        inferred
+                                        })?
                                     } else {
                                         // Shorthand: look up the field name as a variable
                                         let path = ast::ExprPath {
@@ -3359,18 +3510,18 @@ impl<'a> TypeContext<'a> {
 
             // Handle shorthand syntax: `{ x }` is equivalent to `{ x: x }`
             let value_expr = if let Some(value) = &field.value {
-                // Infer the value type first, then unify with expected
-                let inferred = self.infer_expr(value)?;
-                self.unifier.unify(&inferred.ty, &expected_ty, value.span).map_err(|_| {
+                // Use check_expr to propagate expected type for better literal inference
+                self.check_expr(value, &expected_ty).map_err(|_| {
+                    // Re-infer to get the actual found type for error message
+                    let found = self.infer_expr(value).map(|e| e.ty).unwrap_or_else(|_| Type::error());
                     TypeError::new(
                         TypeErrorKind::Mismatch {
                             expected: self.unifier.resolve(&expected_ty),
-                            found: self.unifier.resolve(&inferred.ty),
+                            found: self.unifier.resolve(&found),
                         },
                         value.span,
                     )
-                })?;
-                inferred
+                })?
             } else {
                 // Shorthand: look up the field name as a variable
                 let path = ast::ExprPath {
@@ -3555,9 +3706,8 @@ impl<'a> TypeContext<'a> {
         span: Span,
     ) -> Result<hir::Expr, TypeError> {
         let target_expr = self.infer_expr(target)?;
-        let value_expr = self.infer_expr(value)?;
-
-        self.unifier.unify(&target_expr.ty, &value_expr.ty, span)?;
+        // Use check_expr to propagate target type for better literal inference
+        let value_expr = self.check_expr(value, &target_expr.ty)?;
         let result_ty = target_expr.ty.clone();
 
         Ok(hir::Expr::new(

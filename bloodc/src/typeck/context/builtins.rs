@@ -613,6 +613,16 @@ impl<'a> TypeContext<'a> {
             "char_to_string_owned",
         );
 
+        // char.len_utf8(self) -> usize
+        self.register_builtin_method(
+            BuiltinMethodType::Char,
+            "len_utf8",
+            false,
+            vec![Type::char()],
+            usize_ty.clone(),
+            "char_len_utf8",
+        );
+
         // === String methods ===
 
         // String.len(&self) -> usize
@@ -725,9 +735,20 @@ impl<'a> TypeContext<'a> {
             BuiltinMethodType::Option,
             "is_none",
             false,
-            vec![Type::reference(option_t, false)],
+            vec![Type::reference(option_t.clone(), false)],
             bool_ty.clone(),
             "option_is_none",
+        );
+
+        // Option<T>.try_(self) -> T (for ? operator desugaring)
+        // This unwraps the Option, propagating None via early return
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "try_",
+            false,
+            vec![option_t],
+            t_ty.clone(),
+            "option_try",
         );
 
         // === Vec methods ===
