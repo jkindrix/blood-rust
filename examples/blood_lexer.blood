@@ -668,7 +668,7 @@ impl Lexer {
         let start_pos = self.pos;
 
         // Check for base prefix
-        let base = if self.check('0') {
+        let base: u32 = if self.check('0') {
             match self.peek_at(1) {
                 Some('x') | Some('X') => {
                     self.advance();
