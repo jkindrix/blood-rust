@@ -855,7 +855,7 @@ impl<'a> TypeContext<'a> {
 
         // Check if the callee has a row variable - if so, any additional effects
         // from the callee's body can flow through
-        let callee_is_polymorphic = self.fn_effect_row_var.get(&callee_def_id).is_some();
+        let _callee_is_polymorphic = self.fn_effect_row_var.get(&callee_def_id).is_some();
 
         // Check if the caller has a row variable - if so, any unhandled effects
         // from the callee can be absorbed by the caller's row variable

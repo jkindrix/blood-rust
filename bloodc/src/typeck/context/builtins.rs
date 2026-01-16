@@ -13,11 +13,11 @@ impl<'a> TypeContext<'a> {
         let bool_ty = Type::bool();
         let char_ty = Type::char();
         let u8_ty = Type::u8();
-        let u32_ty = Type::u32();
+        let _u32_ty = Type::u32();
         let i32_ty = Type::i32();
         let i64_ty = Type::i64();
         let u64_ty = Type::u64();
-        let usize_ty = Type::usize();
+        let _usize_ty = Type::usize();
         let f32_ty = Type::f32();
         let f64_ty = Type::f64();
         let str_ty = Type::str();  // str slice
