@@ -6,7 +6,7 @@ use inkwell::values::{BasicValueEnum, BasicMetadataValueEnum, CallableValue};
 use inkwell::IntPredicate;
 use inkwell::FloatPredicate;
 use inkwell::AddressSpace;
-use inkwell::types::{BasicTypeEnum, BasicType};
+use inkwell::types::{BasicTypeEnum, BasicType, BasicMetadataTypeEnum};
 
 use crate::hir::{self, DefId, LocalId, Type, TypeKind, PrimitiveTy};
 use crate::diagnostics::Diagnostic;
@@ -571,15 +571,94 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
         }
 
-        // Check if this is a closure call (callee is a function type stored in a variable)
-        if matches!(callee.ty.kind(), TypeKind::Fn { .. }) {
+        // Check if this is a closure call (callee is a Closure type with environment)
+        if matches!(callee.ty.kind(), TypeKind::Closure { .. }) {
             return self.compile_closure_call(callee, args);
+        }
+
+        // Check if this is a plain function pointer call (TypeKind::Fn - no environment)
+        if matches!(callee.ty.kind(), TypeKind::Fn { .. }) {
+            return self.compile_fn_ptr_call(callee, args);
         }
 
         Err(vec![Diagnostic::error(
             "Cannot determine function to call",
             callee.span,
         )])
+    }
+
+    /// Compile a plain function pointer call: calling a function pointer stored in a variable.
+    ///
+    /// Plain function pointers (`fn(args) -> ret`) are just pointers to functions,
+    /// with no environment capture. We simply call the function with the provided arguments.
+    pub(super) fn compile_fn_ptr_call(
+        &mut self,
+        callee: &hir::Expr,
+        args: &[hir::Expr],
+    ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        // Compile the callee to get the function pointer
+        let fn_ptr_val = self.compile_expr(callee)?
+            .ok_or_else(|| vec![Diagnostic::error("Expected function pointer value", callee.span)])?;
+
+        // The fn_ptr_val should be a pointer to a function
+        let fn_ptr = match fn_ptr_val {
+            BasicValueEnum::PointerValue(ptr) => ptr,
+            _ => {
+                return Err(vec![Diagnostic::error(
+                    format!("Expected function pointer, got {:?}", fn_ptr_val.get_type()),
+                    callee.span,
+                )]);
+            }
+        };
+
+        // Compile arguments
+        let mut compiled_args: Vec<BasicMetadataValueEnum> = Vec::new();
+        for arg in args {
+            if let Some(val) = self.compile_expr(arg)? {
+                compiled_args.push(val.into());
+            }
+        }
+
+        // Get the function type from the callee's Blood type
+        let (param_types, return_ty) = match callee.ty.kind() {
+            TypeKind::Fn { params, ret } => (params.clone(), (*ret).clone()),
+            _ => {
+                return Err(vec![Diagnostic::error(
+                    "Expected function type for fn pointer call",
+                    callee.span,
+                )]);
+            }
+        };
+
+        // Build LLVM function type
+        let llvm_param_types: Vec<BasicMetadataTypeEnum> = param_types.iter()
+            .map(|p| self.lower_type(p).into())
+            .collect();
+
+        let fn_type = if return_ty.is_unit() {
+            self.context.void_type().fn_type(&llvm_param_types, false)
+        } else {
+            let ret_type = self.lower_type(&return_ty);
+            ret_type.fn_type(&llvm_param_types, false)
+        };
+
+        // Cast the pointer to the correct function pointer type
+        let fn_ptr_type = fn_type.ptr_type(AddressSpace::default());
+        let typed_fn_ptr = self.builder
+            .build_pointer_cast(fn_ptr, fn_ptr_type, "fn_ptr_cast")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), callee.span)])?;
+
+        // Build the indirect call using CallableValue
+        let call = self.builder
+            .build_call(
+                CallableValue::try_from(typed_fn_ptr)
+                    .map_err(|_| vec![Diagnostic::error("Invalid function pointer", callee.span)])?,
+                &compiled_args,
+                "fn_ptr_call",
+            )
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM call error: {}", e), callee.span)])?;
+
+        Ok(call.try_as_basic_value().left())
     }
 
     /// Compile a closure call: calling a closure value stored in a variable.
