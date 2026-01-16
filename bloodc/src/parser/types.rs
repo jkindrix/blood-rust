@@ -173,7 +173,7 @@ impl<'src> Parser<'src> {
                 }
             }
 
-            // Function type
+            // Function type: `fn(T) -> U`, `fn(T) -> U / E`, `fn(T) / E`, `fn()`
             TokenKind::Fn => {
                 self.advance();
                 self.expect(TokenKind::LParen);
@@ -187,8 +187,18 @@ impl<'src> Parser<'src> {
                 }
 
                 self.expect(TokenKind::RParen);
-                self.expect(TokenKind::Arrow);
-                let return_type = self.parse_type();
+
+                // Return type is optional - defaults to unit if not present
+                // This allows `fn() / {Effect}` syntax for effectful functions
+                let return_type = if self.try_consume(TokenKind::Arrow) {
+                    self.parse_type()
+                } else {
+                    // No arrow - use unit type as return type
+                    Type {
+                        kind: TypeKind::Tuple(Vec::new()),
+                        span: self.previous.span,
+                    }
+                };
 
                 let effects = if self.try_consume(TokenKind::Slash) {
                     Some(self.parse_effect_row())
@@ -447,9 +457,9 @@ impl<'src> Parser<'src> {
             let mut rest = None;
 
             loop {
-                // Check for row variable (allow contextual keywords as variable names)
+                // Check for row variable (allow contextual keywords and type identifiers)
                 if self.try_consume(TokenKind::Or) {
-                    if self.check_ident() {
+                    if self.check_ident() || self.check(TokenKind::TypeIdent) {
                         self.advance();
                         rest = Some(self.spanned_symbol());
                     }
@@ -459,8 +469,10 @@ impl<'src> Parser<'src> {
                 effects.push(self.parse_type());
 
                 if !self.try_consume(TokenKind::Comma) {
-                    // Check for trailing row variable (allow contextual keywords)
-                    if self.try_consume(TokenKind::Or) && self.check_ident() {
+                    // Check for trailing row variable (allow contextual keywords and type identifiers)
+                    if self.try_consume(TokenKind::Or)
+                        && (self.check_ident() || self.check(TokenKind::TypeIdent))
+                    {
                         self.advance();
                         rest = Some(self.spanned_symbol());
                     }
@@ -476,8 +488,8 @@ impl<'src> Parser<'src> {
             };
         }
 
-        // Just a type variable (allow contextual keywords)
-        if self.check_ident() {
+        // Just a type variable (allow contextual keywords and type identifiers)
+        if self.check_ident() || self.check(TokenKind::TypeIdent) {
             self.advance();
             let var = self.spanned_symbol();
             return EffectRow {
