@@ -101,6 +101,9 @@ pub struct TypeContext<'a> {
     pub(crate) handler_defs: HashMap<DefId, HandlerInfo>,
     /// Effect annotations for functions (DefId -> list of effects the function uses).
     pub(crate) fn_effects: HashMap<DefId, Vec<EffectRef>>,
+    /// Effect row variable names for functions (DefId -> row variable name if polymorphic).
+    /// A function with `/ {IO | e}` has Some("e"), a function with `/ {IO}` has None.
+    pub(crate) fn_effect_row_var: HashMap<DefId, Option<String>>,
     /// Handlers to type-check (includes full declaration for operation bodies).
     pub(crate) pending_handlers: Vec<(DefId, ast::HandlerDecl)>,
     /// Impl block definitions (keyed by a synthetic DefId for the impl block itself).
@@ -647,6 +650,7 @@ impl<'a> TypeContext<'a> {
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
             fn_effects: HashMap::new(),
+            fn_effect_row_var: HashMap::new(),
             pending_handlers: Vec::new(),
             impl_blocks: Vec::new(),
             method_self_types: HashMap::new(),

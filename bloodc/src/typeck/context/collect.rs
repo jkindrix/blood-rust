@@ -950,9 +950,13 @@ impl<'a> TypeContext<'a> {
 
         // Parse and store the function's effect annotation
         if let Some(ref effect_row) = func.effects {
-            let effects = self.parse_effect_row(effect_row)?;
-            if !effects.is_empty() {
+            let (effects, row_var) = self.parse_effect_row(effect_row)?;
+            if !effects.is_empty() || row_var.is_some() {
                 self.fn_effects.insert(def_id, effects);
+            }
+            // Store the row variable if present (for effect row polymorphism)
+            if row_var.is_some() {
+                self.fn_effect_row_var.insert(def_id, row_var);
             }
         }
 
@@ -2023,22 +2027,29 @@ impl<'a> TypeContext<'a> {
         Ok(())
     }
 
-    /// Parse an effect row annotation into a list of EffectRefs.
-    pub(crate) fn parse_effect_row(&mut self, effect_row: &ast::EffectRow) -> Result<Vec<EffectRef>, TypeError> {
+    /// Parse an effect row annotation into a list of EffectRefs and optional row variable.
+    ///
+    /// Returns (effects, row_variable_name) where:
+    /// - `effects` is the list of concrete effects in the row
+    /// - `row_variable_name` is Some(name) if the row has a polymorphic tail (e.g., `{IO | e}` or just `e`)
+    pub(crate) fn parse_effect_row(&mut self, effect_row: &ast::EffectRow) -> Result<(Vec<EffectRef>, Option<String>), TypeError> {
         match &effect_row.kind {
-            ast::EffectRowKind::Pure => Ok(Vec::new()),
-            ast::EffectRowKind::Var(_) => {
-                // Effect polymorphism - Phase 2+
-                Ok(Vec::new())
+            ast::EffectRowKind::Pure => Ok((Vec::new(), None)),
+            ast::EffectRowKind::Var(var) => {
+                // Just a row variable: `fn foo() / e`
+                let var_name = self.symbol_to_string(var.node);
+                Ok((Vec::new(), Some(var_name)))
             }
-            ast::EffectRowKind::Effects { effects, rest: _ } => {
+            ast::EffectRowKind::Effects { effects, rest } => {
                 let mut result = Vec::new();
                 for effect_ty in effects {
                     if let Some(effect_ref) = self.resolve_effect_type(effect_ty)? {
                         result.push(effect_ref);
                     }
                 }
-                Ok(result)
+                // Extract row variable name if present
+                let row_var = rest.as_ref().map(|r| self.symbol_to_string(r.node));
+                Ok((result, row_var))
             }
         }
     }

@@ -845,12 +845,23 @@ impl<'a> TypeContext<'a> {
     /// When calling a function that uses effects, verify that either:
     /// 1. The effect is handled by an enclosing with...handle block
     /// 2. The calling function also declares the same effect
+    /// 3. The calling function has a row variable (effect row polymorphism)
     pub(crate) fn check_effect_compatibility(&self, callee_def_id: DefId, span: Span) -> Result<(), TypeError> {
         // Get the callee's declared effects
         let callee_effects = match self.fn_effects.get(&callee_def_id) {
             Some(effects) => effects,
             None => return Ok(()), // Callee has no effects
         };
+
+        // Check if the callee has a row variable - if so, any additional effects
+        // from the callee's body can flow through
+        let callee_is_polymorphic = self.fn_effect_row_var.get(&callee_def_id).is_some();
+
+        // Check if the caller has a row variable - if so, any unhandled effects
+        // from the callee can be absorbed by the caller's row variable
+        let caller_is_polymorphic = self.current_fn
+            .and_then(|id| self.fn_effect_row_var.get(&id))
+            .is_some();
 
         // For each effect the callee uses, check if it's handled
         for effect_ref in callee_effects {
@@ -867,6 +878,12 @@ impl<'a> TypeContext<'a> {
                     if caller_effects.iter().any(|er| er.def_id == effect_id) {
                         continue;
                     }
+                }
+
+                // If the caller has a row variable, effects can flow through
+                // This enables effect row polymorphism: `fn foo() / e` can call any effectful function
+                if caller_is_polymorphic {
+                    continue;
                 }
             }
 
