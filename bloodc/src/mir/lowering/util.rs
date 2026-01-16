@@ -1699,12 +1699,17 @@ pub trait ExprLowering {
                 })
                 .unwrap_or(idx as u32);
 
+            // Note: Pipe operator lowering uses this default implementation which
+            // doesn't have access to local scope info for capture analysis.
+            // Captures are empty here - full capture analysis happens in
+            // FunctionLowering::lower_inline_handle and ClosureLowering::lower_inline_handle
             inline_ops.push(InlineHandlerOp {
                 op_name: handler.op_name.clone(),
                 op_index,
                 synthetic_fn_def_id,
                 param_types: handler.param_types.clone(),
                 return_type: handler.return_type.clone(),
+                captures: Vec::new(),
             });
         }
 

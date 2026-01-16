@@ -53,6 +53,17 @@ use crate::diagnostics::Diagnostic;
 use super::body::MirBody;
 use super::types::BasicBlockId;
 
+/// A captured variable for inline handler bodies.
+#[derive(Debug, Clone)]
+pub struct InlineHandlerCaptureInfo {
+    /// The HIR local ID being captured.
+    pub local_id: hir::LocalId,
+    /// The type of the captured variable.
+    pub ty: Type,
+    /// Whether this is a mutable capture (for assignment).
+    pub is_mutable: bool,
+}
+
 /// Information about an inline handler operation body needed for codegen.
 ///
 /// This stores the HIR expression for inline handler bodies (try/with) so they
@@ -73,6 +84,8 @@ pub struct InlineHandlerBody {
     pub return_type: Type,
     /// The handler body expression.
     pub body: hir::Expr,
+    /// Variables captured from the enclosing scope.
+    pub captures: Vec<InlineHandlerCaptureInfo>,
 }
 
 /// Map from synthetic DefId to inline handler body info.

@@ -25,7 +25,9 @@ use crate::mir::types::{
 };
 
 use super::util::{convert_binop, is_irrefutable_pattern, ExprLowering, LoopContextInfo};
-use super::InlineHandlerBodies;
+use super::{InlineHandlerBodies, InlineHandlerBody, InlineHandlerCaptureInfo};
+use super::function::{collect_local_refs, CaptureCandidate};
+use std::collections::HashSet;
 
 // ============================================================================
 // Closure Lowering
@@ -646,7 +648,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        use crate::mir::types::InlineHandlerOp;
+        use crate::mir::types::{InlineHandlerOp, InlineHandlerCapture};
 
         // Inline handlers are stateless
         let allocation_tier = analyze_handler_allocation_tier(body);
@@ -677,12 +679,59 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 })
                 .unwrap_or(idx as u32);
 
+            // Analyze captures in the handler body
+            let mut refs = Vec::new();
+            collect_local_refs(&handler.body, &mut refs, false);
+
+            // Filter out operation parameters - they're not captures
+            let param_set: HashSet<LocalId> = handler.params.iter().cloned().collect();
+            let captures: Vec<CaptureCandidate> = refs.into_iter()
+                .filter(|c| !param_set.contains(&c.local_id))
+                .collect();
+
+            // Build capture info with types
+            let mut mir_captures = Vec::with_capacity(captures.len());
+            let mut body_captures = Vec::with_capacity(captures.len());
+
+            for capture in captures {
+                // Look up the type of the captured variable
+                // Check capture_types first (outer closure captures), then body locals
+                let capture_ty = self.capture_types.get(&capture.local_id).cloned()
+                    .or_else(|| self.body.get_local(capture.local_id).map(|l| l.ty.clone()));
+
+                if let Some(ty) = capture_ty {
+                    mir_captures.push(InlineHandlerCapture {
+                        local_id: capture.local_id,
+                        ty: ty.clone(),
+                        is_mutable: capture.is_mutable,
+                    });
+                    body_captures.push(InlineHandlerCaptureInfo {
+                        local_id: capture.local_id,
+                        ty,
+                        is_mutable: capture.is_mutable,
+                    });
+                }
+            }
+
             inline_ops.push(InlineHandlerOp {
                 op_name: handler.op_name.clone(),
                 op_index,
                 synthetic_fn_def_id,
                 param_types: handler.param_types.clone(),
                 return_type: handler.return_type.clone(),
+                captures: mir_captures,
+            });
+
+            // Store the handler body for compilation during codegen
+            self.inline_handler_bodies.insert(synthetic_fn_def_id, InlineHandlerBody {
+                effect_id: handler.effect_id,
+                op_name: handler.op_name.clone(),
+                op_index,
+                params: handler.params.clone(),
+                param_types: handler.param_types.clone(),
+                return_type: handler.return_type.clone(),
+                body: handler.body.clone(),
+                captures: body_captures,
             });
         }
 

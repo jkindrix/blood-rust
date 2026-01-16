@@ -26,7 +26,227 @@ use crate::mir::types::{
 
 use super::LoopContext;
 use super::util::{is_irrefutable_pattern, ExprLowering, LoopContextInfo};
-use super::{InlineHandlerBody, InlineHandlerBodies};
+use super::{InlineHandlerBody, InlineHandlerBodies, InlineHandlerCaptureInfo};
+
+use std::collections::HashSet;
+
+// ============================================================================
+// Capture Analysis for Inline Handlers
+// ============================================================================
+
+/// Collected information about a captured variable.
+pub struct CaptureCandidate {
+    pub local_id: LocalId,
+    pub is_mutable: bool,
+}
+
+/// Collect all local variable references from an expression.
+///
+/// This walks the expression tree and collects all `ExprKind::Local` references,
+/// tracking whether they're used mutably (on the left side of an assignment).
+pub fn collect_local_refs(expr: &Expr, refs: &mut Vec<CaptureCandidate>, in_mutable_context: bool) {
+    match &expr.kind {
+        ExprKind::Local(local_id) => {
+            // Check if this local is already in the list
+            if let Some(existing) = refs.iter_mut().find(|c| c.local_id == *local_id) {
+                // If we're now in a mutable context, upgrade to mutable capture
+                if in_mutable_context {
+                    existing.is_mutable = true;
+                }
+            } else {
+                refs.push(CaptureCandidate {
+                    local_id: *local_id,
+                    is_mutable: in_mutable_context,
+                });
+            }
+        }
+
+        ExprKind::Assign { target, value } => {
+            // The target is in mutable context
+            collect_local_refs(target, refs, true);
+            collect_local_refs(value, refs, false);
+        }
+
+        ExprKind::Binary { left, right, .. } => {
+            collect_local_refs(left, refs, false);
+            collect_local_refs(right, refs, false);
+        }
+
+        ExprKind::Unary { operand, .. } => {
+            collect_local_refs(operand, refs, in_mutable_context);
+        }
+
+        ExprKind::Call { callee, args } => {
+            collect_local_refs(callee, refs, false);
+            for arg in args {
+                collect_local_refs(arg, refs, false);
+            }
+        }
+
+        ExprKind::Block { stmts, expr: tail } => {
+            for stmt in stmts {
+                match stmt {
+                    hir::Stmt::Let { init, .. } => {
+                        if let Some(init) = init {
+                            collect_local_refs(init, refs, false);
+                        }
+                    }
+                    hir::Stmt::Expr(e) => {
+                        collect_local_refs(e, refs, false);
+                    }
+                    hir::Stmt::Item(_) => {}
+                }
+            }
+            if let Some(tail) = tail {
+                collect_local_refs(tail, refs, false);
+            }
+        }
+
+        ExprKind::If { condition, then_branch, else_branch } => {
+            collect_local_refs(condition, refs, false);
+            collect_local_refs(then_branch, refs, false);
+            if let Some(else_br) = else_branch {
+                collect_local_refs(else_br, refs, false);
+            }
+        }
+
+        ExprKind::Match { scrutinee, arms } => {
+            collect_local_refs(scrutinee, refs, false);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_local_refs(guard, refs, false);
+                }
+                collect_local_refs(&arm.body, refs, false);
+            }
+        }
+
+        ExprKind::Loop { body, .. } | ExprKind::While { body, .. } => {
+            collect_local_refs(body, refs, false);
+        }
+
+        ExprKind::Return(val) | ExprKind::Break { value: val, .. } => {
+            if let Some(v) = val {
+                collect_local_refs(v, refs, false);
+            }
+        }
+
+        ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
+            for elem in elems {
+                collect_local_refs(elem, refs, false);
+            }
+        }
+
+        ExprKind::Field { base, .. } => {
+            collect_local_refs(base, refs, in_mutable_context);
+        }
+
+        ExprKind::Index { base, index } => {
+            collect_local_refs(base, refs, in_mutable_context);
+            collect_local_refs(index, refs, false);
+        }
+
+        ExprKind::Borrow { expr: inner, mutable } => {
+            // If taking &mut, the inner is in mutable context
+            collect_local_refs(inner, refs, *mutable || in_mutable_context);
+        }
+
+        ExprKind::Deref(inner) => {
+            collect_local_refs(inner, refs, in_mutable_context);
+        }
+
+        ExprKind::Cast { expr: inner, .. } => {
+            collect_local_refs(inner, refs, false);
+        }
+
+        ExprKind::Closure { .. } => {
+            // Don't recurse into closures - they have their own capture analysis
+        }
+
+        ExprKind::Resume { value } => {
+            if let Some(v) = value {
+                collect_local_refs(v, refs, false);
+            }
+        }
+
+        ExprKind::Perform { args, .. } => {
+            for arg in args {
+                collect_local_refs(arg, refs, false);
+            }
+        }
+
+        ExprKind::Handle { body, handler_instance, .. } => {
+            collect_local_refs(body, refs, false);
+            collect_local_refs(handler_instance, refs, false);
+        }
+
+        ExprKind::InlineHandle { body, handlers } => {
+            collect_local_refs(body, refs, false);
+            for handler in handlers {
+                collect_local_refs(&handler.body, refs, false);
+            }
+        }
+
+        ExprKind::Struct { fields, base, .. } => {
+            for field in fields {
+                collect_local_refs(&field.value, refs, false);
+            }
+            if let Some(base) = base {
+                collect_local_refs(base, refs, false);
+            }
+        }
+
+        ExprKind::Record { fields } => {
+            for field in fields {
+                collect_local_refs(&field.value, refs, false);
+            }
+        }
+
+        ExprKind::Variant { fields, .. } => {
+            for field in fields {
+                collect_local_refs(field, refs, false);
+            }
+        }
+
+        ExprKind::Repeat { value, .. } => {
+            collect_local_refs(value, refs, false);
+        }
+
+        ExprKind::Range { start, end, .. } => {
+            if let Some(s) = start {
+                collect_local_refs(s, refs, false);
+            }
+            if let Some(e) = end {
+                collect_local_refs(e, refs, false);
+            }
+        }
+
+        ExprKind::AddrOf { expr: inner, mutable } => {
+            collect_local_refs(inner, refs, *mutable);
+        }
+
+        ExprKind::Let { init, .. } => {
+            collect_local_refs(init, refs, false);
+        }
+
+        ExprKind::Unsafe(inner) => {
+            collect_local_refs(inner, refs, in_mutable_context);
+        }
+
+        // These don't contain local references
+        ExprKind::Literal(_)
+        | ExprKind::Def(_)
+        | ExprKind::Continue { .. }
+        | ExprKind::Default
+        | ExprKind::Error
+        | ExprKind::MethodFamily { .. }
+        | ExprKind::MethodCall { .. }
+        | ExprKind::MacroExpansion { .. }
+        | ExprKind::VecLiteral(_)
+        | ExprKind::VecRepeat { .. }
+        | ExprKind::Assert { .. }
+        | ExprKind::Dbg(_) => {}
+    }
+}
 
 // ============================================================================
 // Function Lowering
@@ -660,7 +880,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        use crate::mir::types::InlineHandlerOp;
+        use crate::mir::types::{InlineHandlerOp, InlineHandlerCapture};
         use crate::mir::static_evidence::{InlineEvidenceContext, analyze_inline_evidence_mode, analyze_handler_allocation_tier};
 
         // Inline handlers are stateless (no explicit state)
@@ -700,19 +920,60 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 })
                 .unwrap_or(idx as u32);
 
+            // Analyze captures in the handler body
+            // Collect all local variable references from the handler body
+            let mut refs = Vec::new();
+            collect_local_refs(&handler.body, &mut refs, false);
+
+            // Filter out operation parameters - they're not captures
+            let param_set: HashSet<LocalId> = handler.params.iter().cloned().collect();
+            let captures: Vec<_> = refs.into_iter()
+                .filter(|c| !param_set.contains(&c.local_id))
+                .collect();
+
+            // Build capture info with types by looking up locals
+            let mut mir_captures = Vec::with_capacity(captures.len());
+            let mut body_captures = Vec::with_capacity(captures.len());
+
+            for capture in captures {
+                // Look up the type of the captured variable from the current scope
+                // First check the local_map (locals we've lowered so far)
+                let capture_ty = if let Some(&mir_local) = self.local_map.get(&capture.local_id) {
+                    // Get type from MIR local
+                    self.builder.get_local_type(mir_local).cloned()
+                } else {
+                    // Try to get from the HIR body
+                    self.body.get_local(capture.local_id).map(|l| l.ty.clone())
+                };
+
+                if let Some(ty) = capture_ty {
+                    mir_captures.push(InlineHandlerCapture {
+                        local_id: capture.local_id,
+                        ty: ty.clone(),
+                        is_mutable: capture.is_mutable,
+                    });
+                    body_captures.push(InlineHandlerCaptureInfo {
+                        local_id: capture.local_id,
+                        ty,
+                        is_mutable: capture.is_mutable,
+                    });
+                }
+            }
+
             inline_ops.push(InlineHandlerOp {
                 op_name: handler.op_name.clone(),
                 op_index,
                 synthetic_fn_def_id,
                 param_types: handler.param_types.clone(),
                 return_type: handler.return_type.clone(),
+                captures: mir_captures,
             });
 
             // Store the handler body for compilation during codegen.
             // The handler body has:
             // - Operation parameters (bound to params)
             // - Access to resume() for continuing the computation
-            // - May capture variables from enclosing scope
+            // - Captures from enclosing scope
             self.inline_handler_bodies.insert(synthetic_fn_def_id, InlineHandlerBody {
                 effect_id: handler.effect_id,
                 op_name: handler.op_name.clone(),
@@ -721,6 +982,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 param_types: handler.param_types.clone(),
                 return_type: handler.return_type.clone(),
                 body: handler.body.clone(),
+                captures: body_captures,
             });
         }
 

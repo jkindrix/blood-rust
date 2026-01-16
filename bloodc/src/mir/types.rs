@@ -135,6 +135,17 @@ impl Statement {
     }
 }
 
+/// A captured variable for inline handlers.
+#[derive(Debug, Clone)]
+pub struct InlineHandlerCapture {
+    /// The HIR local ID being captured.
+    pub local_id: crate::hir::LocalId,
+    /// The type of the captured variable.
+    pub ty: Type,
+    /// Whether this is a mutable capture (for `&mut` access).
+    pub is_mutable: bool,
+}
+
 /// An inline handler operation for `try { } with { }` expressions.
 ///
 /// This represents a single operation handler defined inline in a `with` block.
@@ -150,6 +161,8 @@ pub struct InlineHandlerOp {
     pub param_types: Vec<Type>,
     /// Return type of the operation.
     pub return_type: Type,
+    /// Variables captured from the enclosing scope.
+    pub captures: Vec<InlineHandlerCapture>,
 }
 
 /// The kind of a statement.

@@ -497,12 +497,6 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // as named handler declarations. This implementation pushes the handler
                 // similarly to PushHandler but with inline operation functions.
                 //
-                // TODO: Full implementation requires generating LLVM functions for each
-                // inline handler operation body. For now, we push a handler with NULL
-                // operations which will cause a runtime error if a perform reaches it.
-                let _ = operations; // Suppress unused warning
-                let _ = inline_mode; // Suppress unused warning
-
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
 
@@ -516,14 +510,6 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     .unwrap_or_else(|| {
                         let fn_type = i8_ptr_ty.fn_type(&[], false);
                         self.module.add_function("blood_evidence_create", fn_type, None)
-                    });
-                let ev_push_with_state = self.module.get_function("blood_evidence_push_with_state")
-                    .unwrap_or_else(|| {
-                        let fn_type = self.context.void_type().fn_type(
-                            &[i8_ptr_ty.into(), i64_ty.into(), i8_ptr_ty.into()],
-                            false
-                        );
-                        self.module.add_function("blood_evidence_push_with_state", fn_type, None)
                     });
                 let ev_set_current = self.module.get_function("blood_evidence_set_current")
                     .unwrap_or_else(|| {
@@ -800,17 +786,98 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     )])?;
                 }
 
-                // Push inline handler with effect_id and NULL state (stateless)
-                // blood_evidence_push_with_state adds an entry to the evidence vector
-                let effect_id_val = i64_ty.const_int(effect_id.index as u64, false);
-                let null_state = i8_ptr_ty.const_null();
-                self.builder.build_call(
-                    ev_push_with_state,
-                    &[ev.into(), effect_id_val.into(), null_state.into()],
-                    ""
-                ).map_err(|e| vec![Diagnostic::error(
-                    format!("LLVM call error: {}", e), stmt.span
-                )])?;
+                // Build captures struct for handler state
+                // Collect all unique captures across all operations
+                let mut all_captures: Vec<&crate::mir::InlineHandlerCapture> = Vec::new();
+                let mut seen_locals = std::collections::HashSet::new();
+                for op in operations {
+                    for capture in &op.captures {
+                        if seen_locals.insert(capture.local_id) {
+                            all_captures.push(capture);
+                        }
+                    }
+                }
+
+                // Create state pointer - either captures struct or NULL
+                let state_ptr = if all_captures.is_empty() {
+                    // No captures - use NULL state
+                    i8_ptr_ty.const_null()
+                } else {
+                    // Allocate captures struct on the stack (array of pointers)
+                    // Each element is a pointer to a captured variable
+                    let captures_count = all_captures.len();
+                    let captures_array_ty = i8_ptr_ty.array_type(captures_count as u32);
+                    let captures_alloca = self.builder.build_alloca(captures_array_ty, "captures")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM alloca error: {}", e), stmt.span
+                        )])?;
+
+                    // Store pointer to each captured variable
+                    for (idx, capture) in all_captures.iter().enumerate() {
+                        // Look up the local variable's alloca
+                        let local_ptr = self.locals.get(&capture.local_id)
+                            .ok_or_else(|| vec![Diagnostic::error(
+                                format!("Captured local {:?} not found in current scope", capture.local_id),
+                                stmt.span
+                            )])?;
+
+                        // Get pointer to array element
+                        let elem_ptr = unsafe {
+                            self.builder.build_gep(
+                                captures_alloca,
+                                &[i64_ty.const_zero(), i64_ty.const_int(idx as u64, false)],
+                                &format!("capture_{}_slot", idx)
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM GEP error: {}", e), stmt.span
+                            )])?
+                        };
+
+                        // Cast the local pointer to i8* and store it
+                        let local_as_ptr = self.builder.build_pointer_cast(
+                            *local_ptr,
+                            i8_ptr_ty,
+                            &format!("capture_{}_ptr", idx)
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM cast error: {}", e), stmt.span
+                        )])?;
+
+                        self.builder.build_store(elem_ptr, local_as_ptr)
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM store error: {}", e), stmt.span
+                            )])?;
+                    }
+
+                    // Cast captures array to i8*
+                    self.builder.build_pointer_cast(
+                        captures_alloca,
+                        i8_ptr_ty,
+                        "captures_ptr"
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM cast error: {}", e), stmt.span
+                    )])?
+                };
+
+                // Set state for the handler entry that was pushed by blood_evidence_register
+                // blood_evidence_register already pushed an entry with null state,
+                // so we just need to set the captures state on it
+                if !all_captures.is_empty() {
+                    let ev_set_state = self.module.get_function("blood_evidence_set_state")
+                        .unwrap_or_else(|| {
+                            let fn_type = self.context.void_type().fn_type(
+                                &[i8_ptr_ty.into(), i8_ptr_ty.into()],
+                                false,
+                            );
+                            self.module.add_function("blood_evidence_set_state", fn_type, None)
+                        });
+
+                    self.builder.build_call(
+                        ev_set_state,
+                        &[ev.into(), state_ptr.into()],
+                        ""
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), stmt.span
+                    )])?;
+                }
             }
 
             StatementKind::PopHandler => {

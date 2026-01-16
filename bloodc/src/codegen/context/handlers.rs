@@ -4,6 +4,7 @@
 //! return clauses, and runtime registration.
 
 use inkwell::values::{FunctionValue, BasicValueEnum};
+use inkwell::types::BasicType;
 use inkwell::AddressSpace;
 
 use crate::hir::{self, DefId, LocalId};
@@ -801,7 +802,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.is_multishot_handler = is_multishot;
 
         // Get parameters: (state: *mut void, args: *const i64, arg_count: i64, continuation: i64)
-        let _state_ptr = fn_value.get_nth_param(0)
+        let state_ptr = fn_value.get_nth_param(0)
             .ok_or_else(|| vec![Diagnostic::error("Missing state parameter".to_string(), span)])?;
         let args_ptr = fn_value.get_nth_param(1)
             .ok_or_else(|| vec![Diagnostic::error("Missing args parameter".to_string(), span)])?;
@@ -817,6 +818,40 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.builder.build_store(cont_alloca, continuation_param)
             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
         self.current_continuation = Some(cont_alloca);
+
+        // Extract captures from state pointer
+        // The state pointer points to a struct of pointers to captured variables
+        if !handler_body.captures.is_empty() {
+            let state_ptr_val = state_ptr.into_pointer_value();
+
+            for (capture_idx, capture) in handler_body.captures.iter().enumerate() {
+                // Get the element from the captures struct (array of pointers)
+                let elem_ptr = unsafe {
+                    self.builder.build_gep(
+                        state_ptr_val,
+                        &[i64_type.const_int(capture_idx as u64 * 8, false)],  // 8 bytes per pointer
+                        &format!("capture_{}_ptr_ptr", capture_idx)
+                    )
+                }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+                // Cast to pointer-to-pointer type
+                let capture_type = self.lower_type(&capture.ty);
+                let capture_ptr_ty = capture_type.ptr_type(AddressSpace::default());
+                let capture_ptr_ptr = self.builder
+                    .build_pointer_cast(elem_ptr, capture_ptr_ty.ptr_type(AddressSpace::default()), &format!("capture_{}_typed", capture_idx))
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+                // Load the pointer to the captured variable
+                let capture_ptr = self.builder
+                    .build_load(capture_ptr_ptr, &format!("capture_{}_ptr", capture_idx))
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                    .into_pointer_value();
+
+                // For mutable captures, we store the pointer directly so writes go through
+                // For immutable captures, we could load the value, but storing the pointer is fine
+                self.locals.insert(capture.local_id, capture_ptr);
+            }
+        }
 
         // Extract operation parameters from args_ptr and bind to locals
         let args_ptr_val = args_ptr.into_pointer_value();

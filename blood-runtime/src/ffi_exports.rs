@@ -892,30 +892,52 @@ pub unsafe extern "C" fn blood_perform(
     }
 
     // Find handler for this effect in evidence vector
-    let vec = &*(ev as *const Vec<EvidenceEntry>);
+    let vec = &mut *(ev as *mut Vec<EvidenceEntry>);
 
     let registry = get_effect_registry();
     let reg = registry.lock();
 
     // Search from most recent to oldest handler (reverse order)
-    for ev_entry in vec.iter().rev() {
+    // We need to find the index and then temporarily remove it to prevent
+    // the handler from catching effects it performs itself (delimited continuation semantics)
+    let mut found_idx = None;
+    let mut handler_info = None;
+
+    for (i, ev_entry) in vec.iter().enumerate().rev() {
         let handler_index = ev_entry.registry_index;
-        let instance_state = ev_entry.state;
         if let Some(registry_entry) = reg.get(handler_index as usize) {
             if registry_entry.effect_id == effect_id {
                 // Found the handler for this effect
                 if let Some(&op_fn) = registry_entry.operations.get(op_index as usize) {
                     if !op_fn.is_null() {
-                        // Call the operation handler with INSTANCE state, not registry state
-                        // The handler signature is: fn(state: *void, args: *i64, arg_count: i64, continuation: i64) -> i64
-                        type OpHandler = unsafe extern "C" fn(*mut c_void, *const i64, i64, i64) -> i64;
-                        let handler: OpHandler = std::mem::transmute(op_fn);
-                        let result = handler(instance_state, args, arg_count, continuation);
-                        return result;
+                        found_idx = Some(i);
+                        handler_info = Some((ev_entry.state, op_fn));
+                        break;
                     }
                 }
             }
         }
+    }
+
+    // Drop the registry lock before calling handler (handler may need it)
+    drop(reg);
+
+    if let (Some(idx), Some((instance_state, op_fn))) = (found_idx, handler_info) {
+        // Remove the handler entry temporarily to implement delimited continuation semantics
+        // This prevents the handler from catching effects it performs itself
+        let removed_entry = vec.remove(idx);
+
+        // Call the operation handler
+        // The handler signature is: fn(state: *void, args: *i64, arg_count: i64, continuation: i64) -> i64
+        type OpHandler = unsafe extern "C" fn(*mut c_void, *const i64, i64, i64) -> i64;
+        let handler: OpHandler = std::mem::transmute(op_fn);
+        let result = handler(instance_state, args, arg_count, continuation);
+
+        // Restore the handler entry after the handler returns
+        // Insert at the same position to maintain the correct order
+        vec.insert(idx, removed_entry);
+
+        return result;
     }
 
     // No handler found
