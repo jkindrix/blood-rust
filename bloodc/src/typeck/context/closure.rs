@@ -360,8 +360,22 @@ impl<'a> TypeContext<'a> {
                     self.collect_captures(base_expr, is_move, captures, seen);
                 }
             }
-            hir::ExprKind::Closure { .. } => {
-                // Nested closures have their own capture analysis
+            hir::ExprKind::Closure { captures: nested_captures, .. } => {
+                // Nested closures may capture variables from outer scopes.
+                // If those variables are from outside the current closure's scope,
+                // we need to capture them too so we can pass them down.
+                for nested_capture in nested_captures {
+                    if !seen.contains(&nested_capture.local_id) {
+                        let is_closure_local = self.locals.iter().any(|l| l.id == nested_capture.local_id);
+                        if !is_closure_local {
+                            seen.insert(nested_capture.local_id);
+                            captures.push(hir::Capture {
+                                local_id: nested_capture.local_id,
+                                by_move: is_move,
+                            });
+                        }
+                    }
+                }
             }
             hir::ExprKind::Borrow { expr: inner, .. }
             | hir::ExprKind::Deref(inner)
