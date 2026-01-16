@@ -297,8 +297,8 @@ impl<'a> TypeContext<'a> {
         span: Span,
     ) -> Result<hir::Expr, TypeError> {
         // Collect effect info for each handler clause
-        // (effect_id, op_name, param_types, return_type, ast_handler)
-        let mut handler_infos: Vec<(DefId, String, Vec<Type>, Type, &ast::TryWithHandler)> = Vec::new();
+        // (effect_id, op_name, param_types, return_type, ast_handler, effect_type_args)
+        let mut handler_infos: Vec<(DefId, String, Vec<Type>, Type, &ast::TryWithHandler, Vec<Type>)> = Vec::new();
 
         for handler in handlers {
             // Resolve the effect type path
@@ -313,26 +313,7 @@ impl<'a> TypeContext<'a> {
                 ));
             };
 
-            // Extract type arguments from the effect
-            let effect_type_args: Vec<Type> = if let Some(first_seg) = handler.effect.segments.first() {
-                if let Some(ref args) = first_seg.args {
-                    args.args.iter()
-                        .filter_map(|arg| {
-                            if let ast::TypeArg::Type(ty) = arg {
-                                self.ast_type_to_hir_type(ty).ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
-            // Look up the effect definition
+            // Look up the effect definition first so we know how many generics it has
             let effect_id = self.effect_defs.iter()
                 .find(|(_, info)| info.name == effect_name)
                 .map(|(def_id, _)| *def_id);
@@ -347,8 +328,6 @@ impl<'a> TypeContext<'a> {
                 }
             };
 
-            // Look up the operation in this effect
-            let op_name = self.symbol_to_string(handler.operation.node);
             let effect_info = match self.effect_defs.get(&effect_id).cloned() {
                 Some(info) => info,
                 None => {
@@ -358,6 +337,49 @@ impl<'a> TypeContext<'a> {
                     ));
                 }
             };
+
+            // Extract type arguments from the effect, or create fresh inference variables
+            // if none provided and the effect has generic parameters
+            let effect_type_args: Vec<Type> = if let Some(first_seg) = handler.effect.segments.first() {
+                if let Some(ref args) = first_seg.args {
+                    let explicit_args: Vec<Type> = args.args.iter()
+                        .filter_map(|arg| {
+                            if let ast::TypeArg::Type(ty) = arg {
+                                self.ast_type_to_hir_type(ty).ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !explicit_args.is_empty() {
+                        explicit_args
+                    } else if !effect_info.generics.is_empty() {
+                        // No explicit args but effect has generics - create fresh inference vars
+                        effect_info.generics.iter()
+                            .map(|_| self.unifier.fresh_var())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else if !effect_info.generics.is_empty() {
+                    // No type args syntax but effect has generics - create fresh inference vars
+                    effect_info.generics.iter()
+                        .map(|_| self.unifier.fresh_var())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else if !effect_info.generics.is_empty() {
+                // No first segment but effect has generics - create fresh inference vars
+                effect_info.generics.iter()
+                    .map(|_| self.unifier.fresh_var())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Look up the operation in this effect
+            let op_name = self.symbol_to_string(handler.operation.node);
 
             let op_info = match effect_info.operations.iter().find(|op| op.name == op_name) {
                 Some(info) => info.clone(),
@@ -372,6 +394,7 @@ impl<'a> TypeContext<'a> {
             };
 
             // Substitute type parameters in the operation's parameter types
+            // Always use effect_type_args (which may be fresh inference vars)
             let param_types: Vec<Type> = op_info.params.iter()
                 .map(|ty| {
                     if !effect_type_args.is_empty() {
@@ -388,30 +411,12 @@ impl<'a> TypeContext<'a> {
                 op_info.return_ty.clone()
             };
 
-            handler_infos.push((effect_id, op_name, param_types, return_type, handler));
+            handler_infos.push((effect_id, op_name, param_types, return_type, handler, effect_type_args.clone()));
         }
 
-        // Push all handled effects onto the stack
-        for (effect_id, _, _, _, handler) in &handler_infos {
-            // Extract effect type args for the stack
-            let effect_type_args: Vec<Type> = if let Some(first_seg) = handler.effect.segments.first() {
-                if let Some(ref args) = first_seg.args {
-                    args.args.iter()
-                        .filter_map(|arg| {
-                            if let ast::TypeArg::Type(ty) = arg {
-                                self.ast_type_to_hir_type(ty).ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-            self.handled_effects.push((*effect_id, effect_type_args));
+        // Push all handled effects onto the stack (using the effect_type_args we computed/inferred)
+        for (effect_id, _, _, _, _, effect_type_args) in &handler_infos {
+            self.handled_effects.push((*effect_id, effect_type_args.clone()));
         }
 
         // Push a handler scope
@@ -434,7 +439,7 @@ impl<'a> TypeContext<'a> {
         // Type-check each handler's body and build HIR handlers
         let mut hir_handlers = Vec::new();
 
-        for (effect_id, op_name, param_types, return_type, handler) in handler_infos {
+        for (effect_id, op_name, param_types, return_type, handler, _effect_type_args) in handler_infos {
             // Create a handler scope for the handler clause (must be Handler, not Block, so resume is valid)
             self.resolver.push_scope(ScopeKind::Handler, handler.span);
 
