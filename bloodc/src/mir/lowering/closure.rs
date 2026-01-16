@@ -25,6 +25,7 @@ use crate::mir::types::{
 };
 
 use super::util::{convert_binop, is_irrefutable_pattern, ExprLowering, LoopContextInfo};
+use super::InlineHandlerBodies;
 
 // ============================================================================
 // Closure Lowering
@@ -63,6 +64,8 @@ pub struct ClosureLowering<'hir, 'ctx> {
     pending_closures: &'ctx mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
     /// Counter for generating synthetic closure DefIds.
     closure_counter: &'ctx mut u32,
+    /// Inline handler bodies to be compiled during codegen.
+    inline_handler_bodies: &'ctx mut InlineHandlerBodies,
     /// Current handler nesting depth for inline evidence optimization (EFF-OPT-003/004).
     handler_depth: usize,
 }
@@ -76,6 +79,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         hir: &'hir HirCrate,
         pending_closures: &'ctx mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
         closure_counter: &'ctx mut u32,
+        inline_handler_bodies: &'ctx mut InlineHandlerBodies,
     ) -> Self {
         let mut builder = MirBodyBuilder::new(def_id, body.span);
 
@@ -136,6 +140,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
             temp_counter: 0,
             pending_closures,
             closure_counter,
+            inline_handler_bodies,
             handler_depth: 0,
         }
     }

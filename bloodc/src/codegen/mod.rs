@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::hir::{self, DefId};
-use crate::mir::{EscapeResults, MirBody};
+use crate::mir::{EscapeResults, MirBody, InlineHandlerBodies};
 use crate::diagnostics::Diagnostic;
 
 /// Type alias for escape analysis results per function.
@@ -262,6 +262,7 @@ pub fn compile_mir_to_object(
     hir_crate: &hir::Crate,
     mir_bodies: &MirBodiesMap,
     escape_analysis: &EscapeAnalysisMap,
+    inline_handler_bodies: &InlineHandlerBodies,
     output_path: &Path,
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
@@ -270,6 +271,7 @@ pub fn compile_mir_to_object(
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
+    codegen.set_inline_handler_bodies(inline_handler_bodies.clone());
 
     // First pass: declare types and functions from HIR
     // This sets up struct_defs, enum_defs, and function declarations
@@ -334,6 +336,7 @@ pub fn compile_mir_to_object_with_opt(
     hir_crate: &hir::Crate,
     mir_bodies: &MirBodiesMap,
     escape_analysis: &EscapeAnalysisMap,
+    inline_handler_bodies: &InlineHandlerBodies,
     output_path: &Path,
     opt_level: BloodOptLevel,
 ) -> Result<(), Vec<Diagnostic>> {
@@ -343,6 +346,7 @@ pub fn compile_mir_to_object_with_opt(
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
+    codegen.set_inline_handler_bodies(inline_handler_bodies.clone());
 
     // First pass: declare types and functions from HIR
     codegen.compile_crate_declarations(hir_crate)?;
@@ -412,6 +416,7 @@ pub fn compile_mir_to_object_with_opt(
 /// * `mir_body` - The MIR body for this definition (if it's a function)
 /// * `escape_results` - Escape analysis results for this function
 /// * `all_mir_bodies` - All MIR bodies in the crate (for monomorphization of generic functions)
+/// * `inline_handler_bodies` - Inline handler bodies for try/with blocks
 /// * `output_path` - Path to write the object file
 pub fn compile_definition_to_object(
     def_id: DefId,
@@ -419,6 +424,7 @@ pub fn compile_definition_to_object(
     mir_body: Option<&MirBody>,
     escape_results: Option<&crate::mir::EscapeResults>,
     all_mir_bodies: Option<&MirBodiesMap>,
+    inline_handler_bodies: Option<&InlineHandlerBodies>,
     output_path: &Path,
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
@@ -433,6 +439,11 @@ pub fn compile_definition_to_object(
         let mut escape_map = HashMap::new();
         escape_map.insert(def_id, results.clone());
         codegen.set_escape_analysis(escape_map);
+    }
+
+    // Set up inline handler bodies if provided
+    if let Some(handlers) = inline_handler_bodies {
+        codegen.set_inline_handler_bodies(handlers.clone());
     }
 
     // Declare all types and external functions from the crate
@@ -563,6 +574,7 @@ pub fn compile_definitions_to_objects(
     hir_crate: &hir::Crate,
     mir_bodies: &MirBodiesMap,
     escape_analysis: &EscapeAnalysisMap,
+    inline_handler_bodies: Option<&InlineHandlerBodies>,
     output_dir: &Path,
 ) -> Result<Vec<(DefId, std::path::PathBuf)>, Vec<Diagnostic>> {
     let mut results = Vec::new();
@@ -573,7 +585,7 @@ pub fn compile_definitions_to_objects(
         let escape_results = escape_analysis.get(&def_id);
         let output_path = output_dir.join(format!("def_{}.o", def_id.index()));
 
-        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, Some(mir_bodies), &output_path) {
+        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, Some(mir_bodies), inline_handler_bodies, &output_path) {
             Ok(()) => {
                 results.push((def_id, output_path));
             }

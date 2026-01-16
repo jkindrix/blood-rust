@@ -26,6 +26,7 @@ use crate::mir::types::{
 
 use super::LoopContext;
 use super::util::{is_irrefutable_pattern, ExprLowering, LoopContextInfo};
+use super::{InlineHandlerBody, InlineHandlerBodies};
 
 // ============================================================================
 // Function Lowering
@@ -52,6 +53,8 @@ pub struct FunctionLowering<'hir, 'ctx> {
     pending_closures: &'ctx mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
     /// Counter for generating synthetic closure DefIds.
     closure_counter: &'ctx mut u32,
+    /// Inline handler bodies to be compiled during codegen.
+    inline_handler_bodies: &'ctx mut InlineHandlerBodies,
     /// Current handler nesting depth for inline evidence optimization (EFF-OPT-003/004).
     handler_depth: usize,
 }
@@ -65,6 +68,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         hir: &'hir HirCrate,
         pending_closures: &'ctx mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
         closure_counter: &'ctx mut u32,
+        inline_handler_bodies: &'ctx mut InlineHandlerBodies,
     ) -> Self {
         let mut builder = MirBodyBuilder::new(def_id, body.span);
 
@@ -99,6 +103,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             temp_counter: 0,
             pending_closures,
             closure_counter,
+            inline_handler_bodies,
             handler_depth: 0,
         }
     }
@@ -703,14 +708,20 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 return_type: handler.return_type.clone(),
             });
 
-            // Queue the handler body for later lowering
-            // The handler body is like a closure that:
-            // - Takes the operation parameters
-            // - Can call resume()
-            // - May capture state from enclosing scope
-            // For now, queue as pending inline handler (we'll need separate handling)
-            // TODO: Implement proper inline handler body lowering with captures
-            // For now, we'll inline the handler body directly during codegen
+            // Store the handler body for compilation during codegen.
+            // The handler body has:
+            // - Operation parameters (bound to params)
+            // - Access to resume() for continuing the computation
+            // - May capture variables from enclosing scope
+            self.inline_handler_bodies.insert(synthetic_fn_def_id, InlineHandlerBody {
+                effect_id: handler.effect_id,
+                op_name: handler.op_name.clone(),
+                op_index,
+                params: handler.params.clone(),
+                param_types: handler.param_types.clone(),
+                return_type: handler.return_type.clone(),
+                body: handler.body.clone(),
+            });
         }
 
         // Track handler depth for inline optimization

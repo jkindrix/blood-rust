@@ -688,7 +688,120 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     ev
                 };
 
+                // Compile inline handler operation bodies and register with runtime
+                // All operations are compiled first, then registered together via blood_evidence_register
+
+                // Declare or get the evidence registration function
+                // Signature: void blood_evidence_register(
+                //   EvidenceHandle ev, i64 effect_id, *const *const c_void ops, i64 op_count
+                // )
+                let ev_register = self.module.get_function("blood_evidence_register")
+                    .unwrap_or_else(|| {
+                        // ops is **void (pointer to array of function pointers)
+                        let ptr_ptr_ty = i8_ptr_ty.ptr_type(AddressSpace::default());
+                        let fn_type = self.context.void_type().fn_type(
+                            &[i8_ptr_ty.into(), i64_ty.into(), ptr_ptr_ty.into(), i64_ty.into()],
+                            false,
+                        );
+                        self.module.add_function("blood_evidence_register", fn_type, None)
+                    });
+
+                // Compile all handler operations and collect function pointers
+                let mut compiled_ops: Vec<inkwell::values::PointerValue<'ctx>> = Vec::new();
+
+                // Save the current insertion point
+                let saved_block = self.builder.get_insert_block();
+
+                for op in operations {
+                    // Look up the handler body from inline_handler_bodies
+                    if let Some(handler_body) = self.inline_handler_bodies.get(&op.synthetic_fn_def_id).cloned() {
+                        // Compile the inline handler body to an LLVM function
+                        let handler_fn = self.compile_inline_handler_op_body(
+                            op.synthetic_fn_def_id,
+                            &handler_body,
+                        )?;
+
+                        // Get the function pointer
+                        let fn_ptr = handler_fn.as_global_value().as_pointer_value();
+                        compiled_ops.push(fn_ptr);
+                    } else {
+                        // Handler body not found - use null pointer (will cause runtime error if called)
+                        compiled_ops.push(i8_ptr_ty.const_null());
+                    }
+                }
+
+                // Restore the insertion point
+                if let Some(block) = saved_block {
+                    self.builder.position_at_end(block);
+                }
+
+                // Build array of operation function pointers on the stack
+                let op_count = operations.len();
+                let ptr_ptr_ty = i8_ptr_ty.ptr_type(AddressSpace::default());
+
+                if op_count > 0 {
+                    // Allocate array for operation function pointers
+                    let array_ty = i8_ptr_ty.array_type(op_count as u32);
+                    let ops_array = self.builder.build_alloca(array_ty, "ops_array")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM alloca error: {}", e), stmt.span
+                        )])?;
+
+                    // Store each function pointer in the array
+                    for (i, fn_ptr) in compiled_ops.iter().enumerate() {
+                        // Get pointer to array element
+                        let elem_ptr = unsafe {
+                            self.builder.build_gep(
+                                ops_array,
+                                &[
+                                    i64_ty.const_zero(),
+                                    i64_ty.const_int(i as u64, false),
+                                ],
+                                &format!("op_ptr_{}", i)
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM GEP error: {}", e), stmt.span
+                            )])?
+                        };
+
+                        // Cast function pointer to i8*
+                        let fn_as_i8ptr = self.builder.build_pointer_cast(
+                            *fn_ptr,
+                            i8_ptr_ty,
+                            &format!("fn_ptr_{}", i)
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM cast error: {}", e), stmt.span
+                        )])?;
+
+                        self.builder.build_store(elem_ptr, fn_as_i8ptr)
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM store error: {}", e), stmt.span
+                            )])?;
+                    }
+
+                    // Cast array pointer to **void for blood_evidence_register
+                    let ops_ptr = self.builder.build_pointer_cast(
+                        ops_array,
+                        ptr_ptr_ty,
+                        "ops_ptr"
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM cast error: {}", e), stmt.span
+                    )])?;
+
+                    // Register all operations with the evidence system
+                    let effect_id_val = i64_ty.const_int(effect_id.index as u64, false);
+                    let op_count_val = i64_ty.const_int(op_count as u64, false);
+
+                    self.builder.build_call(
+                        ev_register,
+                        &[ev.into(), effect_id_val.into(), ops_ptr.into(), op_count_val.into()],
+                        ""
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), stmt.span
+                    )])?;
+                }
+
                 // Push inline handler with effect_id and NULL state (stateless)
+                // blood_evidence_push_with_state adds an entry to the evidence vector
                 let effect_id_val = i64_ty.const_int(effect_id.index as u64, false);
                 let null_state = i8_ptr_ty.const_null();
                 self.builder.build_call(
@@ -698,11 +811,6 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 ).map_err(|e| vec![Diagnostic::error(
                     format!("LLVM call error: {}", e), stmt.span
                 )])?;
-
-                // Note: Full inline handler implementation requires generating LLVM functions
-                // for each operation body and registering them with blood_handler_register.
-                // This basic implementation pushes the handler but operation dispatch will
-                // not find the operation functions.
             }
 
             StatementKind::PopHandler => {

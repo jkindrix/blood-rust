@@ -743,6 +743,180 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(())
     }
 
+    /// Compile an inline handler operation body to an LLVM function.
+    ///
+    /// This is similar to compile_handler_op_body but works with inline handlers
+    /// where we have the HIR expression directly rather than a Body with locals.
+    ///
+    /// Handler operation signature:
+    /// `fn(state: *mut void, args: *const i64, arg_count: i64, continuation: i64) -> i64`
+    pub fn compile_inline_handler_op_body(
+        &mut self,
+        synthetic_def_id: DefId,
+        handler_body: &crate::mir::InlineHandlerBody,
+    ) -> Result<FunctionValue<'ctx>, Vec<Diagnostic>> {
+        use inkwell::values::BasicValueEnum;
+
+        let span = handler_body.body.span;
+        let i64_type = self.context.i64_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+
+        // Handler operation function signature:
+        // fn(state: *mut void, args: *const i64, arg_count: i64, continuation: i64) -> i64
+        let handler_op_type = i64_type.fn_type(
+            &[i8_ptr_type.into(), i64_ptr_type.into(), i64_type.into(), i64_type.into()],
+            false,
+        );
+
+        // Generate unique function name for this inline handler operation
+        let fn_name = format!(
+            "blood_inline_handler_{}_{}_{}",
+            handler_body.effect_id.index(),
+            handler_body.op_name,
+            synthetic_def_id.index()
+        );
+
+        // Check if function already exists (from previous compilation)
+        if let Some(existing_fn) = self.module.get_function(&fn_name) {
+            return Ok(existing_fn);
+        }
+
+        let fn_value = self.module.add_function(&fn_name, handler_op_type, None);
+
+        // Detect if this is a multi-shot handler (has multiple resume calls)
+        let resume_count = crate::effects::handler::count_resumes_in_expr(&handler_body.body);
+        let is_multishot = resume_count > 1;
+
+        // Create entry block
+        let entry_block = self.context.append_basic_block(fn_value, "entry");
+        self.builder.position_at_end(entry_block);
+
+        // Save and set context
+        let saved_fn = self.current_fn;
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_continuation = self.current_continuation.take();
+        let saved_is_multishot = self.is_multishot_handler;
+        self.current_fn = Some(fn_value);
+        self.is_multishot_handler = is_multishot;
+
+        // Get parameters: (state: *mut void, args: *const i64, arg_count: i64, continuation: i64)
+        let _state_ptr = fn_value.get_nth_param(0)
+            .ok_or_else(|| vec![Diagnostic::error("Missing state parameter".to_string(), span)])?;
+        let args_ptr = fn_value.get_nth_param(1)
+            .ok_or_else(|| vec![Diagnostic::error("Missing args parameter".to_string(), span)])?;
+        let _arg_count_param = fn_value.get_nth_param(2)
+            .ok_or_else(|| vec![Diagnostic::error("Missing arg_count parameter".to_string(), span)])?;
+        let continuation_param = fn_value.get_nth_param(3)
+            .ok_or_else(|| vec![Diagnostic::error("Missing continuation parameter".to_string(), span)])?;
+
+        // Store continuation parameter for use by compile_resume
+        let cont_alloca = self.builder
+            .build_alloca(i64_type, "continuation")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        self.builder.build_store(cont_alloca, continuation_param)
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+        self.current_continuation = Some(cont_alloca);
+
+        // Extract operation parameters from args_ptr and bind to locals
+        let args_ptr_val = args_ptr.into_pointer_value();
+        for (idx, (param_id, param_ty)) in handler_body.params.iter()
+            .zip(handler_body.param_types.iter())
+            .enumerate()
+        {
+            let local_type = self.lower_type(param_ty);
+            let alloca = self.builder
+                .build_alloca(local_type, &format!("param_{}", idx))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            // Load the argument from args[idx]
+            let arg_idx = i64_type.const_int(idx as u64, false);
+            let arg_ptr = unsafe {
+                self.builder.build_gep(args_ptr_val, &[arg_idx], &format!("arg_{}_ptr", idx))
+            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            let arg_val = self.builder
+                .build_load(arg_ptr, &format!("arg_{}", idx))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            // Convert from i64 to the actual parameter type
+            let arg_int = arg_val.into_int_value();
+            let final_val: BasicValueEnum = if local_type.is_int_type() {
+                let target_int_type = local_type.into_int_type();
+                if target_int_type.get_bit_width() < 64 {
+                    self.builder
+                        .build_int_truncate(arg_int, target_int_type, "arg_trunc")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                        .into()
+                } else if target_int_type.get_bit_width() > 64 {
+                    self.builder
+                        .build_int_s_extend(arg_int, target_int_type, "arg_ext")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                        .into()
+                } else {
+                    arg_int.into()
+                }
+            } else if local_type.is_pointer_type() {
+                self.builder
+                    .build_int_to_ptr(arg_int, local_type.into_pointer_type(), "arg_ptr")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                    .into()
+            } else {
+                arg_int.into()
+            };
+
+            self.builder.build_store(alloca, final_val)
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+
+            self.locals.insert(*param_id, alloca);
+        }
+
+        // Compile the handler body expression
+        let result = self.compile_expr(&handler_body.body)?;
+
+        // Check if block already terminated (e.g., by resume)
+        let current_block = self.builder.get_insert_block()
+            .ok_or_else(|| vec![Diagnostic::error("No current block".to_string(), span)])?;
+        if current_block.get_terminator().is_some() {
+            // Block already terminated, don't add return
+        } else {
+            // Return result as i64
+            if let Some(ret_val) = result {
+                let ret_i64 = match ret_val {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 64 {
+                            iv
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, i64_type, "ret_ext")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                        }
+                    }
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.builder
+                            .build_ptr_to_int(pv, i64_type, "ret_ptr_int")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                    }
+                    _ => i64_type.const_zero(),
+                };
+                self.builder.build_return(Some(&ret_i64))
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+            } else {
+                // Return 0 for unit type
+                self.builder.build_return(Some(&i64_type.const_zero()))
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+            }
+        }
+
+        // Restore context
+        self.current_fn = saved_fn;
+        self.locals = saved_locals;
+        self.current_continuation = saved_continuation;
+        self.is_multishot_handler = saved_is_multishot;
+
+        Ok(fn_value)
+    }
+
     /// Add a function to llvm.global_ctors for automatic execution at startup.
     pub(super) fn add_global_constructor(&mut self, init_fn: FunctionValue<'ctx>) -> Result<(), Vec<Diagnostic>> {
         let i32_type = self.context.i32_type();

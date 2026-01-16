@@ -53,6 +53,31 @@ use crate::diagnostics::Diagnostic;
 use super::body::MirBody;
 use super::types::BasicBlockId;
 
+/// Information about an inline handler operation body needed for codegen.
+///
+/// This stores the HIR expression for inline handler bodies (try/with) so they
+/// can be compiled to LLVM functions during code generation.
+#[derive(Debug, Clone)]
+pub struct InlineHandlerBody {
+    /// The effect being handled.
+    pub effect_id: DefId,
+    /// The operation name.
+    pub op_name: String,
+    /// The operation index within the effect.
+    pub op_index: u32,
+    /// Parameter local IDs for binding operation parameters.
+    pub params: Vec<hir::LocalId>,
+    /// Parameter types.
+    pub param_types: Vec<Type>,
+    /// Return type of the operation.
+    pub return_type: Type,
+    /// The handler body expression.
+    pub body: hir::Expr,
+}
+
+/// Map from synthetic DefId to inline handler body info.
+pub type InlineHandlerBodies = HashMap<DefId, InlineHandlerBody>;
+
 pub use closure::ClosureLowering;
 pub use function::FunctionLowering;
 pub use util::{convert_binop, convert_unop, lower_literal_to_constant, is_irrefutable_pattern, ExprLowering, LoopContextInfo};
@@ -74,6 +99,9 @@ pub struct MirLowering<'hir> {
     closure_counter: u32,
     /// Pending closure bodies to be lowered (body_id, synthetic def_id, captures with types).
     pending_closures: Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
+    /// Inline handler bodies collected during lowering.
+    /// Maps synthetic DefId to the handler body info for codegen.
+    inline_handler_bodies: InlineHandlerBodies,
 }
 
 impl<'hir> MirLowering<'hir> {
@@ -85,11 +113,16 @@ impl<'hir> MirLowering<'hir> {
             diagnostics: Vec::new(),
             closure_counter: 0,
             pending_closures: Vec::new(),
+            inline_handler_bodies: HashMap::new(),
         }
     }
 
     /// Lower all functions in the crate.
-    pub fn lower_crate(&mut self) -> Result<HashMap<DefId, MirBody>, Vec<Diagnostic>> {
+    ///
+    /// Returns a tuple of:
+    /// - MIR bodies for all functions and closures
+    /// - Inline handler bodies for codegen (try/with blocks)
+    pub fn lower_crate(&mut self) -> Result<(HashMap<DefId, MirBody>, InlineHandlerBodies), Vec<Diagnostic>> {
         // First pass: lower all top-level functions
         for (&def_id, item) in &self.hir.items {
             match &item.kind {
@@ -120,7 +153,7 @@ impl<'hir> MirLowering<'hir> {
         }
 
         if self.diagnostics.is_empty() {
-            Ok(std::mem::take(&mut self.bodies))
+            Ok((std::mem::take(&mut self.bodies), std::mem::take(&mut self.inline_handler_bodies)))
         } else {
             Err(std::mem::take(&mut self.diagnostics))
         }
@@ -135,7 +168,15 @@ impl<'hir> MirLowering<'hir> {
     ) -> Result<MirBody, Vec<Diagnostic>> {
         // Closure bodies are lowered similarly to functions
         // The captures become implicit parameters accessed via the environment
-        let builder = ClosureLowering::new(def_id, body, captures, self.hir, &mut self.pending_closures, &mut self.closure_counter);
+        let builder = ClosureLowering::new(
+            def_id,
+            body,
+            captures,
+            self.hir,
+            &mut self.pending_closures,
+            &mut self.closure_counter,
+            &mut self.inline_handler_bodies,
+        );
         builder.lower()
     }
 
@@ -153,6 +194,7 @@ impl<'hir> MirLowering<'hir> {
             self.hir,
             &mut self.pending_closures,
             &mut self.closure_counter,
+            &mut self.inline_handler_bodies,
         );
         builder.lower()
     }

@@ -93,7 +93,8 @@ fn int_literal(val: i128) -> Expr {
 fn compile_via_mir(hir_crate: &HirCrate) -> Result<String, Vec<Diagnostic>> {
     // Lower HIR to MIR
     let mut lowering = MirLowering::new(hir_crate);
-    let mir_bodies = lowering.lower_crate()?;
+    let (mir_bodies, inline_handler_bodies) = lowering.lower_crate()?;
+    let _ = inline_handler_bodies; // Unused in tests for now
 
     // Run escape analysis on each body
     let mut escape_map = HashMap::new();

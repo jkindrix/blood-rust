@@ -1075,9 +1075,10 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     // Lower to MIR (Phase 3 integration point)
     let mut mir_lowering = mir::MirLowering::new(&hir_crate);
     let mir_result = match mir_lowering.lower_crate() {
-        Ok(mir_bodies) => {
+        Ok((mir_bodies, inline_handler_bodies)) => {
             if verbosity > 1 {
-                eprintln!("MIR lowering passed. {} function bodies.", mir_bodies.len());
+                eprintln!("MIR lowering passed. {} function bodies, {} inline handlers.",
+                    mir_bodies.len(), inline_handler_bodies.len());
             }
 
             // Run escape analysis on MIR bodies
@@ -1147,8 +1148,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 }
             }
 
-            // Return MIR bodies and escape analysis for MIR-based codegen
-            Some((mir_bodies, escape_results))
+            // Return MIR bodies, escape analysis, and inline handler bodies for codegen
+            Some((mir_bodies, escape_results, inline_handler_bodies))
         }
         Err(errors) => {
             // MIR lowering is mandatory - errors are fatal
@@ -1175,7 +1176,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     let _output_obj = args.file.with_extension("o");
     let output_exe = args.file.with_extension("");
 
-    let (ref mir_bodies, ref escape_map) = mir_result
+    let (ref mir_bodies, ref escape_map, ref inline_handler_bodies) = mir_result
         .expect("MIR result should be present (errors return early)");
 
     // Track object files for linking
@@ -1200,7 +1201,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
 
         let output_obj = obj_dir.join("whole_module.o");
-        match codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, &output_obj) {
+        match codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, inline_handler_bodies, &output_obj) {
             Ok(()) => {
                 object_files.push(output_obj);
                 if verbosity > 0 {
@@ -1276,6 +1277,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 Some(mir_body),
                 escape_results,
                 Some(&mir_bodies),
+                Some(&inline_handler_bodies),
                 &obj_path,
             ) {
                 Ok(()) => {
@@ -1339,7 +1341,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             }
 
             // Cache miss - compile this handler
-            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(&mir_bodies), &obj_path) {
+            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(&mir_bodies), Some(&inline_handler_bodies), &obj_path) {
                 Ok(()) => {
                     compiled_count += 1;
                     if verbosity > 2 {

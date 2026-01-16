@@ -15,7 +15,7 @@ use inkwell::AddressSpace;
 
 use crate::hir::{self, DefId, LocalId, Type, PrimitiveTy, IntTy, UintTy, FloatTy};
 use crate::hir::ty::{TypeKind, TyVarId};
-use crate::mir::{EscapeAnalyzer, EscapeResults, MirBody};
+use crate::mir::{EscapeAnalyzer, EscapeResults, MirBody, InlineHandlerBodies};
 use crate::codegen::mir_codegen::MirTypesCodegen;
 use crate::diagnostics::Diagnostic;
 use crate::span::Span;
@@ -517,6 +517,9 @@ pub struct CodegenContext<'ctx, 'a> {
     pub(super) mono_cache: HashMap<(DefId, Vec<Type>), DefId>,
     /// Counter for generating unique monomorphized DefIds.
     pub(super) mono_counter: u32,
+    /// Inline handler bodies for try/with blocks (codegen for inline effect handlers).
+    /// Maps synthetic DefId to the handler body info.
+    pub(super) inline_handler_bodies: InlineHandlerBodies,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -561,6 +564,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             generic_mir_bodies: HashMap::new(),
             mono_cache: HashMap::new(),
             mono_counter: 0,
+            inline_handler_bodies: HashMap::new(),
         }
     }
 
@@ -586,6 +590,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
         }
+    }
+
+    /// Store inline handler bodies for try/with blocks.
+    ///
+    /// These are used to compile inline handler operation bodies to LLVM functions
+    /// during codegen of PushInlineHandler statements.
+    pub fn set_inline_handler_bodies(&mut self, inline_handlers: InlineHandlerBodies) {
+        self.inline_handler_bodies = inline_handlers;
     }
 
     /// Get WASM import mappings.

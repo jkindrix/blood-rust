@@ -555,9 +555,10 @@ fn compile_to_mir(source: &str) -> Result<std::collections::HashMap<bloodc::hir:
 
     // Lower to MIR
     let mut lowering = MirLowering::new(&hir_crate);
-    lowering.lower_crate().map_err(|errors| {
+    let (mir_bodies, _inline_handler_bodies) = lowering.lower_crate().map_err(|errors| {
         errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
-    })
+    })?;
+    Ok(mir_bodies)
 }
 
 /// Helper: Run full pipeline from source to LLVM IR via MIR path.
@@ -581,7 +582,7 @@ fn compile_to_llvm_ir(source: &str) -> Result<String, String> {
 
     // Lower to MIR
     let mut lowering = MirLowering::new(&hir_crate);
-    let mir_bodies = lowering.lower_crate().map_err(|errors| {
+    let (mir_bodies, _inline_handler_bodies) = lowering.lower_crate().map_err(|errors| {
         errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; ")
     })?;
 

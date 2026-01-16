@@ -69,7 +69,7 @@ pub use static_evidence::{
     analyze_handler_state, analyze_handler_allocation_tier,
     handler_evidence_escapes, HandleAnalysis,
 };
-pub use lowering::MirLowering;
+pub use lowering::{MirLowering, InlineHandlerBody, InlineHandlerBodies};
 pub use ptr::{BloodPtr, PtrMetadata, MemoryTier, PtrFlags};
 pub use snapshot::{GenerationSnapshot, SnapshotEntry, LazySnapshot, LazyValidationStats};
 pub use visitor::{Visitor, Location, PlaceContext, walk_body, collect_rvalue_locals, collect_operand_locals};
