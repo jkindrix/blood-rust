@@ -115,16 +115,8 @@ impl<'a> TypeContext<'a> {
             ast::ExprKind::WithHandle { handler, body } => {
                 self.infer_with_handle(handler, body, expr.span)
             }
-            ast::ExprKind::TryWith { body: _, handlers: _ } => {
-                // TODO: Implement try-with inline handlers
-                // For now, return an error indicating this feature is not yet implemented
-                Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "try-with inline handler expressions are not yet implemented. \
-                                  Please use `deep handler` declarations with `with Handler handle { }` syntax instead.".into(),
-                    },
-                    expr.span,
-                ))
+            ast::ExprKind::TryWith { body, handlers } => {
+                self.infer_try_with(body, handlers, expr.span)
             }
             ast::ExprKind::Perform { effect, operation, args } => {
                 self.infer_perform(effect.as_ref(), operation, args, expr.span)
@@ -293,6 +285,267 @@ impl<'a> TypeContext<'a> {
             ty: resolved_ty,
             span,
         })
+    }
+
+    /// Infer type of a try-with inline handler expression.
+    ///
+    /// `try { body } with { Effect::op(x) => { handler_body } }`
+    fn infer_try_with(
+        &mut self,
+        body: &ast::Block,
+        handlers: &[ast::TryWithHandler],
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Collect effect info for each handler clause
+        // (effect_id, op_name, param_types, return_type, ast_handler)
+        let mut handler_infos: Vec<(DefId, String, Vec<Type>, Type, &ast::TryWithHandler)> = Vec::new();
+
+        for handler in handlers {
+            // Resolve the effect type path
+            let effect_name = if let Some(first_seg) = handler.effect.segments.first() {
+                self.symbol_to_string(first_seg.name.node)
+            } else {
+                return Err(TypeError::new(
+                    TypeErrorKind::UnsupportedFeature {
+                        feature: "Effect path must have at least one segment".into(),
+                    },
+                    handler.span,
+                ));
+            };
+
+            // Extract type arguments from the effect
+            let effect_type_args: Vec<Type> = if let Some(first_seg) = handler.effect.segments.first() {
+                if let Some(ref args) = first_seg.args {
+                    args.args.iter()
+                        .filter_map(|arg| {
+                            if let ast::TypeArg::Type(ty) = arg {
+                                self.ast_type_to_hir_type(ty).ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            // Look up the effect definition
+            let effect_id = self.effect_defs.iter()
+                .find(|(_, info)| info.name == effect_name)
+                .map(|(def_id, _)| *def_id);
+
+            let effect_id = match effect_id {
+                Some(id) => id,
+                None => {
+                    return Err(TypeError::new(
+                        TypeErrorKind::NotAnEffect { name: effect_name },
+                        handler.span,
+                    ));
+                }
+            };
+
+            // Look up the operation in this effect
+            let op_name = self.symbol_to_string(handler.operation.node);
+            let effect_info = match self.effect_defs.get(&effect_id).cloned() {
+                Some(info) => info,
+                None => {
+                    return Err(TypeError::new(
+                        TypeErrorKind::NotAnEffect { name: effect_name },
+                        handler.span,
+                    ));
+                }
+            };
+
+            let op_info = match effect_info.operations.iter().find(|op| op.name == op_name) {
+                Some(info) => info.clone(),
+                None => {
+                    return Err(TypeError::new(
+                        TypeErrorKind::UnsupportedFeature {
+                            feature: format!("Unknown operation `{}` on effect `{}`", op_name, effect_name),
+                        },
+                        handler.operation.span,
+                    ));
+                }
+            };
+
+            // Substitute type parameters in the operation's parameter types
+            let param_types: Vec<Type> = op_info.params.iter()
+                .map(|ty| {
+                    if !effect_type_args.is_empty() {
+                        self.substitute_effect_type_args(ty, &effect_info.generics, &effect_type_args)
+                    } else {
+                        ty.clone()
+                    }
+                })
+                .collect();
+
+            let return_type = if !effect_type_args.is_empty() {
+                self.substitute_effect_type_args(&op_info.return_ty, &effect_info.generics, &effect_type_args)
+            } else {
+                op_info.return_ty.clone()
+            };
+
+            handler_infos.push((effect_id, op_name, param_types, return_type, handler));
+        }
+
+        // Push all handled effects onto the stack
+        for (effect_id, _, _, _, handler) in &handler_infos {
+            // Extract effect type args for the stack
+            let effect_type_args: Vec<Type> = if let Some(first_seg) = handler.effect.segments.first() {
+                if let Some(ref args) = first_seg.args {
+                    args.args.iter()
+                        .filter_map(|arg| {
+                            if let ast::TypeArg::Type(ty) = arg {
+                                self.ast_type_to_hir_type(ty).ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            self.handled_effects.push((*effect_id, effect_type_args));
+        }
+
+        // Push a handler scope
+        self.resolver.push_scope(ScopeKind::Handler, span);
+
+        // Type-check the body
+        let expected = self.unifier.fresh_var();
+        let body_result = self.check_block(body, &expected);
+
+        // Pop handler scope
+        self.resolver.pop_scope();
+
+        // Pop handled effects
+        for _ in &handler_infos {
+            self.handled_effects.pop();
+        }
+
+        let body_expr = body_result?;
+
+        // Type-check each handler's body and build HIR handlers
+        let mut hir_handlers = Vec::new();
+
+        for (effect_id, op_name, param_types, return_type, handler) in handler_infos {
+            // Create a handler scope for the handler clause (must be Handler, not Block, so resume is valid)
+            self.resolver.push_scope(ScopeKind::Handler, handler.span);
+
+            // Bind the operation parameters
+            let mut param_locals = Vec::new();
+            let mut param_type_vec = Vec::new();
+
+            // Check parameter count matches
+            if handler.params.len() != param_types.len() {
+                self.resolver.pop_scope();
+                return Err(TypeError::new(
+                    TypeErrorKind::WrongArity {
+                        expected: param_types.len(),
+                        found: handler.params.len(),
+                    },
+                    handler.span,
+                ));
+            }
+
+            for (idx, (pattern, param_ty)) in handler.params.iter().zip(param_types.iter()).enumerate() {
+                // For now, only support simple identifier patterns
+                match &pattern.kind {
+                    ast::PatternKind::Ident { name, .. } => {
+                        let local_name = self.symbol_to_string(name.node);
+                        let local_id = self.resolver.next_local_id();
+                        self.locals.push(hir::Local {
+                            id: local_id,
+                            name: Some(local_name.clone()),
+                            ty: param_ty.clone(),
+                            mutable: false,
+                            span: pattern.span,
+                        });
+                        self.resolver.current_scope_mut()
+                            .bindings
+                            .insert(local_name.clone(), Binding::Local {
+                                local_id,
+                                ty: param_ty.clone(),
+                                mutable: false,
+                                span: pattern.span,
+                            });
+                        param_locals.push(local_id);
+                        param_type_vec.push(param_ty.clone());
+                    }
+                    ast::PatternKind::Wildcard => {
+                        let local_id = self.resolver.next_local_id();
+                        self.locals.push(hir::Local {
+                            id: local_id,
+                            name: Some(format!("_param_{}", idx)),
+                            ty: param_ty.clone(),
+                            mutable: false,
+                            span: pattern.span,
+                        });
+                        param_locals.push(local_id);
+                        param_type_vec.push(param_ty.clone());
+                    }
+                    _ => {
+                        self.resolver.pop_scope();
+                        return Err(TypeError::new(
+                            TypeErrorKind::UnsupportedFeature {
+                                feature: "Complex patterns in inline handler parameters are not yet supported".into(),
+                            },
+                            pattern.span,
+                        ));
+                    }
+                }
+            }
+
+            // Set up resume type for this handler
+            let prev_resume_type = self.current_resume_type.take();
+            self.current_resume_type = Some(return_type.clone());
+
+            // Type-check the handler body (should return unit)
+            let handler_body_result = self.check_block(&handler.body, &Type::unit());
+
+            // Restore resume type
+            self.current_resume_type = prev_resume_type;
+
+            // Pop handler clause scope
+            self.resolver.pop_scope();
+
+            let handler_body = handler_body_result?;
+
+            hir_handlers.push(hir::InlineOpHandler {
+                effect_id,
+                op_name,
+                params: param_locals,
+                param_types: param_type_vec,
+                return_type,
+                body: handler_body,
+            });
+        }
+
+        let resolved_ty = self.unifier.resolve(&expected);
+
+        Ok(hir::Expr {
+            kind: hir::ExprKind::InlineHandle {
+                body: Box::new(body_expr),
+                handlers: hir_handlers,
+            },
+            ty: resolved_ty,
+            span,
+        })
+    }
+
+    /// Substitute effect type parameters with concrete types.
+    fn substitute_effect_type_args(&self, ty: &Type, type_params: &[TyVarId], type_args: &[Type]) -> Type {
+        let subst: std::collections::HashMap<TyVarId, Type> = type_params.iter()
+            .zip(type_args.iter())
+            .map(|(&var, ty)| (var, ty.clone()))
+            .collect();
+        self.substitute_type_vars(ty, &subst)
     }
 
     /// Infer type of a perform expression.
@@ -2929,7 +3182,7 @@ impl<'a> TypeContext<'a> {
                     TypeKind::Array { element, size } => {
                         return self.infer_for_array(pattern, iter_expr, element.clone(), *size, body, label, span);
                     }
-                    TypeKind::Slice { element } => {
+                    TypeKind::Slice { element: _ } => {
                         // Slices require runtime length - not yet supported
                         return Err(TypeError::new(
                             TypeErrorKind::UnsupportedFeature {
@@ -2941,7 +3194,7 @@ impl<'a> TypeContext<'a> {
                     _ => {}
                 }
             }
-            TypeKind::Slice { element } => {
+            TypeKind::Slice { element: _ } => {
                 return Err(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: "For loop over slices requires runtime length check (use while loop)".into(),

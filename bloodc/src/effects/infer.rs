@@ -161,6 +161,30 @@ impl EffectInferencer {
                 self.infer_expr(handler_instance, ctx);
             }
 
+            // Inline handle expressions - like Handle but with inline handler definitions
+            ExprKind::InlineHandle { body, handlers } => {
+                // Create a child context for the handled body
+                let mut child_ctx = InferenceContext::default();
+                self.infer_expr(body, &mut child_ctx);
+
+                // Mark all handled effects as handled
+                for handler in handlers {
+                    ctx.handled.insert(handler.effect_id);
+                }
+
+                // Effects performed in the body that are NOT handled propagate up
+                for effect in child_ctx.performed {
+                    if !ctx.handled.contains(&effect.def_id) {
+                        ctx.performed.insert(effect);
+                    }
+                }
+
+                // Infer effects in handler bodies
+                for handler in handlers {
+                    self.infer_expr(&handler.body, ctx);
+                }
+            }
+
             // Block expressions
             ExprKind::Block { stmts, expr: tail } => {
                 for stmt in stmts {

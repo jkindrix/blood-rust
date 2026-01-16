@@ -207,6 +207,9 @@ fn contains_nested_handle(expr: &Expr) -> bool {
         // Direct nested handle - requires vector
         ExprKind::Handle { .. } => true,
 
+        // Inline handlers also require the vector
+        ExprKind::InlineHandle { .. } => true,
+
         // Closures might contain handles, be conservative
         ExprKind::Closure { .. } => true,
 
@@ -621,6 +624,12 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
             // Conservative: check the nested body too
             // A more precise analysis would track which effects are handled
             contains_escaping_control_flow(body)
+        }
+
+        // Inline handlers: similar to Handle, check body and handler bodies
+        ExprKind::InlineHandle { body, handlers } => {
+            contains_escaping_control_flow(body)
+                || handlers.iter().any(|h| contains_escaping_control_flow(&h.body))
         }
 
         // Recursively check all sub-expressions

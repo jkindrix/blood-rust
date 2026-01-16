@@ -195,6 +195,12 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
             check_expr_tail_resumptive(handler_instance, false)
         }
 
+        // InlineHandle - body is checked, handler bodies are checked separately
+        InlineHandle { body, handlers } => {
+            check_expr_tail_resumptive(body, false) &&
+            handlers.iter().all(|h| check_expr_tail_resumptive(&h.body, false))
+        }
+
         // Closures capture their environment; body is analyzed separately
         Closure { .. } => true,
 

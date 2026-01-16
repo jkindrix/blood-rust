@@ -992,6 +992,19 @@ impl<'a> TypeContext<'a> {
                     handler_instance: Box::new(Self::zonk_expr_with_unifier(unifier, *handler_instance)),
                 }
             }
+            hir::ExprKind::InlineHandle { body, handlers } => {
+                hir::ExprKind::InlineHandle {
+                    body: Box::new(Self::zonk_expr_with_unifier(unifier, *body)),
+                    handlers: handlers.into_iter().map(|h| hir::InlineOpHandler {
+                        effect_id: h.effect_id,
+                        op_name: h.op_name,
+                        params: h.params,
+                        param_types: h.param_types.into_iter().map(|t| unifier.resolve(&t)).collect(),
+                        return_type: unifier.resolve(&h.return_type),
+                        body: Self::zonk_expr_with_unifier(unifier, h.body),
+                    }).collect(),
+                }
+            }
             hir::ExprKind::Deref(inner) => {
                 hir::ExprKind::Deref(Box::new(Self::zonk_expr_with_unifier(unifier, *inner)))
             }

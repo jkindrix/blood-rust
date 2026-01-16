@@ -361,6 +361,12 @@ impl<'a> TypeContext<'a> {
             hir::ExprKind::Handle { body, .. } => {
                 self.collect_captures(body, is_move, captures, seen);
             }
+            hir::ExprKind::InlineHandle { body, handlers } => {
+                self.collect_captures(body, is_move, captures, seen);
+                for handler in handlers {
+                    self.collect_captures(&handler.body, is_move, captures, seen);
+                }
+            }
             hir::ExprKind::Perform { args, .. } => {
                 for arg in args {
                     self.collect_captures(arg, is_move, captures, seen);

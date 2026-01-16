@@ -1086,6 +1086,17 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
             }
             hash_expr(handler_instance, items, hasher);
         }
+        hir::ExprKind::InlineHandle { body, handlers } => {
+            hasher.update_u8(0x24); // New opcode for InlineHandle
+            hash_expr(body, items, hasher);
+            hasher.update_u32(handlers.len() as u32);
+            for handler in handlers {
+                hasher.update_u32(handler.effect_id.index);
+                hasher.update_str(&handler.op_name);
+                hasher.update_u32(handler.params.len() as u32);
+                hash_expr(&handler.body, items, hasher);
+            }
+        }
         hir::ExprKind::Range { start, end, inclusive } => {
             hasher.update_u8(0x22);
             hasher.update_u8(if *inclusive { 1 } else { 0 });
@@ -1700,6 +1711,13 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
             extract_expr_deps(body, deps);
             // handler_instance is Box<Expr>, not Option
             extract_expr_deps(handler_instance, deps);
+        }
+        hir::ExprKind::InlineHandle { body, handlers } => {
+            extract_expr_deps(body, deps);
+            for handler in handlers {
+                deps.insert(handler.effect_id);
+                extract_expr_deps(&handler.body, deps);
+            }
         }
         hir::ExprKind::Range { start, end, .. } => {
             if let Some(s) = start {

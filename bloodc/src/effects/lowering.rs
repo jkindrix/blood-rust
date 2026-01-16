@@ -449,6 +449,9 @@ impl EffectLowering {
             // Handle expressions are inherently effect-polymorphic
             ExprKind::Handle { .. } => true,
 
+            // InlineHandle expressions are also inherently effect-polymorphic
+            ExprKind::InlineHandle { .. } => true,
+
             // Check if callee is a local variable (could be a closure parameter)
             ExprKind::Call { callee, args } => {
                 // If calling a local variable, it might be a closure with effects
@@ -657,6 +660,12 @@ impl EffectLowering {
             ExprKind::Handle { body, handler_instance, .. } => {
                 self.collect_effects_recursive(body, effects);
                 self.collect_effects_recursive(handler_instance, effects);
+            }
+            ExprKind::InlineHandle { body, handlers } => {
+                self.collect_effects_recursive(body, effects);
+                for handler in handlers {
+                    self.collect_effects_recursive(&handler.body, effects);
+                }
             }
             ExprKind::Resume { value: Some(e) } => {
                 self.collect_effects_recursive(e, effects);

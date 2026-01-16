@@ -312,6 +312,20 @@ impl<'a> MacroExpander<'a> {
                 }
             }
 
+            ExprKind::InlineHandle { body, handlers } => {
+                ExprKind::InlineHandle {
+                    body: Box::new(self.expand_expr(*body)),
+                    handlers: handlers.into_iter().map(|h| hir::InlineOpHandler {
+                        effect_id: h.effect_id,
+                        op_name: h.op_name,
+                        params: h.params,
+                        param_types: h.param_types,
+                        return_type: h.return_type,
+                        body: self.expand_expr(h.body),
+                    }).collect(),
+                }
+            }
+
             ExprKind::Range { start, end, inclusive } => {
                 ExprKind::Range {
                     start: start.map(|s| Box::new(self.expand_expr(*s))),

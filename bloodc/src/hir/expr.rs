@@ -315,6 +315,17 @@ pub enum ExprKind {
         handler_instance: Box<Expr>,
     },
 
+    /// Inline handle expression: `try { body } with { Effect::op(x) => { ... } }`
+    ///
+    /// Runs the body with inline effect handlers. Unlike `Handle`, the handlers
+    /// are defined inline rather than referencing a pre-declared handler.
+    InlineHandle {
+        /// The body expression to run.
+        body: Box<Expr>,
+        /// The inline operation handlers.
+        handlers: Vec<InlineOpHandler>,
+    },
+
     /// Range expression: `start..end` or `start..=end`
     ///
     /// Creates a Range or RangeInclusive value for iteration or slicing.
@@ -560,4 +571,23 @@ impl fmt::Display for LoopId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "'loop{}", self.0)
     }
+}
+
+/// An inline operation handler clause.
+///
+/// Used in `try { ... } with { Effect::op(x) => { ... } }` expressions.
+#[derive(Debug, Clone)]
+pub struct InlineOpHandler {
+    /// The effect being handled.
+    pub effect_id: DefId,
+    /// The operation name being handled.
+    pub op_name: String,
+    /// Parameter local IDs for the operation parameters.
+    pub params: Vec<LocalId>,
+    /// Parameter types for the operation.
+    pub param_types: Vec<Type>,
+    /// The return type of the operation.
+    pub return_type: Type,
+    /// The handler body.
+    pub body: Expr,
 }

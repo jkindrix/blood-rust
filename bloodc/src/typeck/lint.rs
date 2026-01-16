@@ -115,6 +115,35 @@ impl HandlerLintContext {
                 self.check_handler_nesting(handler_instance, depth);
             }
 
+            ExprKind::InlineHandle { body, handlers } => {
+                let new_depth = depth + 1;
+                if new_depth > self.config.max_handler_depth && self.config.warn_deep_handlers {
+                    let span_key = (expr.span.start, expr.span.end);
+                    if !self.warned_spans.contains(&span_key) {
+                        self.warned_spans.insert(span_key);
+                        let warning = Diagnostic::warning(
+                            format!(
+                                "deeply nested inline handler (depth {}): each nesting level adds \
+                                 continuation allocation overhead (~48ns per non-tail resume)",
+                                new_depth
+                            ),
+                            expr.span,
+                        )
+                        .with_error_code(ErrorCode::DeeplyNestedHandlers)
+                        .with_suggestion(
+                            "consider flattening handler structure or combining related effects"
+                        );
+                        self.warnings.push(warning);
+                    }
+                }
+                // Continue checking inside the handler body with incremented depth
+                self.check_handler_nesting(body, new_depth);
+                // Check handler bodies at current depth
+                for handler in handlers {
+                    self.check_handler_nesting(&handler.body, depth);
+                }
+            }
+
             // Recurse into all other expression kinds
             ExprKind::Binary { left, right, .. } => {
                 self.check_handler_nesting(left, depth);

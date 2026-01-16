@@ -266,6 +266,9 @@ fn count_resumes(expr: &Expr) -> usize {
         ExprKind::Return(Some(e)) => count_resumes(e),
         ExprKind::Assign { value, .. } => count_resumes(value),
         ExprKind::Handle { body, .. } => count_resumes(body),
+        ExprKind::InlineHandle { body, handlers } => {
+            count_resumes(body) + handlers.iter().map(|h| count_resumes(&h.body)).sum::<usize>()
+        }
         ExprKind::Perform { args, .. } => args.iter().map(count_resumes).sum(),
         _ => 0,
     }

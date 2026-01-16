@@ -474,6 +474,14 @@ pub trait ExprLowering {
                 self.lower_handle(body, *handler_id, handler_instance, &expr.ty, expr.span)
             }
 
+            ExprKind::InlineHandle { .. } => {
+                // TODO: Implement inline handler lowering
+                Err(vec![Diagnostic::error(
+                    "Inline handlers are not yet supported in code generation",
+                    expr.span,
+                )])
+            }
+
             ExprKind::Range { start, end, inclusive } => {
                 self.lower_range(start.as_deref(), end.as_deref(), *inclusive, &expr.ty, expr.span)
             }
