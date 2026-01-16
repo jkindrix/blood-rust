@@ -939,16 +939,8 @@ impl<'a> TypeContext<'a> {
             Type::unit()
         };
 
-        // Restore previous generic params scope
-        self.generic_params = saved_generic_params;
-        self.const_params = saved_const_params;
-        self.lifetime_params = saved_lifetime_params;
-
-        let mut sig = hir::FnSig::new(param_types, return_type);
-        sig.generics = generics_vec;
-        self.fn_sigs.insert(def_id, sig);
-
-        // Parse and store the function's effect annotation
+        // Parse and store the function's effect annotation BEFORE restoring generic params
+        // This ensures type parameters like T are in scope for effect annotations like {Emit<T>}
         if let Some(ref effect_row) = func.effects {
             let (effects, row_var) = self.parse_effect_row(effect_row)?;
             if !effects.is_empty() || row_var.is_some() {
@@ -959,6 +951,15 @@ impl<'a> TypeContext<'a> {
                 self.fn_effect_row_var.insert(def_id, row_var);
             }
         }
+
+        // Restore previous generic params scope (after processing signature including effects)
+        self.generic_params = saved_generic_params;
+        self.const_params = saved_const_params;
+        self.lifetime_params = saved_lifetime_params;
+
+        let mut sig = hir::FnSig::new(param_types, return_type);
+        sig.generics = generics_vec;
+        self.fn_sigs.insert(def_id, sig);
 
         // Queue function for later body type-checking
         if func.body.is_some() {
