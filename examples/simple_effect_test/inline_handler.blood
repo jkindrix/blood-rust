@@ -13,11 +13,12 @@ fn emit_numbers() / {Emit<i32>} {
 
 fn main() {
     // Use inline handler syntax to handle the Emit effect
+    // Note: Emit.emit uses dot syntax, consistent with `perform Emit.emit(...)`
     let result = try {
         emit_numbers();
         42
     } with {
-        Emit::emit(value) => {
+        Emit.emit(value) => {
             // Print the value (using println which is pure)
             // For now just resume - handler body runs but we can't accumulate
             resume(());

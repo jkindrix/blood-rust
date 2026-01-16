@@ -1895,31 +1895,43 @@ impl<'src> Parser<'src> {
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
             let handler_start = self.current.span;
 
-            // Parse Effect::operation pattern
-            // e.g., LexerDiagnostic::error(msg, span)
-            // The path includes both effect and operation, so we split them
-            let full_path = self.parse_type_path();
+            // Parse Effect.operation or Effect::operation pattern
+            // Support both syntaxes for consistency:
+            //   - Emit.emit(value) =>    (matches `perform Emit.emit(...)`)
+            //   - Emit::emit(value) =>   (Rust-style path syntax)
+            let effect_path = self.parse_type_path();
 
-            // Split the path: all but last segment is effect, last segment is operation
-            let (effect, operation) = if full_path.segments.len() >= 2 {
-                // Take all but the last segment as effect path
-                let mut effect_segments = full_path.segments.clone();
-                let op_segment = effect_segments.pop().unwrap();
-                let effect_path = crate::ast::TypePath {
-                    segments: effect_segments,
-                    span: full_path.span,
+            // Check for dot syntax (like perform uses) or use :: path segments
+            let (effect, operation) = if self.try_consume(TokenKind::Dot) {
+                // Dot syntax: Effect.operation - matches `perform Emit.emit(...)`
+                let op = if self.check_ident() || self.check(TokenKind::TypeIdent) {
+                    self.advance();
+                    self.spanned_symbol()
+                } else {
+                    self.error_expected("operation name after '.'");
+                    Spanned::new(self.intern(""), self.current.span)
                 };
-                (effect_path, op_segment.name)
-            } else if full_path.segments.len() == 1 {
+                (effect_path, op)
+            } else if effect_path.segments.len() >= 2 {
+                // Double-colon syntax: Effect::operation
+                // Take all but the last segment as effect path
+                let mut effect_segments = effect_path.segments.clone();
+                let op_segment = effect_segments.pop().unwrap();
+                let new_effect_path = crate::ast::TypePath {
+                    segments: effect_segments,
+                    span: effect_path.span,
+                };
+                (new_effect_path, op_segment.name)
+            } else if effect_path.segments.len() == 1 {
                 // Single segment - this is just the operation, no effect path
-                let op_segment = &full_path.segments[0];
+                let op_segment = &effect_path.segments[0];
                 let empty_effect = crate::ast::TypePath {
                     segments: vec![],
-                    span: full_path.span,
+                    span: effect_path.span,
                 };
                 (empty_effect, op_segment.name.clone())
             } else {
-                self.error_expected("effect::operation pattern");
+                self.error_expected("Effect.operation or Effect::operation pattern");
                 let empty = crate::ast::TypePath { segments: vec![], span: self.current.span };
                 (empty, Spanned::new(self.intern(""), self.current.span))
             };
