@@ -520,6 +520,11 @@ pub struct CodegenContext<'ctx, 'a> {
     /// Inline handler bodies for try/with blocks (codegen for inline effect handlers).
     /// Maps synthetic DefId to the handler body info.
     pub(super) inline_handler_bodies: InlineHandlerBodies,
+    /// Wrapper functions for plain functions used as fn() pointers.
+    /// When a plain function is converted to a fat pointer { fn_ptr, env_ptr },
+    /// we need a wrapper that accepts env_ptr and forwards to the original.
+    /// Maps original function DefId -> wrapper function.
+    pub(super) fn_ptr_wrappers: HashMap<DefId, FunctionValue<'ctx>>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -565,6 +570,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             mono_cache: HashMap::new(),
             mono_counter: 0,
             inline_handler_bodies: HashMap::new(),
+            fn_ptr_wrappers: HashMap::new(),
         }
     }
 
@@ -2228,6 +2234,93 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         }
 
         Some(fn_value)
+    }
+
+    /// Get or create a wrapper function for a plain function used as a fn() pointer.
+    ///
+    /// When a plain function is converted to a fat pointer { fn_ptr, env_ptr },
+    /// we need a wrapper that accepts (env_ptr, params...) and forwards to the
+    /// original function (ignoring env_ptr). This is needed because:
+    ///
+    /// 1. Plain functions are compiled with signature (params...) -> ret
+    /// 2. fn() pointers use fat pointer calling convention: (env_ptr, params...) -> ret
+    /// 3. Without a wrapper, the first argument would be mistaken for env_ptr
+    ///
+    /// The wrapper is cached to avoid creating duplicates.
+    pub fn get_or_create_fn_ptr_wrapper(
+        &mut self,
+        def_id: DefId,
+    ) -> Option<FunctionValue<'ctx>> {
+        // Check cache first
+        if let Some(&wrapper) = self.fn_ptr_wrappers.get(&def_id) {
+            return Some(wrapper);
+        }
+
+        // Get the original function
+        let original_fn = *self.functions.get(&def_id)?;
+        let original_fn_type = original_fn.get_type();
+        let original_param_count = original_fn_type.count_param_types();
+
+        // Build wrapper function type: (i8* env_ptr, params...) -> ret
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let mut wrapper_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+            Vec::with_capacity(original_param_count as usize + 1);
+
+        // First param is env_ptr (i8*)
+        wrapper_param_types.push(i8_ptr_type.into());
+
+        // Add original function's params
+        for i in 0..original_param_count {
+            let param_type = original_fn_type.get_param_types()[i as usize];
+            wrapper_param_types.push(param_type.into());
+        }
+
+        let wrapper_fn_type = if let Some(ret_type) = original_fn_type.get_return_type() {
+            ret_type.fn_type(&wrapper_param_types, false)
+        } else {
+            self.context.void_type().fn_type(&wrapper_param_types, false)
+        };
+
+        // Create the wrapper function with a unique name
+        let original_name = original_fn.get_name().to_str().unwrap_or("unknown");
+        let wrapper_name = format!("{}$fnptr", original_name);
+        let wrapper_fn = self.module.add_function(&wrapper_name, wrapper_fn_type, None);
+
+        // Save current builder position (we're in the middle of compiling another function)
+        let saved_insert_block = self.builder.get_insert_block();
+
+        // Build the wrapper body: ignore env_ptr (param 0), forward params 1..N to original
+        let entry = self.context.append_basic_block(wrapper_fn, "entry");
+        self.builder.position_at_end(entry);
+
+        // Collect arguments to forward (skip env_ptr)
+        let mut args: Vec<inkwell::values::BasicMetadataValueEnum> =
+            Vec::with_capacity(original_param_count as usize);
+        for i in 1..=original_param_count {
+            let param = wrapper_fn.get_nth_param(i).unwrap();
+            args.push(param.into());
+        }
+
+        // Call the original function
+        let call_result = self.builder.build_call(original_fn, &args, "forward")
+            .ok()?;
+
+        // Return the result
+        if original_fn_type.get_return_type().is_some() {
+            let ret_val = call_result.try_as_basic_value().left()?;
+            self.builder.build_return(Some(&ret_val)).ok()?;
+        } else {
+            self.builder.build_return(None).ok()?;
+        }
+
+        // Restore builder position to the original function
+        if let Some(insert_block) = saved_insert_block {
+            self.builder.position_at_end(insert_block);
+        }
+
+        // Cache and return
+        self.fn_ptr_wrappers.insert(def_id, wrapper_fn);
+        Some(wrapper_fn)
     }
 
     /// Declare runtime support functions.

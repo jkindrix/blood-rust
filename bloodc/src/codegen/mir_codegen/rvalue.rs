@@ -1233,15 +1233,24 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Function reference - get the function pointer
                 // Create a fat pointer { fn_ptr, env_ptr } to match the fn() type representation.
                 // For plain functions (no captures), env_ptr is null.
-                if let Some(&fn_val) = self.functions.get(def_id) {
-                    let fn_ptr = fn_val.as_global_value().as_pointer_value();
+                //
+                // IMPORTANT: Plain functions are compiled with signature (params...) -> ret,
+                // but fn() pointers use calling convention (env_ptr, params...) -> ret.
+                // We need a wrapper function that accepts env_ptr and forwards to the original.
+                if let Some(wrapper_fn) = self.get_or_create_fn_ptr_wrapper(*def_id) {
+                    let fn_ptr = wrapper_fn.as_global_value().as_pointer_value();
                     let ptr_type = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
                     let null_env = ptr_type.const_null();
 
-                    // Create fat pointer struct { fn_ptr, null_env }
+                    // Create fat pointer struct { wrapper_fn_ptr, null_env }
                     let fat_ptr_type = self.context.struct_type(&[ptr_type.into(), ptr_type.into()], false);
                     let fat_ptr = fat_ptr_type.const_named_struct(&[fn_ptr.into(), null_env.into()]);
                     Ok(fat_ptr.into())
+                } else if self.functions.contains_key(def_id) {
+                    // Wrapper creation failed but function exists - this shouldn't happen
+                    Err(vec![Diagnostic::error(
+                        format!("Failed to create fn pointer wrapper for {:?}", def_id), Span::dummy()
+                    )])
                 } else {
                     Err(vec![Diagnostic::error(
                         format!("Unknown function {:?}", def_id), Span::dummy()
