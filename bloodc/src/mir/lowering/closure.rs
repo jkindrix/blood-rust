@@ -39,6 +39,8 @@ use std::collections::HashSet;
 /// - Captured variables are accessed through the environment
 /// - The environment is passed as the first implicit parameter
 pub struct ClosureLowering<'hir, 'ctx> {
+    /// The DefId of the closure being lowered.
+    def_id: DefId,
     /// MIR body builder.
     builder: MirBodyBuilder,
     /// HIR body being lowered.
@@ -129,6 +131,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         let current_block = builder.current_block();
 
         Self {
+            def_id,
             builder,
             body,
             hir,
@@ -724,6 +727,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
 
             // Store the handler body for compilation during codegen
             self.inline_handler_bodies.insert(synthetic_fn_def_id, InlineHandlerBody {
+                parent_def_id: self.def_id,
                 effect_id: handler.effect_id,
                 op_name: handler.op_name.clone(),
                 op_index,

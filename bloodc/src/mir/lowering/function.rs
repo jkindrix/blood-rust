@@ -254,6 +254,8 @@ pub fn collect_local_refs(expr: &Expr, refs: &mut Vec<CaptureCandidate>, in_muta
 
 /// Lowers a single function body to MIR.
 pub struct FunctionLowering<'hir, 'ctx> {
+    /// The DefId of the function being lowered.
+    def_id: DefId,
     /// MIR body builder.
     builder: MirBodyBuilder,
     /// HIR body being lowered.
@@ -314,6 +316,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         let current_block = builder.current_block();
 
         Self {
+            def_id,
             builder,
             body,
             hir,
@@ -975,6 +978,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
             // - Access to resume() for continuing the computation
             // - Captures from enclosing scope
             self.inline_handler_bodies.insert(synthetic_fn_def_id, InlineHandlerBody {
+                parent_def_id: self.def_id,
                 effect_id: handler.effect_id,
                 op_name: handler.op_name.clone(),
                 op_index,

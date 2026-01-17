@@ -70,6 +70,9 @@ pub struct InlineHandlerCaptureInfo {
 /// can be compiled to LLVM functions during code generation.
 #[derive(Debug, Clone)]
 pub struct InlineHandlerBody {
+    /// The DefId of the parent function containing this handler.
+    /// Used to generate unique symbol names for inline handlers.
+    pub parent_def_id: DefId,
     /// The effect being handled.
     pub effect_id: DefId,
     /// The operation name.

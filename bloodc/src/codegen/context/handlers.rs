@@ -771,8 +771,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         );
 
         // Generate unique function name for this inline handler operation
+        // Include parent_def_id to ensure uniqueness across different functions
+        // that handle the same effect operation
         let fn_name = format!(
-            "blood_inline_handler_{}_{}_{}",
+            "blood_inline_handler_{}_{}_{}_{}",
+            handler_body.parent_def_id.index(),
             handler_body.effect_id.index(),
             handler_body.op_name,
             synthetic_def_id.index()
@@ -783,7 +786,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             return Ok(existing_fn);
         }
 
-        let fn_value = self.module.add_function(&fn_name, handler_op_type, None);
+        // Use LinkOnceODR linkage so the linker can merge identical handler
+        // definitions when the same handler is compiled in multiple object files
+        // (e.g., when monomorphized generic functions with inline handlers are
+        // called from multiple closures).
+        use inkwell::module::Linkage;
+        let fn_value = self.module.add_function(&fn_name, handler_op_type, Some(Linkage::LinkOnceODR));
 
         // Detect if this is a multi-shot handler (has multiple resume calls)
         let resume_count = crate::effects::handler::count_resumes_in_expr(&handler_body.body);
