@@ -33,11 +33,16 @@ use serde::{Deserialize, Serialize};
 use string_interner::Symbol as _;
 
 use super::hash::{ContentHash, ContentHasher};
+use crate::codegen::{CODEGEN_ABI_VERSION, CODEGEN_HASH};
 use crate::hir;
 use crate::hir::DefId;
 
 /// Cache format version. Increment when changing cache structure.
 /// v2: Handler name hashing fix (36e0804) - invalidate old effect handler caches
+///
+/// Note: This version covers cache structure changes. For codegen changes that
+/// affect compiled output, see `CODEGEN_ABI_VERSION` and `CODEGEN_HASH` which
+/// are incorporated into the cache directory path automatically.
 pub const CACHE_VERSION: u32 = 2;
 
 /// Build cache for content-addressed compilation artifacts.
@@ -178,8 +183,21 @@ impl BuildCache {
     }
 
     /// Get the version-specific cache directory.
+    ///
+    /// The directory name includes:
+    /// - CACHE_VERSION: Cache structure version
+    /// - CODEGEN_ABI_VERSION: Intentional ABI breaking changes
+    /// - CODEGEN_HASH: Automatic detection of codegen source changes
+    ///
+    /// This ensures cached artifacts are invalidated when the compiler's
+    /// code generation changes in ways that would produce incompatible output.
     fn version_dir(&self) -> PathBuf {
-        self.cache_dir.join(format!("v{}", CACHE_VERSION))
+        self.cache_dir.join(format!(
+            "v{}_abi{}_{}",
+            CACHE_VERSION,
+            CODEGEN_ABI_VERSION,
+            CODEGEN_HASH
+        ))
     }
 
     /// Get the path for an object file by hash.
@@ -1809,8 +1827,15 @@ mod tests {
         let cache = BuildCache::with_dir(temp_dir.path().to_path_buf());
         cache.init().unwrap();
 
-        assert!(temp_dir.path().join("v2/objects").exists());
-        assert!(temp_dir.path().join("v2/ir").exists());
+        // Version dir format: v{CACHE_VERSION}_abi{CODEGEN_ABI_VERSION}_{CODEGEN_HASH}
+        let version_dir = format!(
+            "v{}_abi{}_{}",
+            CACHE_VERSION,
+            crate::codegen::CODEGEN_ABI_VERSION,
+            crate::codegen::CODEGEN_HASH
+        );
+        assert!(temp_dir.path().join(&version_dir).join("objects").exists());
+        assert!(temp_dir.path().join(&version_dir).join("ir").exists());
     }
 
     #[test]

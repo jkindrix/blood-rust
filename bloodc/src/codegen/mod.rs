@@ -35,6 +35,29 @@ pub mod mir_codegen;
 pub use context::CodegenContext;
 pub use mir_codegen::MirCodegen;
 
+// ============================================================================
+// Codegen Version Tracking
+// ============================================================================
+
+/// ABI version for code generation.
+///
+/// Bump this when making intentional breaking changes to:
+/// - Calling conventions
+/// - Type layouts / struct packing
+/// - Runtime interface (function signatures)
+/// - Closure representation
+/// - Effect handler protocol
+///
+/// This allows cache invalidation even if the source hash doesn't change
+/// (e.g., when the same code produces different output due to bug fixes).
+pub const CODEGEN_ABI_VERSION: u32 = 1;
+
+/// Hash of codegen source files, computed at build time.
+///
+/// This automatically invalidates the cache when codegen logic changes,
+/// without requiring manual version bumps.
+pub const CODEGEN_HASH: &str = env!("CODEGEN_HASH");
+
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::PassManager;
