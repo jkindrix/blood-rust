@@ -5742,13 +5742,12 @@ impl<'a> TypeContext<'a> {
                     }
                     None => {
                         // Count is not a constant - for now, error
-                        Err(TypeError {
-                            kind: TypeErrorKind::UnsupportedFeature {
+                        Err(TypeError::new(
+                            TypeErrorKind::UnsupportedFeature {
                                 feature: "vec! repeat count must be a constant integer literal".to_string(),
                             },
                             span,
-                            help: Some("use a literal like `vec![0; 10]` instead of a variable".to_string()),
-                        })
+                        ).with_help("use a literal like `vec![0; 10]` instead of a variable"))
                     }
                 }
             }

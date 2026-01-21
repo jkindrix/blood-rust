@@ -2386,6 +2386,8 @@ impl<'a> TypeContext<'a> {
                     items: item_def_ids,
                     is_external: false,
                     span: module.span,
+                    source_path: None,
+                    source_content: None,
                 });
             }
             None => {
@@ -2492,6 +2494,8 @@ impl<'a> TypeContext<'a> {
                             items: existing_info.items,
                             is_external: true,
                             span: module.span,
+                            source_path: existing_info.source_path,
+                            source_content: existing_info.source_content,
                         });
                         return Ok(());
                     }
@@ -2543,14 +2547,16 @@ impl<'a> TypeContext<'a> {
 
                 // Save and update source path for nested module resolution
                 let saved_source_path = self.source_path.take();
-                self.source_path = Some(module_path);
+                self.source_path = Some(module_path.clone());
 
                 // Track the starting DefId counter
                 let def_id_start = self.resolver.current_def_id_counter();
 
                 for decl in &module_ast.declarations {
                     if let Err(e) = self.collect_declaration(decl) {
-                        self.errors.push(e);
+                        // Attach source file info to errors from external modules
+                        let e_with_source = e.with_source_file(module_path.clone(), module_source.clone());
+                        self.errors.push(e_with_source);
                     }
                 }
 
@@ -2565,12 +2571,14 @@ impl<'a> TypeContext<'a> {
                 self.current_module = saved_module;
                 self.resolver.pop_scope();
 
-                // Store module info
+                // Store module info with source for error reporting
                 self.module_defs.insert(def_id, super::ModuleInfo {
                     name,
                     items: item_def_ids,
                     is_external: true,
                     span: module.span,
+                    source_path: Some(module_path),
+                    source_content: Some(module_source),
                 });
 
                 // Cache this module by canonical path for future diamond dependency detection

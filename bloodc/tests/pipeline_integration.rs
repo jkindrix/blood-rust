@@ -4238,3 +4238,36 @@ fn test_module_resolution_unsafe() {
 fn test_module_resolution_diamond() {
     assert_file_type_checks("tests/fixtures/modules/diamond_dependency.blood");
 }
+
+/// Test that errors in imported modules report the correct source file.
+/// Previously, errors would be reported using the parent module's source,
+/// causing incorrect line numbers and file paths.
+#[test]
+fn test_cross_file_error_reporting() {
+    let file_path = "tests/fixtures/modules/cross_file_error_main.blood";
+    let result = check_file_with_modules(file_path);
+
+    // Should fail because child module references undefined name
+    assert!(result.is_err(), "Expected type error for undefined name");
+
+    let errors = result.unwrap_err();
+    assert!(!errors.is_empty(), "Expected at least one error");
+
+    let error = &errors[0];
+    // The error should mention "DoesNotExist"
+    assert!(
+        error.message.contains("DoesNotExist") || error.message.contains("cannot find"),
+        "Error should mention the undefined name, got: {}",
+        error.message
+    );
+
+    // The error should be associated with the child module's source file
+    if let Some(ref source_path) = error.source_file {
+        let path_str = source_path.display().to_string();
+        assert!(
+            path_str.contains("cross_file_error_child"),
+            "Error should be reported for child file, but got: {}",
+            path_str
+        );
+    }
+}

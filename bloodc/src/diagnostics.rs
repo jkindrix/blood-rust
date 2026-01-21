@@ -286,6 +286,10 @@ pub struct Diagnostic {
     pub labels: Vec<DiagnosticLabel>,
     /// Suggestions for fixing the error.
     pub suggestions: Vec<String>,
+    /// Source file path (for errors in imported modules).
+    pub source_file: Option<std::path::PathBuf>,
+    /// Source content (for errors in imported modules).
+    pub source_content: Option<String>,
 }
 
 impl Diagnostic {
@@ -298,6 +302,8 @@ impl Diagnostic {
             span,
             labels: Vec::new(),
             suggestions: Vec::new(),
+            source_file: None,
+            source_content: None,
         }
     }
 
@@ -310,7 +316,16 @@ impl Diagnostic {
             span,
             labels: Vec::new(),
             suggestions: Vec::new(),
+            source_file: None,
+            source_content: None,
         }
+    }
+
+    /// Set the source file for this diagnostic (for errors in imported modules).
+    pub fn with_source_file(mut self, path: std::path::PathBuf, content: String) -> Self {
+        self.source_file = Some(path);
+        self.source_content = Some(content);
+        self
     }
 
     /// Set the error code from a string.
@@ -406,9 +421,21 @@ impl<'a> DiagnosticEmitter<'a> {
 
     /// Emit a diagnostic to stderr.
     pub fn emit(&self, diagnostic: &Diagnostic) {
+        // Use the diagnostic's source file if provided, otherwise use the emitter's default
+        let (filename, source): (&str, &str) = match (&diagnostic.source_file, &diagnostic.source_content) {
+            (Some(path), Some(content)) => {
+                // Leak the strings to get 'static lifetimes - this is OK since diagnostics
+                // are only emitted once and the program will exit shortly after errors
+                let path_str: &'static str = Box::leak(path.display().to_string().into_boxed_str());
+                let content_str: &'static str = Box::leak(content.clone().into_boxed_str());
+                (path_str, content_str)
+            }
+            _ => (self.filename, self.source),
+        };
+
         let mut builder = Report::build(
             diagnostic.kind.to_report_kind(),
-            self.filename,
+            filename,
             diagnostic.span.start,
         );
 
@@ -422,7 +449,7 @@ impl<'a> DiagnosticEmitter<'a> {
 
         // Add primary label
         builder = builder.with_label(
-            Label::new((self.filename, diagnostic.span.start..diagnostic.span.end))
+            Label::new((filename, diagnostic.span.start..diagnostic.span.end))
                 .with_color(diagnostic.kind.color())
                 .with_message(&diagnostic.message),
         );
@@ -435,7 +462,7 @@ impl<'a> DiagnosticEmitter<'a> {
                 Color::Blue
             };
             builder = builder.with_label(
-                Label::new((self.filename, label.span.start..label.span.end))
+                Label::new((filename, label.span.start..label.span.end))
                     .with_color(color)
                     .with_message(&label.message),
             );
@@ -451,7 +478,7 @@ impl<'a> DiagnosticEmitter<'a> {
 
         // Write to stderr
         report
-            .eprint((self.filename, Source::from(self.source)))
+            .eprint((filename, Source::from(source)))
             .expect("BUG: failed to write diagnostic to stderr - terminal may be in an invalid state");
     }
 }

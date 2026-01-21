@@ -49,6 +49,20 @@ impl<'a> TypeContext<'a> {
                     self.inject_module_bindings(mod_id);
                 }
                 if let Err(e) = self.check_function_body(def_id, &func) {
+                    // Attach source file info for errors in external modules
+                    let e = if let Some(mod_id) = parent_module {
+                        if let Some(mod_info) = self.module_defs.get(&mod_id) {
+                            if let (Some(path), Some(content)) = (&mod_info.source_path, &mod_info.source_content) {
+                                e.with_source_file(path.clone(), content.clone())
+                            } else {
+                                e
+                            }
+                        } else {
+                            e
+                        }
+                    } else {
+                        e
+                    };
                     self.errors.push(e);
                 }
             }
@@ -794,10 +808,24 @@ impl<'a> TypeContext<'a> {
         // This ensures they can reference each other regardless of declaration order
         while !self.pending_bodies.is_empty() {
             let pending = std::mem::take(&mut self.pending_bodies);
-            for (def_id, func, _parent_module) in pending {
+            for (def_id, func, parent_module) in pending {
                 // Note: nested functions in blocks don't need module injection
                 // because the block scope is already active
                 if let Err(e) = self.check_function_body(def_id, &func) {
+                    // Attach source file info for errors in external modules
+                    let e = if let Some(mod_id) = parent_module {
+                        if let Some(mod_info) = self.module_defs.get(&mod_id) {
+                            if let (Some(path), Some(content)) = (&mod_info.source_path, &mod_info.source_content) {
+                                e.with_source_file(path.clone(), content.clone())
+                            } else {
+                                e
+                            }
+                        } else {
+                            e
+                        }
+                    } else {
+                        e
+                    };
                     self.errors.push(e);
                 }
             }

@@ -1,6 +1,7 @@
 //! Type checking errors.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::hir::Type;
 use crate::span::Span;
@@ -15,6 +16,10 @@ pub struct TypeError {
     pub span: Span,
     /// Optional help message.
     pub help: Option<String>,
+    /// Source file path (for errors in imported modules).
+    pub source_file: Option<PathBuf>,
+    /// Source content (for errors in imported modules).
+    pub source_content: Option<String>,
 }
 
 impl TypeError {
@@ -24,12 +29,21 @@ impl TypeError {
             kind,
             span,
             help: None,
+            source_file: None,
+            source_content: None,
         }
     }
 
     /// Add a help message.
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+
+    /// Set the source file for this error (for errors in imported modules).
+    pub fn with_source_file(mut self, path: PathBuf, content: String) -> Self {
+        self.source_file = Some(path);
+        self.source_content = Some(content);
         self
     }
 
@@ -319,6 +333,11 @@ impl TypeError {
 
         if let Some(help) = &self.help {
             diag = diag.with_suggestion(help.clone());
+        }
+
+        // Pass source file info if this error is from an imported module
+        if let (Some(path), Some(content)) = (&self.source_file, &self.source_content) {
+            diag = diag.with_source_file(path.clone(), content.clone());
         }
 
         diag

@@ -620,6 +620,10 @@ pub struct ModuleInfo {
     pub is_external: bool,
     /// Source span.
     pub span: Span,
+    /// Source file path (for external modules).
+    pub source_path: Option<PathBuf>,
+    /// Source content (for external modules, used for error reporting).
+    pub source_content: Option<String>,
 }
 
 impl<'a> TypeContext<'a> {
