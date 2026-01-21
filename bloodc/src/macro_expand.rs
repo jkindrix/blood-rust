@@ -981,11 +981,55 @@ impl MacroExpander {
             }
             MacroExpansionPart::Repetition { parts, separator, .. } => {
                 // Handle repetition substitution
-                // For now, just expand the parts directly
-                for p in parts {
-                    self.substitute_part_to_source(p, captures, result)?;
-                    if let Some(sep) = separator {
-                        result.push_str(&format!("{:?} ", sep));
+                // Find a repeated capture to iterate over
+                let mut repeat_count = 0;
+                for part in parts {
+                    if let MacroExpansionPart::Substitution { name, .. } = part {
+                        let name_str = self.interner
+                            .resolve(name.node)
+                            .unwrap_or("")
+                            .to_string();
+                        if let Some(CapturedValue::Repeated(items)) = captures.get(&name_str) {
+                            repeat_count = items.len();
+                            break;
+                        }
+                    }
+                }
+
+                // Emit the repetition
+                for i in 0..repeat_count {
+                    if i > 0 {
+                        if let Some(sep) = separator {
+                            result.push_str(&self.token_to_source(sep));
+                            result.push(' ');
+                        }
+                    }
+
+                    // Create captures for this iteration
+                    let mut iter_captures = HashMap::new();
+                    for (name, value) in captures {
+                        let iter_value = match value {
+                            CapturedValue::Single { tokens, source } => CapturedValue::Single {
+                                tokens: tokens.clone(),
+                                source: source.clone(),
+                            },
+                            CapturedValue::Repeated(items) => {
+                                if i < items.len() {
+                                    items[i].clone()
+                                } else {
+                                    CapturedValue::Single {
+                                        tokens: TokenStream::new(),
+                                        source: String::new(),
+                                    }
+                                }
+                            }
+                        };
+                        iter_captures.insert(name.clone(), iter_value);
+                    }
+
+                    // Substitute parts for this iteration
+                    for p in parts {
+                        self.substitute_part_to_source(p, &iter_captures, result)?;
                     }
                 }
             }
