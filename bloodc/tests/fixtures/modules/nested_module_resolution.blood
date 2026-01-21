@@ -6,9 +6,10 @@ fn test_nested_struct() -> outer::inner::InnerData {
     outer::inner::InnerData { x: 10, y: 20 }
 }
 
-// NOTE: Nested module function calls (outer::inner::inner_fn()) require
-// 3-segment path resolution in expression context, which treats it as
-// Type::method rather than module::submodule::function. Not yet supported.
+// Test nested module function call
+fn test_nested_fn() -> i32 {
+    outer::inner::inner_fn()
+}
 
 // Test outer module type (not nested)
 fn test_outer_struct() -> outer::OuterData {
@@ -17,5 +18,6 @@ fn test_outer_struct() -> outer::OuterData {
 
 fn main() {
     let _ = test_nested_struct();
+    let _ = test_nested_fn();
     let _ = test_outer_struct();
 }

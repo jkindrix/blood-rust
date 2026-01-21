@@ -12,7 +12,7 @@ pub struct Point {
 pub enum Kind {
     A,
     B(i32),
-    // NOTE: Struct variant C { x: i32, y: i32 } omitted - not yet supported in module context
+    C { x: i32, y: i32 },
 }
 
 pub type MyInt = i32;

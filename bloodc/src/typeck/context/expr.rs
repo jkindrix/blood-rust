@@ -2742,7 +2742,7 @@ impl<'a> TypeContext<'a> {
                 span,
             ))
         } else if path.segments.len() == 3 {
-            // Three-segment path: module::Type::method or module::Enum::Variant
+            // Three-segment path: module::Type::method, module::Enum::Variant, or module::submodule::item
             let module_name = self.symbol_to_string(path.segments[0].name.node);
             let type_name = self.symbol_to_string(path.segments[1].name.node);
             let third_name = self.symbol_to_string(path.segments[2].name.node);
@@ -2757,7 +2757,98 @@ impl<'a> TypeContext<'a> {
             }
 
             if let Some(mod_def_id) = module_def_id {
-                // First, check if the second segment is an enum and third is a variant
+                // Check if second segment is a nested submodule
+                // This handles module::submodule::function pattern
+                let mut submodule_def_id: Option<DefId> = None;
+                if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                    for &item_def_id in &mod_info.items {
+                        if let Some(submod_info) = self.module_defs.get(&item_def_id) {
+                            if submod_info.name == type_name {
+                                submodule_def_id = Some(item_def_id);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(submod_def_id) = submodule_def_id {
+                    // Found a submodule, look for the item in it
+                    if let Some(submod_info) = self.module_defs.get(&submod_def_id) {
+                        // Look for a function with this name
+                        for &item_def_id in &submod_info.items {
+                            if let Some(def_info) = self.resolver.def_info.get(&item_def_id) {
+                                if def_info.name == third_name {
+                                    if let Some(fn_sig) = self.fn_sigs.get(&item_def_id).cloned() {
+                                        // Found the function!
+                                        let fn_ty = if fn_sig.generics.is_empty() {
+                                            Type::function(fn_sig.inputs.clone(), fn_sig.output.clone())
+                                        } else {
+                                            // Create fresh type vars for generics
+                                            let mut substitution: HashMap<TyVarId, Type> = HashMap::new();
+                                            for &old_var in &fn_sig.generics {
+                                                let fresh_var = self.unifier.fresh_var();
+                                                substitution.insert(old_var, fresh_var);
+                                            }
+
+                                            let subst_inputs: Vec<Type> = fn_sig.inputs.iter()
+                                                .map(|ty| self.substitute_type_vars(ty, &substitution))
+                                                .collect();
+                                            let subst_output = self.substitute_type_vars(&fn_sig.output, &substitution);
+
+                                            Type::function(subst_inputs, subst_output)
+                                        };
+
+                                        return Ok(hir::Expr::new(
+                                            hir::ExprKind::Def(item_def_id),
+                                            fn_ty,
+                                            span,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Look for a struct type
+                        for &item_def_id in &submod_info.items {
+                            if let Some(struct_info) = self.struct_defs.get(&item_def_id) {
+                                if struct_info.name == third_name {
+                                    // Return the struct type (for use in expressions like type annotation)
+                                    let type_args: Vec<Type> = struct_info.generics.iter()
+                                        .map(|_| self.unifier.fresh_var())
+                                        .collect();
+                                    let struct_ty = Type::adt(item_def_id, type_args);
+
+                                    return Ok(hir::Expr::new(
+                                        hir::ExprKind::Def(item_def_id),
+                                        struct_ty,
+                                        span,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Look for a constant
+                        for &item_def_id in &submod_info.items {
+                            if let Some(const_info) = self.const_defs.get(&item_def_id) {
+                                if const_info.name == third_name {
+                                    return Ok(hir::Expr::new(
+                                        hir::ExprKind::Def(item_def_id),
+                                        const_info.ty.clone(),
+                                        span,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Item not found in submodule
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotFound { name: format!("{}::{}::{}", module_name, type_name, third_name) },
+                            span,
+                        ));
+                    }
+                }
+
+                // Not a submodule, check if the second segment is an enum and third is a variant
                 // This handles module::Enum::Variant pattern
                 if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
                     for &item_def_id in &mod_info.items {
@@ -4797,11 +4888,168 @@ impl<'a> TypeContext<'a> {
                 }
             } else {
                 // Multi-segment path: resolve through module hierarchy
-                // e.g., std::collections::HashMap { ... }
+                // e.g., std::collections::HashMap { ... } or module::Enum::Variant { ... }
                 let segments: Vec<String> = path.segments.iter()
                     .map(|s| self.symbol_to_string(s.name.node))
                     .collect();
 
+                // Check for 3-segment pattern: module::Enum::Variant { fields }
+                if segments.len() == 3 {
+                    let module_name = &segments[0];
+                    let enum_name = &segments[1];
+                    let variant_name = &segments[2];
+
+                    // Try to find the module
+                    let mut module_def_id: Option<DefId> = None;
+                    for (def_id, info) in &self.module_defs {
+                        if &info.name == module_name {
+                            module_def_id = Some(*def_id);
+                            break;
+                        }
+                    }
+
+                    if let Some(mod_def_id) = module_def_id {
+                        // Find the enum within the module's items
+                        let mut found_enum: Option<(DefId, super::EnumInfo)> = None;
+
+                        if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                            for &item_def_id in &mod_info.items {
+                                if let Some(enum_info) = self.enum_defs.get(&item_def_id) {
+                                    if &enum_info.name == enum_name {
+                                        found_enum = Some((item_def_id, enum_info.clone()));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some((enum_def_id, enum_info)) = found_enum {
+                            // Find the variant
+                            if let Some(variant) = enum_info.variants.iter().find(|v| &v.name == variant_name) {
+                                // Found an enum variant - handle struct-like construction
+                                let variant_idx = variant.index;
+                                let variant_fields = variant.fields.clone();
+
+                                // Extract type arguments from the path if provided (e.g., module::Enum::<i32>::Variant)
+                                // For now, check the enum segment for type args
+                                let path_type_args: Vec<Type> = if let Some(args) = &path.segments[1].args {
+                                    let mut parsed_args = Vec::new();
+                                    for arg in &args.args {
+                                        if let ast::TypeArg::Type(arg_ty) = arg {
+                                            parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                        }
+                                    }
+                                    parsed_args
+                                } else {
+                                    Vec::new()
+                                };
+
+                                // Create fresh type variables for enum generics (if no explicit args provided)
+                                let type_args: Vec<Type> = if !path_type_args.is_empty() {
+                                    path_type_args
+                                } else {
+                                    enum_info.generics.iter()
+                                        .map(|_| self.unifier.fresh_var())
+                                        .collect()
+                                };
+
+                                // Build substitution map from generic params to type args
+                                let subst: std::collections::HashMap<TyVarId, Type> = enum_info.generics.iter()
+                                    .copied()
+                                    .zip(type_args.iter().cloned())
+                                    .collect();
+
+                                // Type-check each field from the expression
+                                let mut hir_field_exprs = Vec::new();
+                                for field in fields {
+                                    let field_name = self.symbol_to_string(field.name.node);
+
+                                    // Find the corresponding variant field
+                                    let variant_field = match variant_fields.iter().find(|f| f.name == field_name) {
+                                        Some(f) => f,
+                                        None => {
+                                            return Err(TypeError::new(
+                                                TypeErrorKind::UnknownField {
+                                                    ty: Type::adt(enum_def_id, type_args.clone()),
+                                                    field: field_name,
+                                                },
+                                                field.span,
+                                            ));
+                                        }
+                                    };
+
+                                    // Apply substitution to field type
+                                    let expected_ty = self.substitute_type_vars(&variant_field.ty, &subst);
+
+                                    // Handle shorthand syntax: `{ x }` means `{ x: x }`
+                                    let value_expr = if let Some(value) = &field.value {
+                                        // Use check_expr to propagate expected type for better literal inference
+                                        self.check_expr(value, &expected_ty).map_err(|_| {
+                                            let found = self.infer_expr(value).map(|e| e.ty).unwrap_or_else(|_| Type::error());
+                                            TypeError::new(
+                                                TypeErrorKind::Mismatch {
+                                                    expected: self.unifier.resolve(&expected_ty),
+                                                    found: self.unifier.resolve(&found),
+                                                },
+                                                value.span,
+                                            )
+                                        })?
+                                    } else {
+                                        // Shorthand: look up the field name as a variable
+                                        let var_path = ast::ExprPath {
+                                            segments: vec![ast::ExprPathSegment {
+                                                name: field.name.clone(),
+                                                args: None,
+                                            }],
+                                            span: field.span,
+                                        };
+                                        let expr = ast::Expr {
+                                            kind: ast::ExprKind::Path(var_path),
+                                            span: field.span,
+                                        };
+                                        let inferred = self.infer_expr(&expr)?;
+                                        self.unifier.unify(&inferred.ty, &expected_ty, field.span).map_err(|_| {
+                                            TypeError::new(
+                                                TypeErrorKind::Mismatch {
+                                                    expected: self.unifier.resolve(&expected_ty),
+                                                    found: self.unifier.resolve(&inferred.ty),
+                                                },
+                                                field.span,
+                                            )
+                                        })?;
+                                        inferred
+                                    };
+
+                                    hir_field_exprs.push((variant_field.index, value_expr));
+                                }
+
+                                // Sort fields by index to ensure correct order in Variant
+                                hir_field_exprs.sort_by_key(|(idx, _)| *idx);
+                                let ordered_fields: Vec<hir::Expr> = hir_field_exprs.into_iter()
+                                    .map(|(_, expr)| expr)
+                                    .collect();
+
+                                // Build result type with resolved type args
+                                let resolved_type_args: Vec<Type> = type_args.iter()
+                                    .map(|ty| self.unifier.resolve(ty))
+                                    .collect();
+                                let enum_ty = Type::adt(enum_def_id, resolved_type_args);
+
+                                return Ok(hir::Expr::new(
+                                    hir::ExprKind::Variant {
+                                        def_id: enum_def_id,
+                                        variant_idx,
+                                        fields: ordered_fields,
+                                    },
+                                    enum_ty,
+                                    span,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Fall through to struct resolution for non-enum cases
                 // Create an AST type path and resolve it
                 let ast_type = ast::Type {
                     kind: ast::TypeKind::Path(path.clone()),

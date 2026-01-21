@@ -21,8 +21,10 @@ fn test_enum_tuple() -> helper::Kind {
     helper::Kind::B(42)
 }
 
-// NOTE: Struct variant enum construction (helper::Kind::C { x: 1, y: 2 }) is not yet supported.
-// This would require 4-segment path resolution in record literal context.
+// Test module-qualified struct variant enum construction
+fn test_enum_struct() -> helper::Kind {
+    helper::Kind::C { x: 1, y: 2 }
+}
 
 // Test module-qualified type alias
 fn test_type_alias() -> helper::MyInt {
@@ -54,6 +56,7 @@ fn main() {
     let _ = test_struct_literal();
     let _ = test_enum_unit();
     let _ = test_enum_tuple();
+    let _ = test_enum_struct();
     let _ = test_type_alias();
     let _ = test_const();
     let _ = test_function();
