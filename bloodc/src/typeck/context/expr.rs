@@ -1322,11 +1322,13 @@ impl<'a> TypeContext<'a> {
                 }
             }
             TypeKind::Adt { def_id, .. } => {
-                // Check if it's Option or Vec
+                // Check if it's Option, Vec, or Box
                 if Some(*def_id) == self.option_def_id {
                     Some(BuiltinMethodType::Option)
                 } else if Some(*def_id) == self.vec_def_id {
                     Some(BuiltinMethodType::Vec)
+                } else if Some(*def_id) == self.box_def_id {
+                    Some(BuiltinMethodType::Box)
                 } else {
                     None
                 }
@@ -1343,7 +1345,7 @@ impl<'a> TypeContext<'a> {
                     // For generic types (Option<T>, Vec<T>), we need to substitute
                     // the type argument into the return type
                     let return_type = match &type_match {
-                        BuiltinMethodType::Option | BuiltinMethodType::Vec => {
+                        BuiltinMethodType::Option | BuiltinMethodType::Vec | BuiltinMethodType::Box => {
                             // Extract the type argument from the ADT
                             if let TypeKind::Adt { args, .. } = ty.kind() {
                                 if !args.is_empty() {
@@ -1397,6 +1399,7 @@ impl<'a> TypeContext<'a> {
             "String" => Some(BuiltinMethodType::String),
             "Vec" => Some(BuiltinMethodType::Vec),
             "Option" => Some(BuiltinMethodType::Option),
+            "Box" => Some(BuiltinMethodType::Box),
             _ => None,
         };
 
@@ -1409,9 +1412,9 @@ impl<'a> TypeContext<'a> {
                 && builtin_method.is_static
             {
                 if let Some(sig) = self.fn_sigs.get(&builtin_method.def_id).cloned() {
-                    // For generic static methods like Vec::new(), instantiate with fresh vars
+                    // For generic static methods like Vec::new(), Box::new(), instantiate with fresh vars
                     // The synthetic TyVarId(9000) placeholder needs to be replaced with fresh vars
-                    let needs_fresh_vars = matches!(&type_match, BuiltinMethodType::Vec | BuiltinMethodType::Option);
+                    let needs_fresh_vars = matches!(&type_match, BuiltinMethodType::Vec | BuiltinMethodType::Option | BuiltinMethodType::Box);
 
                     let fn_ty = if needs_fresh_vars {
                         // Create a fresh type variable to substitute for the placeholder

@@ -537,6 +537,8 @@ impl<'a> TypeContext<'a> {
             fields: vec![],  // opaque - no exposed fields
             generics: vec![box_t_var_id],
         });
+
+        self.box_def_id = Some(box_def_id);
     }
 
     /// Register built-in methods for primitive and builtin types.
@@ -991,6 +993,21 @@ impl<'a> TypeContext<'a> {
             option_ref_t,
             "vec_get",
         );
+
+        // === Box methods ===
+
+        let box_def_id = self.box_def_id.expect("BUG: box_def_id not set");
+
+        // Box<T>::new(value: T) -> Box<T> (static method)
+        let box_t = Type::adt(box_def_id, vec![t_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "new",
+            true,
+            vec![t_ty.clone()],  // Takes value: T
+            box_t.clone(),       // Returns Box<T>
+            "box_new",
+        );
     }
 
     /// Register a single builtin method.
@@ -1012,6 +1029,7 @@ impl<'a> TypeContext<'a> {
                 super::BuiltinMethodType::String => "String",
                 super::BuiltinMethodType::Option => "Option",
                 super::BuiltinMethodType::Vec => "Vec",
+                super::BuiltinMethodType::Box => "Box",
             },
             name
         );
