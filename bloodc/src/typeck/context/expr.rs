@@ -1737,23 +1737,9 @@ impl<'a> TypeContext<'a> {
 
                     Err(self.error_type_not_found(&format!("{}::{}", module_name, type_name), ty.span))
                 } else {
-                    // More than two segments requires full module system (not yet implemented)
-                    let path_str = path.segments.iter()
-                        .map(|s| self.symbol_to_string(s.name.node))
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    Err(TypeError::new(
-                        TypeErrorKind::UnsupportedFeature {
-                            feature: format!(
-                                "type paths with more than 2 segments (`{}`). \
-                                 Blood currently supports single-segment types and two-segment \
-                                 paths (Module::Type). Full module hierarchies require the module \
-                                 system which is planned for a future release.",
-                                path_str
-                            ),
-                        },
-                        ty.span,
-                    ))
+                    // Multi-segment path: resolve through module hierarchy
+                    // e.g., std::collections::Vec or foo::bar::Baz
+                    self.resolve_multi_segment_type_path(path, ty.span)
                 }
             }
             ast::TypeKind::Reference { mutable, lifetime: _, inner } => {
@@ -1878,6 +1864,130 @@ impl<'a> TypeContext<'a> {
                 Ok(Type::ownership(hir_qualifier, inner_ty))
             }
         }
+    }
+
+    /// Resolve a multi-segment type path through the module hierarchy.
+    ///
+    /// For paths like `std::collections::Vec`, this:
+    /// 1. Looks up `std` as a module
+    /// 2. Within that module, looks up `collections` as a submodule
+    /// 3. Within that, looks up `Vec` as a type
+    fn resolve_multi_segment_type_path(
+        &mut self,
+        path: &ast::TypePath,
+        span: Span,
+    ) -> Result<Type, TypeError> {
+        let segments: Vec<String> = path.segments.iter()
+            .map(|s| self.symbol_to_string(s.name.node))
+            .collect();
+
+        // We need at least 3 segments for this function (1 and 2 are handled elsewhere)
+        if segments.len() < 3 {
+            return Err(self.error_type_not_found(&segments.join("::"), span));
+        }
+
+        // Start by looking up the first segment as a module
+        let first_name = &segments[0];
+        let mut current_module_def_id = self.resolver.lookup_type(first_name)
+            .or_else(|| {
+                // Also check if it's a module by name
+                self.module_defs.iter()
+                    .find(|(_, info)| info.name == *first_name)
+                    .map(|(def_id, _)| *def_id)
+            })
+            .ok_or_else(|| TypeError::new(
+                TypeErrorKind::ModuleNotFound {
+                    name: first_name.clone(),
+                    searched_paths: vec![first_name.clone()],
+                },
+                span,
+            ))?;
+
+        // Navigate through intermediate segments (all should be modules)
+        for segment_name in &segments[1..segments.len()-1] {
+            let module_info = self.module_defs.get(&current_module_def_id).cloned()
+                .ok_or_else(|| TypeError::new(
+                    TypeErrorKind::TypeNotFound {
+                        name: format!("{} is not a module", segment_name),
+                    },
+                    span,
+                ))?;
+
+            // Find the next segment within this module's items
+            let mut found = false;
+            for &item_def_id in &module_info.items {
+                if let Some(def_info) = self.resolver.def_info.get(&item_def_id) {
+                    if def_info.name == *segment_name {
+                        // Check if this is a module (for intermediate segments)
+                        if matches!(def_info.kind, hir::DefKind::Mod) {
+                            current_module_def_id = item_def_id;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !found {
+                return Err(TypeError::new(
+                    TypeErrorKind::TypeNotFound {
+                        name: format!("{}::{}", module_info.name, segment_name),
+                    },
+                    span,
+                ));
+            }
+        }
+
+        // Now look up the final segment as a type within the last module
+        let type_name = segments.last().unwrap();
+        let module_info = self.module_defs.get(&current_module_def_id).cloned()
+            .ok_or_else(|| TypeError::new(
+                TypeErrorKind::TypeNotFound {
+                    name: segments.join("::"),
+                },
+                span,
+            ))?;
+
+        // Find the type in the module's items
+        for &item_def_id in &module_info.items {
+            if let Some(def_info) = self.resolver.def_info.get(&item_def_id) {
+                if def_info.name == *type_name {
+                    // Check if it's a type (struct, enum, type alias)
+                    match def_info.kind {
+                        hir::DefKind::Struct | hir::DefKind::Enum => {
+                            // Extract type arguments from the last segment
+                            let type_args = if let Some(ref args) = path.segments.last().and_then(|s| s.args.as_ref()) {
+                                let mut parsed_args = Vec::new();
+                                for arg in &args.args {
+                                    if let ast::TypeArg::Type(arg_ty) = arg {
+                                        parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                    }
+                                }
+                                parsed_args
+                            } else {
+                                Vec::new()
+                            };
+                            return Ok(Type::adt(item_def_id, type_args));
+                        }
+                        hir::DefKind::TypeAlias => {
+                            // Look up and return the aliased type
+                            if let Some(alias_info) = self.type_aliases.get(&item_def_id).cloned() {
+                                return Ok(alias_info.ty);
+                            }
+                            return Ok(Type::adt(item_def_id, Vec::new()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Err(TypeError::new(
+            TypeErrorKind::TypeNotFound {
+                name: segments.join("::"),
+            },
+            span,
+        ))
     }
 
     /// Infer type of an index expression.
@@ -4530,10 +4640,89 @@ impl<'a> TypeContext<'a> {
                     }
                 }
             } else {
-                // More than 2 segments not yet supported
+                // Multi-segment path: resolve through module hierarchy
+                // e.g., std::collections::HashMap { ... }
+                let segments: Vec<String> = path.segments.iter()
+                    .map(|s| self.symbol_to_string(s.name.node))
+                    .collect();
+
+                // Create an AST type path and resolve it
+                let ast_type = ast::Type {
+                    kind: ast::TypeKind::Path(path.clone()),
+                    span,
+                };
+
+                let struct_ty = self.ast_type_to_hir_type(&ast_type)?;
+
+                // Extract the DefId from the resolved type
+                if let TypeKind::Adt { def_id, args: type_args } = struct_ty.kind() {
+                    // Check if it's a struct
+                    if let Some(struct_info) = self.struct_defs.get(def_id).cloned() {
+                        let mut hir_fields = Vec::new();
+
+                        // Build substitution map for generics
+                        let subst: std::collections::HashMap<hir::ty::TyVarId, Type> = struct_info.generics.iter()
+                            .cloned()
+                            .zip(type_args.iter().cloned())
+                            .collect();
+
+                        // Type-check each field
+                        for field in fields {
+                            let field_name = self.symbol_to_string(field.name.node);
+                            let expected_ty = struct_info.fields.iter()
+                                .find(|f| f.name == field_name)
+                                .map(|f| self.substitute_type_vars(&f.ty, &subst))
+                                .ok_or_else(|| TypeError::new(
+                                    TypeErrorKind::Mismatch {
+                                        expected: struct_ty.clone(),
+                                        found: Type::error(),
+                                    },
+                                    field.span,
+                                ))?;
+
+                            let value_expr = if let Some(value) = &field.value {
+                                self.check_expr(value, &expected_ty)?
+                            } else {
+                                // Shorthand: look up variable with same name
+                                let var_path = ast::ExprPath {
+                                    segments: vec![ast::ExprPathSegment {
+                                        name: field.name.clone(),
+                                        args: None,
+                                    }],
+                                    span: field.span,
+                                };
+                                let expr = ast::Expr {
+                                    kind: ast::ExprKind::Path(var_path),
+                                    span: field.span,
+                                };
+                                self.check_expr(&expr, &expected_ty)?
+                            };
+
+                            let field_idx = struct_info.fields.iter()
+                                .position(|f| f.name == field_name)
+                                .unwrap_or(0) as u32;
+
+                            hir_fields.push(hir::FieldExpr {
+                                field_idx,
+                                value: value_expr,
+                            });
+                        }
+
+                        return Ok(hir::Expr::new(
+                            hir::ExprKind::Struct {
+                                def_id: *def_id,
+                                fields: hir_fields,
+                                base: None,
+                            },
+                            struct_ty,
+                            span,
+                        ));
+                    }
+                }
+
                 return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "struct paths with more than 2 segments".to_string(),
+                    TypeErrorKind::TypeNotFound {
+                        name: segments.join("::"),
                     },
                     span,
                 ));
