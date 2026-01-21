@@ -138,6 +138,9 @@ pub struct TypeContext<'a> {
     pub(crate) bridge_defs: Vec<BridgeInfo>,
     /// Module definitions.
     pub(crate) module_defs: HashMap<DefId, ModuleInfo>,
+    /// Cache of loaded external modules by canonical path.
+    /// Used to prevent loading the same module multiple times (diamond dependencies).
+    pub(crate) loaded_modules: HashMap<PathBuf, DefId>,
     /// Current impl block's Self type during collection phase.
     /// Set when collecting impl block method signatures so `Self` can be resolved.
     pub(crate) current_impl_self_ty: Option<Type>,
@@ -671,6 +674,7 @@ impl<'a> TypeContext<'a> {
             resume_count_in_current_op: 0,
             bridge_defs: Vec::new(),
             module_defs: HashMap::new(),
+            loaded_modules: HashMap::new(),
             current_impl_self_ty: None,
             forall_param_env: Vec::new(),
             tuple_destructures: HashMap::new(),

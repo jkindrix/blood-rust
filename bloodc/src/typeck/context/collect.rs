@@ -2478,6 +2478,25 @@ impl<'a> TypeContext<'a> {
                     ));
                 };
 
+                // Canonicalize the module path to handle diamond dependencies
+                let canonical_path = module_path.canonicalize().unwrap_or_else(|_| module_path.clone());
+
+                // Check if this module has already been loaded (diamond dependency case)
+                if let Some(&existing_def_id) = self.loaded_modules.get(&canonical_path) {
+                    // Module already loaded - reuse existing definitions
+                    // Just create an alias in the current scope pointing to the existing module
+                    if let Some(existing_info) = self.module_defs.get(&existing_def_id).cloned() {
+                        // Store module info with the new def_id pointing to existing items
+                        self.module_defs.insert(def_id, super::ModuleInfo {
+                            name,
+                            items: existing_info.items,
+                            is_external: true,
+                            span: module.span,
+                        });
+                        return Ok(());
+                    }
+                }
+
                 // Read the module file
                 let module_source = std::fs::read_to_string(&module_path).map_err(|e| {
                     TypeError::new(
@@ -2553,6 +2572,9 @@ impl<'a> TypeContext<'a> {
                     is_external: true,
                     span: module.span,
                 });
+
+                // Cache this module by canonical path for future diamond dependency detection
+                self.loaded_modules.insert(canonical_path, def_id);
             }
         }
 

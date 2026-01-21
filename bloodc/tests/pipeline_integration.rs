@@ -4230,3 +4230,11 @@ fn test_module_resolution_nested() {
 fn test_module_resolution_unsafe() {
     assert_file_type_checks("tests/fixtures/modules/unsafe_module.blood");
 }
+
+/// Test diamond module dependencies (same module imported through different paths).
+/// This ensures module caching works correctly and types from shared modules
+/// are identical regardless of import path.
+#[test]
+fn test_module_resolution_diamond() {
+    assert_file_type_checks("tests/fixtures/modules/diamond_dependency.blood");
+}
