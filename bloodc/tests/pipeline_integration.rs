@@ -4224,3 +4224,9 @@ fn test_module_resolution_generics() {
 fn test_module_resolution_nested() {
     assert_file_type_checks("tests/fixtures/modules/nested_module_resolution.blood");
 }
+
+/// Test @unsafe blocks with module-imported types.
+#[test]
+fn test_module_resolution_unsafe() {
+    assert_file_type_checks("tests/fixtures/modules/unsafe_module.blood");
+}
