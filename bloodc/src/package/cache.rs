@@ -321,6 +321,29 @@ impl PackageCache {
         self.index.values().collect()
     }
 
+    /// Get or create a directory for a registry package.
+    pub fn get_or_create_dir(&self, name: &str, version: &Version) -> Result<PathBuf, CacheError> {
+        let default_registry = "blood-lang.org-packages";
+        let path = self.registry_package_path(default_registry, name, version);
+
+        if !path.exists() {
+            fs::create_dir_all(&path)?;
+        }
+
+        Ok(path)
+    }
+
+    /// Get or create a directory for a git checkout.
+    pub fn get_or_create_git_dir(&self, name: &str, revision: &str) -> Result<PathBuf, CacheError> {
+        let path = self.git_dir().join(sanitize_url(name)).join(revision);
+
+        if !path.exists() {
+            fs::create_dir_all(&path)?;
+        }
+
+        Ok(path)
+    }
+
     /// Scan the cache directory and rebuild the index.
     pub fn rebuild_index(&mut self) -> Result<(), CacheError> {
         self.index.clear();

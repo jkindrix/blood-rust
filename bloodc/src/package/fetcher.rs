@@ -18,7 +18,7 @@
 //! ```
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -92,18 +92,73 @@ impl Fetcher {
             registry_url, id.name, id.version
         );
 
-        // In a real implementation, this would:
-        // 1. Make HTTP request to download_url
-        // 2. Save tarball to temp location
-        // 3. Verify checksum
-        // 4. Extract to cache directory
-        // 5. Return path to extracted package
+        // Download the tarball
+        let response = ureq::get(&download_url)
+            .call()
+            .map_err(|e| FetchError::Network(format!("failed to download {}: {}", download_url, e)))?;
 
-        // For now, return an error indicating fetching is not yet implemented
-        Err(FetchError::NotImplemented(format!(
-            "registry download from {} for {} v{}",
-            download_url, id.name, id.version
-        )))
+        if response.status() != 200 {
+            return Err(FetchError::NotFound {
+                name: id.name.clone(),
+                version: id.version.clone(),
+            });
+        }
+
+        // Read response body into memory
+        let mut tarball_data = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut tarball_data)
+            .map_err(|e| FetchError::Network(format!("failed to read response: {}", e)))?;
+
+        // Verify checksum if provided (before extraction)
+        if let Some(expected) = checksum {
+            let (algo, hash) = expected.split_once(':').ok_or_else(|| FetchError::InvalidChecksum {
+                expected: expected.to_string(),
+                actual: "invalid format".to_string(),
+            })?;
+
+            if algo != "sha256" {
+                return Err(FetchError::UnsupportedChecksum {
+                    algorithm: algo.to_string(),
+                });
+            }
+
+            use sha2::{Sha256, Digest};
+            let mut hasher = Sha256::new();
+            hasher.update(&tarball_data);
+            let actual = hex::encode(hasher.finalize());
+
+            if actual != hash {
+                return Err(FetchError::InvalidChecksum {
+                    expected: hash.to_string(),
+                    actual,
+                });
+            }
+        }
+
+        // Create cache directory for this package
+        let cache_dir = self.cache.get_or_create_dir(&id.name, &id.version)?;
+
+        // Extract the tarball
+        self.extract_tarball(&tarball_data, &cache_dir)?;
+
+        Ok(cache_dir)
+    }
+
+    /// Extract a gzipped tarball to a directory.
+    fn extract_tarball(&self, data: &[u8], dest: &Path) -> Result<(), FetchError> {
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+
+        let gz = GzDecoder::new(data);
+        let mut archive = Archive::new(gz);
+
+        archive
+            .unpack(dest)
+            .map_err(|e| FetchError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to extract tarball: {}", e))))?;
+
+        Ok(())
     }
 
     /// Fetch a package from a git repository.
@@ -114,27 +169,53 @@ impl Fetcher {
         reference: Option<&str>,
         revision: &str,
     ) -> Result<PathBuf, FetchError> {
+        use git2::{FetchOptions, RemoteCallbacks, Oid};
+
         // Check if already cached
         if let Some(path) = self.cache.get_git_cached(&id.name, revision) {
             return Ok(path);
         }
 
-        // In a real implementation, this would:
-        // 1. Clone or fetch the repository
-        // 2. Checkout the specified revision
-        // 3. Cache the result
-        // 4. Return path to the checkout
+        // Create a cache directory for this git checkout
+        let cache_dir = self.cache.get_or_create_git_dir(&id.name, revision)?;
 
-        // Build git reference for error message
-        let ref_info = match reference {
-            Some(r) => format!("{} at {}", r, revision),
-            None => revision.to_string(),
-        };
+        // Clone the repository
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.transfer_progress(|_progress| true);
 
-        Err(FetchError::NotImplemented(format!(
-            "git clone from {} ({}) for {}",
-            url, ref_info, id.name
-        )))
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(callbacks);
+
+        // Clone with specific options for shallow clone when possible
+        let mut builder = git2::build::RepoBuilder::new();
+        builder.fetch_options(fetch_options);
+
+        // Try to clone the repository
+        let repo = builder
+            .clone(url, &cache_dir)
+            .map_err(|e| FetchError::Git(format!("failed to clone {}: {}", url, e)))?;
+
+        // Parse the revision as an Oid (commit hash)
+        let oid = Oid::from_str(revision)
+            .map_err(|e| FetchError::Git(format!("invalid revision {}: {}", revision, e)))?;
+
+        // Find the commit (to verify it exists)
+        let _commit = repo
+            .find_commit(oid)
+            .map_err(|e| FetchError::Git(format!("revision {} not found: {}", revision, e)))?;
+
+        // Checkout the commit
+        let _ = repo.set_head_detached(oid);
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .map_err(|e| FetchError::Git(format!("failed to checkout {}: {}", revision, e)))?;
+
+        // If a reference was provided and doesn't match, log a warning
+        if let Some(ref_name) = reference {
+            // This is informational - the revision takes precedence
+            eprintln!("note: checked out revision {} (reference was {})", revision, ref_name);
+        }
+
+        Ok(cache_dir)
     }
 
     /// "Fetch" a package from a local path (just validate it exists).
@@ -295,6 +376,9 @@ pub enum FetchError {
 
     #[error("package not found: {name} v{version}")]
     NotFound { name: String, version: Version },
+
+    #[error("cache error: {0}")]
+    Cache(#[from] super::cache::CacheError),
 }
 
 #[cfg(test)]
@@ -361,27 +445,31 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_from_registry_not_implemented() {
+    fn test_fetch_from_registry_network_error() {
         let temp = TempDir::new().unwrap();
         let cache = PackageCache::new(temp.path().to_path_buf());
         let fetcher = Fetcher::new(cache);
 
         let id = PackageId::new("test".to_string(), Version::parse("1.0.0").unwrap());
+        // This should fail with a network error since example.com doesn't have this endpoint
         let result = fetcher.fetch_from_registry(&id, "https://example.com", None);
 
-        assert!(matches!(result, Err(FetchError::NotImplemented(_))));
+        // Should get a network error (either connection refused or HTTP error)
+        assert!(matches!(result, Err(FetchError::Network(_)) | Err(FetchError::NotFound { .. })));
     }
 
     #[test]
-    fn test_fetch_from_git_not_implemented() {
+    fn test_fetch_from_git_invalid_revision() {
         let temp = TempDir::new().unwrap();
         let cache = PackageCache::new(temp.path().to_path_buf());
         let fetcher = Fetcher::new(cache);
 
         let id = PackageId::new("test".to_string(), Version::parse("1.0.0").unwrap());
+        // "abc123" is not a valid 40-character SHA, so this should fail
         let result = fetcher.fetch_from_git(&id, "https://github.com/test/test", None, "abc123");
 
-        assert!(matches!(result, Err(FetchError::NotImplemented(_))));
+        // Should get a git error (invalid URL, clone failed, or invalid revision format)
+        assert!(matches!(result, Err(FetchError::Git(_))));
     }
 
     #[test]
