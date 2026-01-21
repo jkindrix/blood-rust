@@ -136,6 +136,60 @@ fn test_parse_struct_definitions() {
     assert_eq!(program.declarations.len(), 4, "Expected 4 struct declarations");
 }
 
+/// Regression test for nested generics parsing.
+/// Bug: When parsing `>>` as two closing angle brackets, the parser was incorrectly
+/// consuming commas that belonged to the outer context (struct fields), causing
+/// the second field to fail parsing.
+/// Fixed in commit 40a4efe.
+#[test]
+fn test_parse_nested_generics_multiple_fields() {
+    // This specific case failed before the fix:
+    // After parsing `Outer<Inner<i32>>` for the first field, the `>>` was split
+    // into two `>` tokens. But parse_type_args was consuming the comma after
+    // the first field, causing "expected }, found pub" on the second field.
+    let source = r#"
+        struct Outer<T> { val: T }
+        struct Inner<T> { val: T }
+
+        struct Test {
+            first: Outer<Inner<i32>>,
+            second: Outer<Inner<i32>>,
+        }
+
+        struct DeepNesting {
+            a: Outer<Outer<Outer<i32>>>,
+            b: i32,
+            c: Outer<Inner<bool>>,
+        }
+
+        struct MixedFields {
+            simple: i32,
+            nested: Outer<Inner<i32>>,
+            another_simple: bool,
+            another_nested: Outer<Inner<u64>>,
+        }
+    "#;
+
+    let mut parser = Parser::new(source);
+    let result = parser.parse_program();
+
+    match result {
+        Ok(program) => {
+            assert_eq!(program.declarations.len(), 5, "Expected 5 declarations");
+        }
+        Err(errors) => {
+            panic!(
+                "Nested generics parsing failed (regression!):\n{}",
+                errors
+                    .iter()
+                    .map(|e| format!("  - {}", e.message))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+}
+
 #[test]
 fn test_parse_enum_definitions() {
     let source = r#"
