@@ -566,6 +566,14 @@ pub struct CodegenContext<'ctx, 'a> {
     /// we need a wrapper that accepts env_ptr and forwards to the original.
     /// Maps original function DefId -> wrapper function.
     pub(super) fn_ptr_wrappers: HashMap<DefId, FunctionValue<'ctx>>,
+    /// DefId for built-in Box<T> type.
+    pub(super) box_def_id: Option<DefId>,
+    /// DefId for built-in Vec<T> type.
+    pub(super) vec_def_id: Option<DefId>,
+    /// DefId for built-in Option<T> type.
+    pub(super) option_def_id: Option<DefId>,
+    /// DefId for built-in Result<T, E> type.
+    pub(super) result_def_id: Option<DefId>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -612,7 +620,28 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             mono_counter: 0,
             inline_handler_bodies: HashMap::new(),
             fn_ptr_wrappers: HashMap::new(),
+            box_def_id: None,
+            vec_def_id: None,
+            option_def_id: None,
+            result_def_id: None,
         }
+    }
+
+    /// Set built-in type DefIds for proper type lowering.
+    ///
+    /// These DefIds are used to identify Box<T>, Vec<T>, Option<T>, and Result<T, E>
+    /// during type lowering so they can be given their correct LLVM representations.
+    pub fn set_builtin_def_ids(
+        &mut self,
+        box_def_id: Option<DefId>,
+        vec_def_id: Option<DefId>,
+        option_def_id: Option<DefId>,
+        result_def_id: Option<DefId>,
+    ) {
+        self.box_def_id = box_def_id;
+        self.vec_def_id = vec_def_id;
+        self.option_def_id = option_def_id;
+        self.result_def_id = result_def_id;
     }
 
     /// Set escape analysis results for optimization.
@@ -2974,5 +3003,125 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // blood_runtime_shutdown() -> void
         let shutdown_type = void_type.fn_type(&[], false);
         self.module.add_function("blood_runtime_shutdown", shutdown_type, None);
+
+        // === Vec<T> Runtime Functions ===
+
+        // vec_new(elem_size: i64) -> *void
+        let vec_new_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("vec_new", vec_new_type, None);
+
+        // vec_with_capacity(elem_size: i64, capacity: i64) -> *void
+        let vec_with_capacity_type = i8_ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("vec_with_capacity", vec_with_capacity_type, None);
+
+        // vec_len(vec: *void) -> i64
+        let vec_len_type = i64_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("vec_len", vec_len_type, None);
+
+        // vec_is_empty(vec: *void) -> i32
+        let vec_is_empty_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("vec_is_empty", vec_is_empty_type, None);
+
+        // vec_capacity(vec: *void) -> i64
+        let vec_capacity_type = i64_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("vec_capacity", vec_capacity_type, None);
+
+        // vec_push(vec: *void, elem: *void, elem_size: i64) -> void
+        let vec_push_type = void_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("vec_push", vec_push_type, None);
+
+        // vec_pop(vec: *void, elem_size: i64, out: *void) -> i32
+        let vec_pop_type = i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("vec_pop", vec_pop_type, None);
+
+        // vec_get(vec: *void, index: i64, elem_size: i64, out: *void) -> i32
+        let vec_get_type = i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("vec_get", vec_get_type, None);
+
+        // vec_get_ptr(vec: *void, index: i64, elem_size: i64) -> *void
+        let vec_get_ptr_type = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into()], false);
+        self.module.add_function("vec_get_ptr", vec_get_ptr_type, None);
+
+        // vec_contains(vec: *void, elem: *void, elem_size: i64) -> i32
+        let vec_contains_type = i32_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("vec_contains", vec_contains_type, None);
+
+        // vec_reverse(vec: *void, elem_size: i64) -> void
+        let vec_reverse_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("vec_reverse", vec_reverse_type, None);
+
+        // vec_clear(vec: *void) -> void
+        let vec_clear_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("vec_clear", vec_clear_type, None);
+
+        // vec_free(vec: *void, elem_size: i64) -> void
+        let vec_free_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("vec_free", vec_free_type, None);
+
+        // === Box<T> Runtime Functions ===
+
+        // box_new(value: *void, size: i64) -> *void
+        let box_new_type = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("box_new", box_new_type, None);
+
+        // box_as_ref(boxed: *void) -> *void
+        let box_as_ref_type = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("box_as_ref", box_as_ref_type, None);
+
+        // box_as_mut(boxed: *void) -> *void
+        let box_as_mut_type = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("box_as_mut", box_as_mut_type, None);
+
+        // box_free(boxed: *void, size: i64) -> void
+        let box_free_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("box_free", box_free_type, None);
+
+        // === Option<T> Runtime Functions ===
+        // Option<T> is { tag: i32, payload: T } where tag=0 is None, tag=1 is Some
+
+        // option_is_some(opt: *void) -> i32
+        let option_is_some_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("option_is_some", option_is_some_type, None);
+
+        // option_is_none(opt: *void) -> i32
+        let option_is_none_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("option_is_none", option_is_none_type, None);
+
+        // option_unwrap(opt: *void, payload_size: i64, out: *void) -> void
+        // Copies the payload to out. Panics if None.
+        let option_unwrap_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("option_unwrap", option_unwrap_type, None);
+
+        // option_try(opt: *void, payload_size: i64, out: *void) -> i32
+        // Returns tag (0=None, 1=Some). If Some, copies payload to out.
+        let option_try_type = i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("option_try", option_try_type, None);
+
+        // === Result<T, E> Runtime Functions ===
+        // Result<T, E> is { tag: i32, payload: union { T, E } }
+        // where tag=0 is Ok(T) and tag=1 is Err(E)
+
+        // result_is_ok(res: *void) -> i32
+        let result_is_ok_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("result_is_ok", result_is_ok_type, None);
+
+        // result_is_err(res: *void) -> i32
+        let result_is_err_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("result_is_err", result_is_err_type, None);
+
+        // result_unwrap(res: *void, ok_size: i64, out: *void) -> void
+        // Copies the Ok payload to out. Panics if Err.
+        let result_unwrap_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("result_unwrap", result_unwrap_type, None);
+
+        // result_unwrap_err(res: *void, err_size: i64, out: *void) -> void
+        // Copies the Err payload to out. Panics if Ok.
+        let result_unwrap_err_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("result_unwrap_err", result_unwrap_err_type, None);
+
+        // result_try(res: *void, ok_size: i64, out: *void) -> i32
+        // Returns tag (0=Ok, 1=Err). If Ok, copies payload to out.
+        let result_try_type = i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("result_try", result_try_type, None);
     }
 }

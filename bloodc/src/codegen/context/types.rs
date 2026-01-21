@@ -56,8 +56,49 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
             TypeKind::Adt { def_id, args } => {
+                // Check for built-in types first (these have special representations)
+                if Some(*def_id) == self.box_def_id {
+                    // Box<T> is represented as a pointer to T (or just i8* as opaque pointer)
+                    self.context.i8_type().ptr_type(AddressSpace::default()).into()
+                } else if Some(*def_id) == self.vec_def_id {
+                    // Vec<T> is { ptr: *T, len: i64, capacity: i64 }
+                    // Use opaque pointer representation
+                    let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                    let i64_type = self.context.i64_type();
+                    self.context.struct_type(&[ptr_type.into(), i64_type.into(), i64_type.into()], false).into()
+                } else if Some(*def_id) == self.option_def_id {
+                    // Option<T> is { tag: i32, payload: T }
+                    let tag_type = self.context.i32_type();
+                    if let Some(inner_ty) = args.first() {
+                        let payload_type = self.lower_type(inner_ty);
+                        self.context.struct_type(&[tag_type.into(), payload_type], false).into()
+                    } else {
+                        // Option with no type arg - just tag
+                        tag_type.into()
+                    }
+                } else if Some(*def_id) == self.result_def_id {
+                    // Result<T, E> is { tag: i32, payload: max(T, E) }
+                    let tag_type = self.context.i32_type();
+                    let ok_size = if let Some(ok_ty) = args.first() {
+                        let llvm_ty = self.lower_type(ok_ty);
+                        self.get_type_size_approx(llvm_ty)
+                    } else { 0 };
+                    let err_size = if args.len() > 1 {
+                        let llvm_ty = self.lower_type(&args[1]);
+                        self.get_type_size_approx(llvm_ty)
+                    } else { 0 };
+                    let payload_type = if ok_size >= err_size {
+                        args.first().map(|t| self.lower_type(t))
+                    } else {
+                        args.get(1).map(|t| self.lower_type(t))
+                    };
+                    if let Some(payload) = payload_type {
+                        self.context.struct_type(&[tag_type.into(), payload], false).into()
+                    } else {
+                        tag_type.into()
+                    }
+                } else if let Some(fields) = self.struct_defs.get(def_id) {
                 // Look up struct or enum definition
-                if let Some(fields) = self.struct_defs.get(def_id) {
                     // Substitute type parameters with concrete type arguments
                     let field_types: Vec<BasicTypeEnum> = fields.iter()
                         .map(|f| {
@@ -241,6 +282,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         } else {
             let ret_type = self.lower_type(&sig.output);
             ret_type.fn_type(&param_types, false)
+        }
+    }
+
+    /// Get approximate size of an LLVM type (for choosing union variant).
+    fn get_type_size_approx(&self, ty: BasicTypeEnum<'ctx>) -> usize {
+        match ty {
+            BasicTypeEnum::IntType(t) => t.get_bit_width() as usize / 8,
+            BasicTypeEnum::FloatType(_) => 8, // Assume 64-bit floats
+            BasicTypeEnum::PointerType(_) => 8, // 64-bit pointers
+            BasicTypeEnum::StructType(t) => t.count_fields() as usize * 8, // Approximation
+            BasicTypeEnum::ArrayType(t) => t.len() as usize * 8, // Approximation
+            BasicTypeEnum::VectorType(_) => 16, // Assume 128-bit vectors
         }
     }
 

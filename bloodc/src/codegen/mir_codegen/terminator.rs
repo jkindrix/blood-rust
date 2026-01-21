@@ -12,6 +12,8 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 use inkwell::{AddressSpace, IntPredicate};
 
+use super::types::MirTypesCodegen;
+
 use crate::diagnostics::Diagnostic;
 use crate::hir::LocalId;
 use crate::mir::body::MirBody;
@@ -431,6 +433,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let param_types = fn_type.get_param_types();
                         let mut converted_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arg_vals.len());
 
+                        // Check for special built-in methods that need additional arguments
+                        let needs_elem_size = matches!(
+                            builtin_name.as_str(),
+                            "box_new" | "vec_push" | "vec_pop" | "vec_contains" |
+                            "vec_reverse" | "vec_get" | "vec_get_ptr" | "vec_free" |
+                            "option_unwrap" | "option_try" |
+                            "result_unwrap" | "result_unwrap_err" | "result_try"
+                        );
+
                         for (i, val) in arg_vals.iter().enumerate() {
                             let converted = if let Some(param_type) = param_types.get(i) {
                                 if val.is_int_value() && param_type.is_int_type() {
@@ -458,10 +469,48 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         .map_err(|e| vec![Diagnostic::error(
                                             format!("LLVM store error: {}", e), span
                                         )])?;
-                                    alloca.into()
+                                    // Bitcast to expected pointer type (e.g., i8* for void*)
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if alloca.get_type() != expected_ptr_type {
+                                        self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                                            .map(|p| p.into())
+                                            .unwrap_or(alloca.into())
+                                    } else {
+                                        alloca.into()
+                                    }
                                 } else if param_type.is_pointer_type() && val.is_pointer_value() {
-                                    // Parameter expects pointer and we have pointer - pass through
-                                    (*val).into()
+                                    // Parameter expects pointer and we have pointer - cast if needed
+                                    let ptr_val = val.into_pointer_value();
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if ptr_val.get_type() != expected_ptr_type {
+                                        self.builder.build_pointer_cast(ptr_val, expected_ptr_type, "ptr_cast")
+                                            .map(|p| p.into())
+                                            .unwrap_or((*val).into())
+                                    } else {
+                                        (*val).into()
+                                    }
+                                } else if param_type.is_pointer_type() && val.is_int_value() {
+                                    // Parameter expects pointer but we have int - allocate on stack and pass pointer
+                                    // This handles Box::new(42) where we need to pass a pointer to the int value
+                                    let int_val = val.into_int_value();
+                                    let alloca = self.builder
+                                        .build_alloca(int_val.get_type(), "int_arg_tmp")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM alloca error: {}", e), span
+                                        )])?;
+                                    self.builder.build_store(alloca, int_val)
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM store error: {}", e), span
+                                        )])?;
+                                    // Bitcast to expected pointer type (e.g., i8* for void*)
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if alloca.get_type() != expected_ptr_type {
+                                        self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                                            .map(|p| p.into())
+                                            .unwrap_or(alloca.into())
+                                    } else {
+                                        alloca.into()
+                                    }
                                 } else {
                                     (*val).into()
                                 }
@@ -469,6 +518,163 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 (*val).into()
                             };
                             converted_args.push(converted);
+                        }
+
+                        // Add element size argument for methods that need it
+                        if needs_elem_size && !args.is_empty() {
+                            // Determine element size from the type
+                            let elem_size: u64 = match builtin_name.as_str() {
+                                "box_new" => {
+                                    // For box_new, the first (and only) arg is the value to box
+                                    let value_ty = self.get_operand_type(&args[0], body);
+                                    let llvm_ty = self.lower_type(&value_ty);
+                                    self.get_type_size_in_bytes(llvm_ty)
+                                },
+                                "vec_push" | "vec_contains" => {
+                                    // Second arg is the element
+                                    if args.len() >= 2 {
+                                        let elem_ty = self.get_operand_type(&args[1], body);
+                                        let llvm_ty = self.lower_type(&elem_ty);
+                                        self.get_type_size_in_bytes(llvm_ty)
+                                    } else {
+                                        8 // Default size
+                                    }
+                                },
+                                "vec_pop" | "vec_reverse" | "vec_get" | "vec_get_ptr" | "vec_free" => {
+                                    // First arg is Vec<T>, extract T's size from the type
+                                    let vec_ty = self.get_operand_type(&args[0], body);
+                                    // Strip reference if present
+                                    let inner_ty = match vec_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => vec_ty.clone(),
+                                    };
+                                    // Get element type from Vec<T>
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(elem_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(elem_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "option_unwrap" | "option_try" => {
+                                    // First arg is Option<T>, extract T's size from the type
+                                    let opt_ty = self.get_operand_type(&args[0], body);
+                                    // Strip reference if present
+                                    let inner_ty = match opt_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => opt_ty.clone(),
+                                    };
+                                    // Get payload type from Option<T>
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(payload_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(payload_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "result_unwrap" | "result_try" => {
+                                    // First arg is Result<T, E>, extract T's size (Ok payload)
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    // Get T (first type arg) from Result<T, E>
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(ok_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(ok_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "result_unwrap_err" => {
+                                    // First arg is Result<T, E>, extract E's size (Err payload)
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    // Get E (second type arg) from Result<T, E>
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if type_args.len() >= 2 {
+                                            let llvm_ty = self.lower_type(&type_args[1]);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                _ => 8,
+                            };
+
+                            let size_val = self.context.i64_type().const_int(elem_size, false);
+                            converted_args.push(size_val.into());
+
+                            // For Option/Result unwrap/try methods, we need an output buffer
+                            if matches!(builtin_name.as_str(), "option_unwrap" | "option_try" |
+                                "result_unwrap" | "result_unwrap_err" | "result_try") {
+                                // Get the type to determine the output buffer type
+                                let container_ty = self.get_operand_type(&args[0], body);
+                                let inner_ty = match container_ty.kind() {
+                                    crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                    _ => container_ty.clone(),
+                                };
+
+                                // Get the appropriate payload type based on the method
+                                let payload_llvm_ty = if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                    match builtin_name.as_str() {
+                                        // Option<T> and Result<T, E>.unwrap/try return T (first type arg)
+                                        "option_unwrap" | "option_try" | "result_unwrap" | "result_try" => {
+                                            if let Some(payload_ty) = type_args.first() {
+                                                self.lower_type(payload_ty)
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // Result<T, E>.unwrap_err returns E (second type arg)
+                                        "result_unwrap_err" => {
+                                            if type_args.len() >= 2 {
+                                                self.lower_type(&type_args[1])
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        _ => self.context.i64_type().into(),
+                                    }
+                                } else {
+                                    self.context.i64_type().into()
+                                };
+
+                                // Allocate output buffer on stack
+                                let out_alloca = self.builder
+                                    .build_alloca(payload_llvm_ty, "unwrap_out")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), span
+                                    )])?;
+
+                                // Cast to i8* for the runtime function
+                                let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                                let out_ptr = self.builder
+                                    .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), span
+                                    )])?;
+                                converted_args.push(out_ptr.into());
+                            }
                         }
 
                         self.builder.build_call(fn_value, &converted_args, "builtin_call")
@@ -662,7 +868,28 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Store result to destination
         let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;
         if let Some(ret_val) = call_result.try_as_basic_value().left() {
-            self.builder.build_store(dest_ptr, ret_val)
+            // Convert return value to destination type if needed
+            let dest_elem_type = dest_ptr.get_type().get_element_type();
+            let converted_val = if ret_val.is_int_value() && dest_elem_type.is_int_type() {
+                let ret_int = ret_val.into_int_value();
+                let dest_int_type = dest_elem_type.into_int_type();
+                // Truncate if destination is narrower (e.g., i32 -> i1 for bool)
+                if ret_int.get_type().get_bit_width() > dest_int_type.get_bit_width() {
+                    self.builder.build_int_truncate(ret_int, dest_int_type, "trunc")
+                        .map(|v| v.into())
+                        .unwrap_or(ret_val)
+                // Zero-extend if destination is wider
+                } else if ret_int.get_type().get_bit_width() < dest_int_type.get_bit_width() {
+                    self.builder.build_int_z_extend(ret_int, dest_int_type, "zext")
+                        .map(|v| v.into())
+                        .unwrap_or(ret_val)
+                } else {
+                    ret_val
+                }
+            } else {
+                ret_val
+            };
+            self.builder.build_store(dest_ptr, converted_val)
                 .map_err(|e| vec![Diagnostic::error(
                     format!("LLVM store error: {}", e), span
                 )])?;

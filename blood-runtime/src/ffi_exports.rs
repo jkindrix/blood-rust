@@ -2710,6 +2710,723 @@ pub extern "C" fn blood_runtime_shutdown() {
 }
 
 // ============================================================================
+// Vec<T> Runtime Functions
+// ============================================================================
+
+/// Blood Vec representation.
+/// Layout: { ptr: *void, len: i64, capacity: i64 }
+#[repr(C)]
+pub struct BloodVec {
+    /// Pointer to element data.
+    pub ptr: *mut u8,
+    /// Number of elements.
+    pub len: i64,
+    /// Capacity (number of elements that can be stored).
+    pub capacity: i64,
+}
+
+/// Create a new empty Vec.
+///
+/// # Arguments
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Returns
+/// Pointer to the BloodVec struct (caller owns the memory).
+#[no_mangle]
+pub extern "C" fn vec_new(elem_size: i64) -> *mut BloodVec {
+    let vec = Box::new(BloodVec {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+        capacity: 0,
+    });
+    // elem_size is stored implicitly - operations must pass it each time
+    let _ = elem_size; // silence unused warning
+    Box::into_raw(vec)
+}
+
+/// Create a new Vec with the given capacity.
+///
+/// # Arguments
+/// * `elem_size` - Size of each element in bytes
+/// * `capacity` - Initial capacity
+///
+/// # Returns
+/// Pointer to the BloodVec struct.
+#[no_mangle]
+pub extern "C" fn vec_with_capacity(elem_size: i64, capacity: i64) -> *mut BloodVec {
+    let ptr = if capacity > 0 {
+        let layout = std::alloc::Layout::from_size_align(
+            (capacity * elem_size) as usize,
+            8, // Default alignment
+        ).unwrap();
+        unsafe { std::alloc::alloc(layout) }
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let vec = Box::new(BloodVec {
+        ptr,
+        len: 0,
+        capacity,
+    });
+    Box::into_raw(vec)
+}
+
+/// Get the length of a Vec.
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_len(vec: *const BloodVec) -> i64 {
+    if vec.is_null() {
+        return 0;
+    }
+    (*vec).len
+}
+
+/// Check if a Vec is empty.
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_is_empty(vec: *const BloodVec) -> i32 {
+    if vec.is_null() {
+        return 1; // null vec is empty
+    }
+    if (*vec).len == 0 { 1 } else { 0 }
+}
+
+/// Get the capacity of a Vec.
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_capacity(vec: *const BloodVec) -> i64 {
+    if vec.is_null() {
+        return 0;
+    }
+    (*vec).capacity
+}
+
+/// Push an element onto the Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the BloodVec
+/// * `elem` - Pointer to the element to push (will be copied)
+/// * `elem_size` - Size of the element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+/// `elem` must be valid for `elem_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vec_push(vec: *mut BloodVec, elem: *const u8, elem_size: i64) {
+    if vec.is_null() || elem.is_null() {
+        return;
+    }
+
+    let v = &mut *vec;
+
+    // Check if we need to grow
+    if v.len >= v.capacity {
+        let new_capacity = if v.capacity == 0 { 4 } else { v.capacity * 2 };
+        let new_size = (new_capacity * elem_size) as usize;
+
+        let new_ptr = if v.ptr.is_null() {
+            let layout = std::alloc::Layout::from_size_align(new_size, 8).unwrap();
+            std::alloc::alloc(layout)
+        } else {
+            let old_layout = std::alloc::Layout::from_size_align(
+                (v.capacity * elem_size) as usize,
+                8,
+            ).unwrap();
+            std::alloc::realloc(v.ptr, old_layout, new_size)
+        };
+
+        v.ptr = new_ptr;
+        v.capacity = new_capacity;
+    }
+
+    // Copy element to the end
+    let dest = v.ptr.add((v.len * elem_size) as usize);
+    std::ptr::copy_nonoverlapping(elem, dest, elem_size as usize);
+    v.len += 1;
+}
+
+/// Pop an element from the Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the BloodVec
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the popped element (must be at least elem_size bytes)
+///
+/// # Returns
+/// 1 if an element was popped (Some), 0 if the vec was empty (None).
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+/// `out` must be valid for at least `elem_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vec_pop(vec: *mut BloodVec, elem_size: i64, out: *mut u8) -> i32 {
+    if vec.is_null() {
+        return 0;
+    }
+
+    let v = &mut *vec;
+
+    if v.len == 0 {
+        return 0; // None
+    }
+
+    v.len -= 1;
+
+    // Copy the last element to the output buffer
+    if !out.is_null() {
+        let src = v.ptr.add((v.len * elem_size) as usize);
+        std::ptr::copy_nonoverlapping(src, out, elem_size as usize);
+    }
+
+    1 // Some
+}
+
+/// Get an element from the Vec by index.
+///
+/// # Arguments
+/// * `vec` - Pointer to the BloodVec
+/// * `index` - Index of the element to get
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the element (must be at least elem_size bytes)
+///
+/// # Returns
+/// 1 if the element exists (Some), 0 if index is out of bounds (None).
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn vec_get(
+    vec: *const BloodVec,
+    index: i64,
+    elem_size: i64,
+    out: *mut u8,
+) -> i32 {
+    if vec.is_null() {
+        return 0;
+    }
+
+    let v = &*vec;
+
+    if index < 0 || index >= v.len {
+        return 0; // None - out of bounds
+    }
+
+    // Copy the element to the output buffer
+    if !out.is_null() {
+        let src = v.ptr.add((index * elem_size) as usize);
+        std::ptr::copy_nonoverlapping(src, out, elem_size as usize);
+    }
+
+    1 // Some
+}
+
+/// Get a pointer to an element in the Vec by index (for indexing operator).
+///
+/// # Arguments
+/// * `vec` - Pointer to the BloodVec
+/// * `index` - Index of the element to get
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Returns
+/// Pointer to the element, or null if out of bounds.
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_get_ptr(
+    vec: *const BloodVec,
+    index: i64,
+    elem_size: i64,
+) -> *mut u8 {
+    if vec.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let v = &*vec;
+
+    if index < 0 || index >= v.len {
+        eprintln!("Vec index out of bounds: index {} but len is {}", index, v.len);
+        std::process::abort();
+    }
+
+    v.ptr.add((index * elem_size) as usize)
+}
+
+/// Check if the Vec contains an element.
+///
+/// # Arguments
+/// * `vec` - Pointer to the BloodVec
+/// * `elem` - Pointer to the element to search for
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Returns
+/// 1 if found, 0 if not found.
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn vec_contains(
+    vec: *const BloodVec,
+    elem: *const u8,
+    elem_size: i64,
+) -> i32 {
+    if vec.is_null() || elem.is_null() {
+        return 0;
+    }
+
+    let v = &*vec;
+
+    for i in 0..v.len {
+        let item_ptr = v.ptr.add((i * elem_size) as usize);
+        // Byte-by-byte comparison
+        let mut matches = true;
+        for j in 0..elem_size as usize {
+            if *item_ptr.add(j) != *elem.add(j) {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            return 1;
+        }
+    }
+
+    0
+}
+
+/// Reverse the Vec in place.
+///
+/// # Arguments
+/// * `vec` - Pointer to the BloodVec
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_reverse(vec: *mut BloodVec, elem_size: i64) {
+    if vec.is_null() {
+        return;
+    }
+
+    let v = &mut *vec;
+
+    if v.len <= 1 {
+        return;
+    }
+
+    // Allocate temporary buffer for swapping
+    let mut temp = vec![0u8; elem_size as usize];
+
+    let mut left = 0i64;
+    let mut right = v.len - 1;
+
+    while left < right {
+        let left_ptr = v.ptr.add((left * elem_size) as usize);
+        let right_ptr = v.ptr.add((right * elem_size) as usize);
+
+        // Swap using temp buffer
+        std::ptr::copy_nonoverlapping(left_ptr, temp.as_mut_ptr(), elem_size as usize);
+        std::ptr::copy_nonoverlapping(right_ptr, left_ptr, elem_size as usize);
+        std::ptr::copy_nonoverlapping(temp.as_ptr(), right_ptr, elem_size as usize);
+
+        left += 1;
+        right -= 1;
+    }
+}
+
+/// Clear the Vec (remove all elements but keep capacity).
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_clear(vec: *mut BloodVec) {
+    if vec.is_null() {
+        return;
+    }
+    (*vec).len = 0;
+}
+
+/// Free a Vec and its backing memory.
+///
+/// # Safety
+/// `vec` must be a valid pointer that was returned by vec_new or vec_with_capacity.
+#[no_mangle]
+pub unsafe extern "C" fn vec_free(vec: *mut BloodVec, elem_size: i64) {
+    if vec.is_null() {
+        return;
+    }
+
+    let v = Box::from_raw(vec);
+
+    if !v.ptr.is_null() && v.capacity > 0 {
+        let layout = std::alloc::Layout::from_size_align(
+            (v.capacity * elem_size) as usize,
+            8,
+        ).unwrap();
+        std::alloc::dealloc(v.ptr, layout);
+    }
+}
+
+// ============================================================================
+// Box<T> Runtime Functions
+// ============================================================================
+
+/// Box a value by allocating heap memory and copying the value.
+///
+/// # Arguments
+/// * `value` - Pointer to the value to box
+/// * `size` - Size of the value in bytes
+///
+/// # Returns
+/// Pointer to the boxed value (heap-allocated copy).
+///
+/// # Safety
+/// `value` must be valid for `size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn box_new(value: *const u8, size: i64) -> *mut u8 {
+    if size <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
+    let ptr = std::alloc::alloc(layout);
+
+    if !ptr.is_null() && !value.is_null() {
+        std::ptr::copy_nonoverlapping(value, ptr, size as usize);
+    }
+
+    ptr
+}
+
+/// Get a reference to the boxed value.
+///
+/// # Arguments
+/// * `boxed` - Pointer to the boxed value
+///
+/// # Returns
+/// The same pointer (identity function for reference semantics).
+///
+/// # Safety
+/// `boxed` must be a valid pointer.
+#[no_mangle]
+pub extern "C" fn box_as_ref(boxed: *const u8) -> *const u8 {
+    boxed
+}
+
+/// Get a mutable reference to the boxed value.
+///
+/// # Arguments
+/// * `boxed` - Pointer to the boxed value
+///
+/// # Returns
+/// The same pointer (identity function for reference semantics).
+///
+/// # Safety
+/// `boxed` must be a valid pointer.
+#[no_mangle]
+pub extern "C" fn box_as_mut(boxed: *mut u8) -> *mut u8 {
+    boxed
+}
+
+/// Free a boxed value.
+///
+/// # Arguments
+/// * `boxed` - Pointer to the boxed value
+/// * `size` - Size of the value in bytes
+///
+/// # Safety
+/// `boxed` must be a pointer returned by `box_new`.
+#[no_mangle]
+pub unsafe extern "C" fn box_free(boxed: *mut u8, size: i64) {
+    if boxed.is_null() || size <= 0 {
+        return;
+    }
+
+    let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
+    std::alloc::dealloc(boxed, layout);
+}
+
+// ============================================================================
+// Option<T> Runtime Functions
+// ============================================================================
+//
+// Option<T> is represented as { tag: i32, payload: T }
+// where tag=0 is None and tag=1 is Some(value).
+//
+// The tag is always at offset 0 (4 bytes).
+// The payload offset depends on alignment of T.
+// For most cases, we assume payload is at offset 4 or 8.
+
+/// Check if Option is Some.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+///
+/// # Returns
+/// 1 if Some, 0 if None
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+#[no_mangle]
+pub unsafe extern "C" fn option_is_some(opt: *const u8) -> i32 {
+    if opt.is_null() {
+        return 0;
+    }
+    // Tag is at offset 0, read as i32
+    let tag = *(opt as *const i32);
+    if tag == 1 { 1 } else { 0 }
+}
+
+/// Check if Option is None.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+///
+/// # Returns
+/// 1 if None, 0 if Some
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+#[no_mangle]
+pub unsafe extern "C" fn option_is_none(opt: *const u8) -> i32 {
+    if opt.is_null() {
+        return 1; // null treated as None
+    }
+    // Tag is at offset 0, read as i32
+    let tag = *(opt as *const i32);
+    if tag == 0 { 1 } else { 0 }
+}
+
+/// Unwrap an Option, panicking if None.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+/// * `payload_size` - Size of the payload in bytes
+/// * `out` - Output buffer for the unwrapped value
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+/// `out` must be valid for at least `payload_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn option_unwrap(opt: *const u8, payload_size: i64, out: *mut u8) {
+    if opt.is_null() {
+        panic!("called `Option::unwrap()` on a `None` value (null pointer)");
+    }
+
+    // Tag is at offset 0
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        panic!("called `Option::unwrap()` on a `None` value");
+    }
+
+    // Payload offset: after the tag (4 bytes), but may be aligned
+    // For payloads <= 4 bytes, offset is 4
+    // For payloads > 4 bytes that need 8-byte alignment, offset is 8
+    let payload_offset = if payload_size > 4 { 8 } else { 4 };
+    let payload_ptr = opt.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+    }
+}
+
+/// Try to unwrap an Option, returning the tag.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+/// * `payload_size` - Size of the payload in bytes
+/// * `out` - Output buffer for the unwrapped value (only written if Some)
+///
+/// # Returns
+/// 0 if None, 1 if Some
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+/// `out` must be valid for at least `payload_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn option_try(opt: *const u8, payload_size: i64, out: *mut u8) -> i32 {
+    if opt.is_null() {
+        return 0; // None
+    }
+
+    // Tag is at offset 0
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        return 0; // None
+    }
+
+    // Payload offset: after the tag (4 bytes), but may be aligned
+    let payload_offset = if payload_size > 4 { 8 } else { 4 };
+    let payload_ptr = opt.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+    }
+
+    1 // Some
+}
+
+// ============================================================================
+// Result<T, E> Runtime Functions
+// ============================================================================
+//
+// Result<T, E> is represented as { tag: i32, payload: max(T, E) }
+// where tag=0 is Ok(T) and tag=1 is Err(E).
+//
+// The tag is always at offset 0 (4 bytes).
+// The payload offset depends on alignment.
+
+/// Check if Result is Ok.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+///
+/// # Returns
+/// 1 if Ok, 0 if Err
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+#[no_mangle]
+pub unsafe extern "C" fn result_is_ok(res: *const u8) -> i32 {
+    if res.is_null() {
+        return 0;
+    }
+    // Tag is at offset 0, read as i32
+    let tag = *(res as *const i32);
+    if tag == 0 { 1 } else { 0 }
+}
+
+/// Check if Result is Err.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+///
+/// # Returns
+/// 1 if Err, 0 if Ok
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+#[no_mangle]
+pub unsafe extern "C" fn result_is_err(res: *const u8) -> i32 {
+    if res.is_null() {
+        return 1; // null treated as Err
+    }
+    // Tag is at offset 0, read as i32
+    let tag = *(res as *const i32);
+    if tag == 1 { 1 } else { 0 }
+}
+
+/// Unwrap a Result, panicking if Err.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `ok_size` - Size of the Ok payload in bytes
+/// * `out` - Output buffer for the unwrapped value
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `out` must be valid for at least `ok_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn result_unwrap(res: *const u8, ok_size: i64, out: *mut u8) {
+    if res.is_null() {
+        panic!("called `Result::unwrap()` on an `Err` value (null pointer)");
+    }
+
+    // Tag is at offset 0
+    let tag = *(res as *const i32);
+
+    if tag != 0 {
+        panic!("called `Result::unwrap()` on an `Err` value");
+    }
+
+    // Payload offset: after the tag (4 bytes), but may be aligned
+    let payload_offset = if ok_size > 4 { 8 } else { 4 };
+    let payload_ptr = res.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+    }
+}
+
+/// Unwrap a Result error, panicking if Ok.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `err_size` - Size of the Err payload in bytes
+/// * `out` - Output buffer for the unwrapped error
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `out` must be valid for at least `err_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn result_unwrap_err(res: *const u8, err_size: i64, out: *mut u8) {
+    if res.is_null() {
+        panic!("called `Result::unwrap_err()` on null pointer");
+    }
+
+    // Tag is at offset 0
+    let tag = *(res as *const i32);
+
+    if tag != 1 {
+        panic!("called `Result::unwrap_err()` on an `Ok` value");
+    }
+
+    // Payload offset: after the tag (4 bytes), but may be aligned
+    let payload_offset = if err_size > 4 { 8 } else { 4 };
+    let payload_ptr = res.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, err_size as usize);
+    }
+}
+
+/// Try to unwrap a Result, returning the tag.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `ok_size` - Size of the Ok payload in bytes
+/// * `out` - Output buffer for the unwrapped value (only written if Ok)
+///
+/// # Returns
+/// 0 if Ok, 1 if Err
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `out` must be valid for at least `ok_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn result_try(res: *const u8, ok_size: i64, out: *mut u8) -> i32 {
+    if res.is_null() {
+        return 1; // Err
+    }
+
+    // Tag is at offset 0
+    let tag = *(res as *const i32);
+
+    if tag != 0 {
+        return 1; // Err
+    }
+
+    // Payload offset: after the tag (4 bytes), but may be aligned
+    let payload_offset = if ok_size > 4 { 8 } else { 4 };
+    let payload_ptr = res.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+    }
+
+    0 // Ok
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

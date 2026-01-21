@@ -287,6 +287,7 @@ pub fn compile_mir_to_object(
     escape_analysis: &EscapeAnalysisMap,
     inline_handler_bodies: &InlineHandlerBodies,
     output_path: &Path,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_program");
@@ -295,6 +296,7 @@ pub fn compile_mir_to_object(
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
     codegen.set_inline_handler_bodies(inline_handler_bodies.clone());
+    codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
     // First pass: declare types and functions from HIR
     // This sets up struct_defs, enum_defs, and function declarations
@@ -362,6 +364,7 @@ pub fn compile_mir_to_object_with_opt(
     inline_handler_bodies: &InlineHandlerBodies,
     output_path: &Path,
     opt_level: BloodOptLevel,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_program");
@@ -370,6 +373,7 @@ pub fn compile_mir_to_object_with_opt(
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
     codegen.set_inline_handler_bodies(inline_handler_bodies.clone());
+    codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
     // First pass: declare types and functions from HIR
     codegen.compile_crate_declarations(hir_crate)?;
@@ -449,6 +453,7 @@ pub fn compile_definition_to_object(
     all_mir_bodies: Option<&MirBodiesMap>,
     inline_handler_bodies: Option<&InlineHandlerBodies>,
     output_path: &Path,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module_name = format!("blood_def_{}", def_id.index());
@@ -456,6 +461,7 @@ pub fn compile_definition_to_object(
     let builder = context.create_builder();
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
+    codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
     // Set up escape analysis if provided
     if let Some(results) = escape_results {
@@ -547,12 +553,14 @@ pub fn compile_definition_to_object(
 pub fn compile_handler_registration_to_object(
     hir_crate: &hir::Crate,
     output_path: &Path,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_handler_registration");
     let builder = context.create_builder();
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
+    codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
     // Declare all types and functions needed for handler registration
     // This already calls declare_handler_operations internally
@@ -599,6 +607,7 @@ pub fn compile_definitions_to_objects(
     escape_analysis: &EscapeAnalysisMap,
     inline_handler_bodies: Option<&InlineHandlerBodies>,
     output_dir: &Path,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<Vec<(DefId, std::path::PathBuf)>, Vec<Diagnostic>> {
     let mut results = Vec::new();
     let mut errors = Vec::new();
@@ -608,7 +617,7 @@ pub fn compile_definitions_to_objects(
         let escape_results = escape_analysis.get(&def_id);
         let output_path = output_dir.join(format!("def_{}.o", def_id.index()));
 
-        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, Some(mir_bodies), inline_handler_bodies, &output_path) {
+        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, Some(mir_bodies), inline_handler_bodies, &output_path, builtin_def_ids) {
             Ok(()) => {
                 results.push((def_id, output_path));
             }

@@ -355,6 +355,8 @@ pub enum BuiltinMethodType {
     Box,
     /// Matches `&str` type.
     StrRef,
+    /// Matches `Result<T, E>` type.
+    Result,
 }
 
 /// Information about a builtin method for primitive/builtin types.
@@ -1212,6 +1214,13 @@ impl<'a> TypeContext<'a> {
             hir::Stmt::Expr(expr) => hir::Stmt::Expr(Self::zonk_expr_with_unifier(unifier, expr)),
             hir::Stmt::Item(def_id) => hir::Stmt::Item(def_id),
         }
+    }
+
+    /// Get builtin type DefIds for codegen.
+    ///
+    /// Returns (box_def_id, vec_def_id, option_def_id, result_def_id).
+    pub fn get_builtin_def_ids(&self) -> (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>) {
+        (self.box_def_id, self.vec_def_id, self.option_def_id, self.result_def_id)
     }
 
     /// Convert to HIR crate.

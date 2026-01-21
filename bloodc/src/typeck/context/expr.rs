@@ -1322,13 +1322,15 @@ impl<'a> TypeContext<'a> {
                 }
             }
             TypeKind::Adt { def_id, .. } => {
-                // Check if it's Option, Vec, or Box
+                // Check if it's Option, Vec, Box, or Result
                 if Some(*def_id) == self.option_def_id {
                     Some(BuiltinMethodType::Option)
                 } else if Some(*def_id) == self.vec_def_id {
                     Some(BuiltinMethodType::Vec)
                 } else if Some(*def_id) == self.box_def_id {
                     Some(BuiltinMethodType::Box)
+                } else if Some(*def_id) == self.result_def_id {
+                    Some(BuiltinMethodType::Result)
                 } else {
                     None
                 }
@@ -1361,6 +1363,34 @@ impl<'a> TypeContext<'a> {
                                             self.option_def_id.expect("BUG: option_def_id not set"),
                                             vec![ref_elem],
                                         )
+                                    } else if method_name == "as_ref" {
+                                        // Box<T>.as_ref() returns &T
+                                        Type::reference(element_ty, false)
+                                    } else if method_name == "as_mut" {
+                                        // Box<T>.as_mut() returns &mut T
+                                        Type::reference(element_ty, true)
+                                    } else {
+                                        sig.output.clone()
+                                    }
+                                } else {
+                                    sig.output.clone()
+                                }
+                            } else {
+                                sig.output.clone()
+                            }
+                        }
+                        BuiltinMethodType::Result => {
+                            // Result<T, E> has two type arguments
+                            if let TypeKind::Adt { args, .. } = ty.kind() {
+                                if args.len() >= 2 {
+                                    let ok_ty = args[0].clone();
+                                    let err_ty = args[1].clone();
+                                    // unwrap() and try_() return T
+                                    if method_name == "unwrap" || method_name == "try_" {
+                                        ok_ty
+                                    // unwrap_err() returns E
+                                    } else if method_name == "unwrap_err" {
+                                        err_ty
                                     } else {
                                         sig.output.clone()
                                     }
@@ -1400,6 +1430,7 @@ impl<'a> TypeContext<'a> {
             "Vec" => Some(BuiltinMethodType::Vec),
             "Option" => Some(BuiltinMethodType::Option),
             "Box" => Some(BuiltinMethodType::Box),
+            "Result" => Some(BuiltinMethodType::Result),
             _ => None,
         };
 
@@ -1414,7 +1445,7 @@ impl<'a> TypeContext<'a> {
                 if let Some(sig) = self.fn_sigs.get(&builtin_method.def_id).cloned() {
                     // For generic static methods like Vec::new(), Box::new(), instantiate with fresh vars
                     // The synthetic TyVarId(9000) placeholder needs to be replaced with fresh vars
-                    let needs_fresh_vars = matches!(&type_match, BuiltinMethodType::Vec | BuiltinMethodType::Option | BuiltinMethodType::Box);
+                    let needs_fresh_vars = matches!(&type_match, BuiltinMethodType::Vec | BuiltinMethodType::Option | BuiltinMethodType::Box | BuiltinMethodType::Result);
 
                     let fn_ty = if needs_fresh_vars {
                         // Create a fresh type variable to substitute for the placeholder

@@ -1008,6 +1008,90 @@ impl<'a> TypeContext<'a> {
             box_t.clone(),       // Returns Box<T>
             "box_new",
         );
+
+        // Box<T>::as_ref(self) -> &T
+        // Note: Box is special - it's already a pointer at runtime, so we take it by value
+        // The runtime function just returns the same pointer (identity)
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "as_ref",
+            false,
+            vec![box_t.clone()],  // Takes Box<T> by value (which is just a pointer)
+            Type::reference(t_ty.clone(), false),         // Returns &T
+            "box_as_ref",
+        );
+
+        // Box<T>::as_mut(self) -> &mut T
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "as_mut",
+            false,
+            vec![box_t.clone()],  // Takes Box<T> by value
+            Type::reference(t_ty.clone(), true),         // Returns &mut T
+            "box_as_mut",
+        );
+
+        // === Result<T, E> methods ===
+
+        let result_def_id = self.result_def_id
+            .expect("BUG: result_def_id not set before register_builtin_methods");
+
+        // Use fresh type variable for the error type E
+        let e_var_id = TyVarId(9001);  // synthetic placeholder
+        let e_ty = Type::new(TypeKind::Param(e_var_id));
+
+        // Result<T, E>
+        let result_te = Type::adt(result_def_id, vec![t_ty.clone(), e_ty.clone()]);
+
+        // Result<T, E>.is_ok(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "is_ok",
+            false,
+            vec![Type::reference(result_te.clone(), false)],
+            bool_ty.clone(),
+            "result_is_ok",
+        );
+
+        // Result<T, E>.is_err(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "is_err",
+            false,
+            vec![Type::reference(result_te.clone(), false)],
+            bool_ty.clone(),
+            "result_is_err",
+        );
+
+        // Result<T, E>.unwrap(self) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "unwrap",
+            false,
+            vec![result_te.clone()],
+            t_ty.clone(),
+            "result_unwrap",
+        );
+
+        // Result<T, E>.unwrap_err(self) -> E
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "unwrap_err",
+            false,
+            vec![result_te.clone()],
+            e_ty.clone(),
+            "result_unwrap_err",
+        );
+
+        // Result<T, E>.try_(self) -> T (for ? operator desugaring)
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "try_",
+            false,
+            vec![result_te],
+            t_ty.clone(),
+            "result_try",
+        );
     }
 
     /// Register a single builtin method.
@@ -1030,6 +1114,7 @@ impl<'a> TypeContext<'a> {
                 super::BuiltinMethodType::Option => "Option",
                 super::BuiltinMethodType::Vec => "Vec",
                 super::BuiltinMethodType::Box => "Box",
+                super::BuiltinMethodType::Result => "Result",
             },
             name
         );

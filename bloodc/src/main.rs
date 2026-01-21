@@ -895,6 +895,9 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // Get builtin type DefIds before consuming the context
+    let builtin_def_ids = ctx.get_builtin_def_ids();
+
     // Generate HIR
     let mut hir_crate = ctx.into_hir();
 
@@ -1218,7 +1221,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
 
         let output_obj = obj_dir.join("whole_module.o");
-        match codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, inline_handler_bodies, &output_obj) {
+        match codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, inline_handler_bodies, &output_obj, builtin_def_ids) {
             Ok(()) => {
                 object_files.push(output_obj);
                 if verbosity > 0 {
@@ -1296,6 +1299,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 Some(&mir_bodies),
                 Some(&inline_handler_bodies),
                 &obj_path,
+                builtin_def_ids,
             ) {
                 Ok(()) => {
                     compiled_count += 1;
@@ -1358,7 +1362,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             }
 
             // Cache miss - compile this handler
-            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(&mir_bodies), Some(&inline_handler_bodies), &obj_path) {
+            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(&mir_bodies), Some(&inline_handler_bodies), &obj_path, builtin_def_ids) {
                 Ok(()) => {
                     compiled_count += 1;
                     if verbosity > 2 {
@@ -1420,7 +1424,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     // Generate handler registration object (needed for effect handlers)
     // This creates the global constructor that registers all handlers with the runtime
     let handler_reg_path = obj_dir.join("handler_registration.o");
-    if let Err(errors) = codegen::compile_handler_registration_to_object(&hir_crate, &handler_reg_path) {
+    if let Err(errors) = codegen::compile_handler_registration_to_object(&hir_crate, &handler_reg_path, builtin_def_ids) {
         for error in &errors {
             emitter.emit(error);
         }
