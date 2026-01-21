@@ -2118,12 +2118,48 @@ impl<'a> TypeContext<'a> {
                 // String indexing returns char
                 Type::char()
             }
+            TypeKind::Adt { def_id, args } => {
+                // Vec<T> indexing returns T
+                if Some(*def_id) == self.vec_def_id {
+                    if !args.is_empty() {
+                        args[0].clone()
+                    } else {
+                        return Err(TypeError::new(
+                            TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
+                            span,
+                        ));
+                    }
+                } else {
+                    return Err(TypeError::new(
+                        TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
+                        span,
+                    ));
+                }
+            }
             TypeKind::Ref { inner, .. } => {
                 match inner.kind() {
                     TypeKind::Array { element, .. } => element.clone(),
                     TypeKind::Slice { element } => element.clone(),
                     TypeKind::Primitive(PrimitiveTy::Str) => Type::char(),
                     TypeKind::Primitive(PrimitiveTy::String) => Type::char(),
+                    TypeKind::Adt { def_id, args } => {
+                        // &Vec<T> indexing returns T
+                        if Some(*def_id) == self.vec_def_id {
+                            if !args.is_empty() {
+                                args[0].clone()
+                            } else {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
+                                    span,
+                                ));
+                            }
+                        } else {
+                            return Err(TypeError::new(
+                                TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
+                                span,
+                            ));
+                        }
+                    }
                     _ => {
                         return Err(TypeError::new(
                             TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
