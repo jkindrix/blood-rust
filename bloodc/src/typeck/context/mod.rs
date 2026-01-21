@@ -1385,7 +1385,8 @@ impl<'a> TypeContext<'a> {
                 }
                 // Associated types and consts are part of impl blocks, not standalone items
                 hir::DefKind::AssocType | hir::DefKind::AssocConst => continue,
-                // TypeAlias, Trait not yet implemented
+                // TypeAlias and Trait are handled during type checking but don't produce
+                // standalone HIR items (aliases are expanded, traits are used for bounds)
                 hir::DefKind::TypeAlias | hir::DefKind::Trait => continue,
                 // Closures are inline, not top-level items
                 hir::DefKind::Closure => continue,

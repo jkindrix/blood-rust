@@ -2342,7 +2342,8 @@ impl<'a> TypeContext<'a> {
     /// Collect a module declaration.
     ///
     /// For inline modules (`mod foo { ... }`), recursively collect all declarations.
-    /// For external modules (`mod foo;`), we would need to load the file - not yet implemented.
+    /// For external modules (`mod foo;`), loads the module from `name.blood` or `name/mod.blood`
+    /// relative to the current source file. For `mod std;`, also checks the stdlib_path.
     pub(crate) fn collect_module(&mut self, module: &ast::ModItemDecl) -> Result<(), TypeError> {
         let name = self.symbol_to_string(module.name.node);
         let def_id = self.resolver.define_item(
