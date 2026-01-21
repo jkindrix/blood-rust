@@ -2406,7 +2406,18 @@ impl<'a> TypeContext<'a> {
                     module.span,
                 ))?;
 
-                // Try to find the module file: first `name.blood`, then `name/mod.blood`
+                // Try to find the module file.
+                // For nested modules (when inside foo.blood), we check:
+                // 1. sibling dir: foo/name.blood
+                // 2. sibling dir mod: foo/name/mod.blood
+                // 3. parent dir: name.blood (for root-level modules)
+                // 4. parent dir mod: name/mod.blood
+                let sibling_dir = self.source_path.as_ref().and_then(|p| {
+                    p.file_stem().map(|stem| source_dir.join(stem))
+                });
+
+                let sibling_path = sibling_dir.as_ref().map(|d| d.join(format!("{}.blood", name)));
+                let sibling_alt = sibling_dir.as_ref().map(|d| d.join(&name).join("mod.blood"));
                 let file_path = source_dir.join(format!("{}.blood", name));
                 let alt_path = source_dir.join(&name).join("mod.blood");
 
@@ -2423,15 +2434,25 @@ impl<'a> TypeContext<'a> {
                     None
                 };
 
-                let mut searched_paths = vec![
-                    file_path.display().to_string(),
-                    alt_path.display().to_string(),
-                ];
+                let mut searched_paths = Vec::new();
+                if let Some(ref sp) = sibling_path {
+                    searched_paths.push(sp.display().to_string());
+                }
+                if let Some(ref sa) = sibling_alt {
+                    searched_paths.push(sa.display().to_string());
+                }
+                searched_paths.push(file_path.display().to_string());
+                searched_paths.push(alt_path.display().to_string());
                 if let Some(ref sp) = stdlib_file_path {
                     searched_paths.push(sp.display().to_string());
                 }
 
-                let module_path = if file_path.exists() {
+                // Search in order: sibling paths first (for nested modules), then parent paths
+                let module_path = if sibling_path.as_ref().map_or(false, |p| p.exists()) {
+                    sibling_path.unwrap()
+                } else if sibling_alt.as_ref().map_or(false, |p| p.exists()) {
+                    sibling_alt.unwrap()
+                } else if file_path.exists() {
                     file_path
                 } else if alt_path.exists() {
                     alt_path

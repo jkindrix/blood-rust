@@ -4162,3 +4162,65 @@ fn test_ffi_unsafe_block_codegen() {
         }
     }
 }
+
+// ============================================================
+// Module Resolution Tests
+// ============================================================
+
+use std::path::Path;
+use bloodc::typeck::TypeContext;
+
+/// Test helper to type-check a file with proper module resolution support.
+fn check_file_with_modules(file_path: &str) -> Result<bloodc::hir::Crate, Vec<bloodc::Diagnostic>> {
+    let source = fs::read_to_string(file_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", file_path, e));
+
+    let mut parser = Parser::new(&source);
+    let program = parser.parse_program()?;
+    let interner = parser.take_interner();
+
+    let mut ctx = TypeContext::new(&source, interner)
+        .with_source_path(file_path);
+
+    ctx.resolve_program(&program)?;
+    ctx.expand_derives();
+    ctx.check_all_bodies()?;
+
+    Ok(ctx.into_hir())
+}
+
+/// Test helper to assert a file type-checks successfully.
+fn assert_file_type_checks(file_path: &str) {
+    match check_file_with_modules(file_path) {
+        Ok(_) => (),
+        Err(errors) => {
+            panic!(
+                "Type checking {} failed:\n{}",
+                file_path,
+                errors
+                    .iter()
+                    .map(|e| format!("  - {}", e.message))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+}
+
+/// Test basic module resolution: structs, enums, type aliases, constants, functions.
+#[test]
+fn test_module_resolution_basic() {
+    assert_file_type_checks("tests/fixtures/modules/module_resolution.blood");
+}
+
+/// Test module resolution with generic types: generic structs, enums, type aliases, functions.
+#[test]
+fn test_module_resolution_generics() {
+    assert_file_type_checks("tests/fixtures/modules/generic_module_resolution.blood");
+}
+
+/// Test nested module resolution: outer::inner::Type pattern.
+#[test]
+fn test_module_resolution_nested() {
+    assert_file_type_checks("tests/fixtures/modules/nested_module_resolution.blood");
+}
