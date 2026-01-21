@@ -2364,6 +2364,14 @@ impl<'a> TypeContext<'a> {
                 // Track the starting DefId counter
                 let def_id_start = self.resolver.current_def_id_counter();
 
+                // Phase 1: Pre-register all type names so forward references work within the module
+                for decl in declarations {
+                    if let Err(e) = self.register_type_name(decl) {
+                        self.errors.push(e);
+                    }
+                }
+
+                // Phase 2: Collect all declarations (now that all type names are known)
                 for decl in declarations {
                     if let Err(e) = self.collect_declaration(decl) {
                         self.errors.push(e);
@@ -2552,6 +2560,15 @@ impl<'a> TypeContext<'a> {
                 // Track the starting DefId counter
                 let def_id_start = self.resolver.current_def_id_counter();
 
+                // Phase 1: Pre-register all type names so forward references work within the module
+                for decl in &module_ast.declarations {
+                    if let Err(e) = self.register_type_name(decl) {
+                        let e_with_source = e.with_source_file(module_path.clone(), module_source.clone());
+                        self.errors.push(e_with_source);
+                    }
+                }
+
+                // Phase 2: Collect all declarations (now that all type names are known)
                 for decl in &module_ast.declarations {
                     if let Err(e) = self.collect_declaration(decl) {
                         // Attach source file info to errors from external modules

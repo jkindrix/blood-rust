@@ -4271,3 +4271,17 @@ fn test_cross_file_error_reporting() {
         );
     }
 }
+
+/// Test forward references within the same file.
+/// Types can reference other types defined later in the same file.
+#[test]
+fn test_forward_references() {
+    assert_file_type_checks("tests/fixtures/modules/forward_refs.blood");
+}
+
+/// Test forward references within an imported module.
+/// Types in a module can reference other types defined later in that module.
+#[test]
+fn test_forward_references_in_module() {
+    assert_file_type_checks("tests/fixtures/modules/forward_refs_main.blood");
+}
