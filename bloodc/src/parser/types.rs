@@ -360,6 +360,14 @@ impl<'src> Parser<'src> {
 
             args.push(arg);
 
+            // Important: If pending_gt is set after parsing a type, it means we just
+            // processed a `>>` split from a nested generic. The comma (if any) belongs
+            // to the outer context (e.g., struct fields), not to our type args.
+            // So we should NOT consume it - just exit the loop.
+            if self.pending_gt.is_some() {
+                break;
+            }
+
             if !self.try_consume(TokenKind::Comma) {
                 break;
             }
