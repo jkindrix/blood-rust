@@ -62,9 +62,6 @@ examples/tuple_match
 examples/tuple_match_nobind
 examples/tuple_pass
 
-# Runtime build artifacts
-runtime/*.o
-
 # Incremental compilation cache
 *.blood_cache/
 *.blood_objs/
@@ -92,3 +89,7 @@ playground/
 # Task tracking (local work items)
 tasks/
 analysis/
+
+# Test fixture build artifacts
+bloodc/tests/fixtures/*_test
+bloodc/tests/fixtures/builtin_methods
