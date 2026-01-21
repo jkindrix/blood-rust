@@ -564,6 +564,22 @@ impl<'a> Resolver<'a> {
         names
     }
 
+    /// Get all bindings from the current scope (not parents).
+    ///
+    /// Returns a clone of the current scope's bindings. Used for extracting
+    /// definitions from a temporary scope before popping it (e.g., prelude imports).
+    pub fn get_current_scope_bindings(&self) -> HashMap<String, Binding> {
+        self.current_scope().bindings.clone()
+    }
+
+    /// Get all type bindings from the current scope (not parents).
+    ///
+    /// Returns a clone of the current scope's type bindings. Used for extracting
+    /// type definitions from a temporary scope before popping it.
+    pub fn get_current_scope_type_bindings(&self) -> HashMap<String, DefId> {
+        self.current_scope().type_bindings.clone()
+    }
+
     /// Collect all visible type names in the current scope chain.
     ///
     /// This is used for generating "did you mean?" suggestions for types.

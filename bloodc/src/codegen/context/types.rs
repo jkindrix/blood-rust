@@ -37,8 +37,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 self.context.struct_type(&[ptr_type.into(), len_type.into()], false).into()
             }
             TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-                let inner_type = self.lower_type(inner);
-                inner_type.ptr_type(AddressSpace::default()).into()
+                // For unsized types (str, slices), the reference IS the fat pointer
+                // (there's no extra indirection - &str = {ptr, len}, not ptr to {ptr, len})
+                match inner.kind() {
+                    TypeKind::Primitive(PrimitiveTy::Str) => {
+                        // &str is just the {ptr, len} fat pointer
+                        self.lower_primitive(&PrimitiveTy::Str)
+                    }
+                    TypeKind::Slice { .. } => {
+                        // &[T] is just the {ptr, len} fat pointer
+                        self.lower_type(inner)
+                    }
+                    _ => {
+                        // Regular references are pointers to the inner type
+                        let inner_type = self.lower_type(inner);
+                        inner_type.ptr_type(AddressSpace::default()).into()
+                    }
+                }
             }
             TypeKind::Adt { def_id, args } => {
                 // Look up struct or enum definition

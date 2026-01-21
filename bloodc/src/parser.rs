@@ -620,7 +620,9 @@ impl<'src> Parser<'src> {
         let start = self.current.span;
         let mut segments = Vec::new();
 
-        // First segment
+        // First segment must be an identifier
+        // Blood uses dot-separated paths: std.collections.vec
+        // NOT Rust's crate:: or super:: syntax
         if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
             self.advance();
             segments.push(self.spanned_symbol());

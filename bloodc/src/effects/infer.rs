@@ -344,8 +344,11 @@ impl EffectInferencer {
             }
 
             // Macro expansion expressions
-            ExprKind::MacroExpansion { args, .. } => {
+            ExprKind::MacroExpansion { args, named_args, .. } => {
                 for arg in args {
+                    self.infer_expr(arg, ctx);
+                }
+                for (_, arg) in named_args {
                     self.infer_expr(arg, ctx);
                 }
             }
@@ -366,6 +369,12 @@ impl EffectInferencer {
             }
             ExprKind::Dbg(inner) => {
                 self.infer_expr(inner, ctx);
+            }
+            ExprKind::SliceLen(inner) => {
+                self.infer_expr(inner, ctx);
+            }
+            ExprKind::ArrayToSlice { expr, .. } => {
+                self.infer_expr(expr, ctx);
             }
 
             // Leaf expressions - no effects

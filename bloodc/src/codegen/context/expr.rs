@@ -1105,32 +1105,135 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
             BasicValueEnum::PointerValue(ptr) => {
-                // Check if this is a pointer to an array (from &[T; N] or &[T])
-                // In that case we need two-index GEP: [0, idx] to first dereference
-                // the pointer to array, then index into the array elements
-                let is_array_ref = match base.ty.kind() {
+                // Check if this is a string reference - handle with str_char_at_index
+                let is_string = match base.ty.kind() {
                     TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-                        matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. })
+                        matches!(inner.kind(),
+                            TypeKind::Primitive(hir::PrimitiveTy::Str) |
+                            TypeKind::Primitive(hir::PrimitiveTy::String))
                     }
-                    TypeKind::Array { .. } | TypeKind::Slice { .. } => true,
                     _ => false,
                 };
 
-                let elem_ptr = unsafe {
-                    if is_array_ref {
-                        // Two-index GEP for array pointers: [0, idx]
-                        let zero = self.context.i64_type().const_zero();
-                        self.builder.build_in_bounds_gep(ptr, &[zero, idx], "arr.elem.ptr")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                if is_string {
+                    // Call str_char_at_index(ptr, idx) -> {i32, i32} (Option<char>)
+                    let func = self.module.get_function("str_char_at_index")
+                        .ok_or_else(|| vec![Diagnostic::error(
+                            "Runtime function 'str_char_at_index' not declared",
+                            base.span,
+                        )])?;
+
+                    // Convert index to i64 for the function call
+                    let idx_i64 = if idx.get_type().get_bit_width() == 64 {
+                        idx
                     } else {
-                        // Single-index GEP for element pointers
-                        self.builder.build_gep(ptr, &[idx], "ptr.idx")
+                        self.builder.build_int_z_extend(idx, self.context.i64_type(), "idx.zext")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
-                    }
+                    };
+
+                    // Call str_char_at_index(str_ptr, index)
+                    let result = self.builder
+                        .build_call(func, &[ptr.into(), idx_i64.into()], "char_at_result")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| vec![Diagnostic::error("str_char_at_index should return value", Span::dummy())])?;
+
+                    // Result is {i32 tag, i32 value} - extract the char value
+                    // If tag == 0 (None), we should panic, but for now just return the value
+                    // TODO: Add bounds checking / panic on None
+                    let result_struct = result.into_struct_value();
+                    let char_val = self.builder
+                        .build_extract_value(result_struct, 1, "char_val")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    Ok(Some(char_val))
+                } else {
+                    // Check if this is a pointer to an array (from &[T; N] or &[T])
+                    // In that case we need two-index GEP: [0, idx] to first dereference
+                    // the pointer to array, then index into the array elements
+                    let is_array_ref = match base.ty.kind() {
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. })
+                        }
+                        TypeKind::Array { .. } | TypeKind::Slice { .. } => true,
+                        _ => false,
+                    };
+
+                    let elem_ptr = unsafe {
+                        if is_array_ref {
+                            // Two-index GEP for array pointers: [0, idx]
+                            let zero = self.context.i64_type().const_zero();
+                            self.builder.build_in_bounds_gep(ptr, &[zero, idx], "arr.elem.ptr")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        } else {
+                            // Single-index GEP for element pointers
+                            self.builder.build_gep(ptr, &[idx], "ptr.idx")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        }
+                    };
+                    let elem = self.builder.build_load(elem_ptr, "elem")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    Ok(Some(elem))
+                }
+            }
+            BasicValueEnum::StructValue(struct_val) => {
+                // Check if this is a string struct (Str = {ptr, len} or String = {ptr, len, cap})
+                let is_string = match base.ty.kind() {
+                    TypeKind::Primitive(hir::PrimitiveTy::Str) => true,
+                    TypeKind::Primitive(hir::PrimitiveTy::String) => true,
+                    TypeKind::Ref { inner, .. } => matches!(
+                        inner.kind(),
+                        TypeKind::Primitive(hir::PrimitiveTy::Str) |
+                        TypeKind::Primitive(hir::PrimitiveTy::String)
+                    ),
+                    _ => false,
                 };
-                let elem = self.builder.build_load(elem_ptr, "elem")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
-                Ok(Some(elem))
+
+                if is_string {
+                    // Allocate the string struct on stack to get a pointer
+                    let alloca = self.builder
+                        .build_alloca(struct_val.get_type(), "str.tmp")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    self.builder.build_store(alloca, struct_val)
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Call str_char_at_index(ptr, idx) -> {i32, i32} (Option<char>)
+                    let func = self.module.get_function("str_char_at_index")
+                        .ok_or_else(|| vec![Diagnostic::error(
+                            "Runtime function 'str_char_at_index' not declared",
+                            base.span,
+                        )])?;
+
+                    // Convert index to i64 for the function call
+                    let idx_i64 = if idx.get_type().get_bit_width() == 64 {
+                        idx
+                    } else {
+                        self.builder.build_int_z_extend(idx, self.context.i64_type(), "idx.zext")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    };
+
+                    // Call str_char_at_index(str_ptr, index)
+                    let result = self.builder
+                        .build_call(func, &[alloca.into(), idx_i64.into()], "char_at_result")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| vec![Diagnostic::error("str_char_at_index should return value", Span::dummy())])?;
+
+                    // Result is {i32 tag, i32 value} - extract the char value
+                    let result_struct = result.into_struct_value();
+                    let char_val = self.builder
+                        .build_extract_value(result_struct, 1, "char_val")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    Ok(Some(char_val))
+                } else {
+                    Err(vec![Diagnostic::error(
+                        "Cannot index struct type (not a string)",
+                        base.span,
+                    )])
+                }
             }
             _ => {
                 Err(vec![Diagnostic::error(

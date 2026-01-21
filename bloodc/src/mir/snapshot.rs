@@ -1086,6 +1086,13 @@ impl LivenessAnalysis {
             Rvalue::ZeroInit(_) => {
                 // Zero-initialization doesn't use any locals
             }
+            Rvalue::StringIndex { base, index } => {
+                Self::collect_operand_uses(base, uses);
+                Self::collect_operand_uses(index, uses);
+            }
+            Rvalue::ArrayToSlice { array_ref, .. } => {
+                Self::collect_operand_uses(array_ref, uses);
+            }
         }
     }
 

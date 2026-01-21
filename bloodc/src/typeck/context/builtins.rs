@@ -12,11 +12,16 @@ impl<'a> TypeContext<'a> {
         let unit_ty = Type::unit();
         let bool_ty = Type::bool();
         let char_ty = Type::char();
-        let u8_ty = Type::u8();
-        let _u32_ty = Type::u32();
+        let i8_ty = Type::i8();
+        let i16_ty = Type::i16();
         let i32_ty = Type::i32();
         let i64_ty = Type::i64();
+        let i128_ty = Type::i128();
+        let u8_ty = Type::u8();
+        let u16_ty = Type::u16();
+        let u32_ty = Type::u32();
         let u64_ty = Type::u64();
+        let u128_ty = Type::u128();
         let _usize_ty = Type::usize();
         let f32_ty = Type::f32();
         let f64_ty = Type::f64();
@@ -192,8 +197,8 @@ impl<'a> TypeContext<'a> {
         // str_eq(&str, &str) -> bool - compare two strings for equality
         self.register_builtin_fn("str_eq", vec![ref_str_ty.clone(), ref_str_ty.clone()], bool_ty.clone());
 
-        // str_concat(&str, &str) -> String - concatenate two strings (returns newly allocated string)
-        self.register_builtin_fn_aliased("str_concat", "blood_str_concat", vec![ref_str_ty.clone(), ref_str_ty.clone()], Type::string());
+        // str_concat(&str, &str) -> &str - concatenate two strings (returns newly allocated BloodStr)
+        self.register_builtin_fn_aliased("str_concat", "blood_str_concat", vec![ref_str_ty.clone(), ref_str_ty.clone()], ref_str_ty.clone());
 
         // === Input Functions ===
 
@@ -204,27 +209,52 @@ impl<'a> TypeContext<'a> {
         self.register_builtin_fn("read_int", vec![], i32_ty.clone());
 
         // === Conversion Functions ===
+        // Note: These return &str (BloodStr = {ptr, len}) in the runtime,
+        // not owned String (which would be {ptr, len, capacity}).
 
-        // int_to_string(i32) -> String - convert integer to string
-        self.register_builtin_fn("int_to_string", vec![i32_ty.clone()], Type::string());
+        // Signed integer to string conversions
+        // i8_to_string(i8) -> &str - convert 8-bit integer to string
+        self.register_builtin_fn("i8_to_string", vec![i8_ty.clone()], ref_str_ty.clone());
 
-        // i64_to_string(i64) -> String - convert 64-bit integer to string
-        self.register_builtin_fn("i64_to_string", vec![i64_ty.clone()], Type::string());
+        // i16_to_string(i16) -> &str - convert 16-bit integer to string
+        self.register_builtin_fn("i16_to_string", vec![i16_ty.clone()], ref_str_ty.clone());
 
-        // u64_to_string(u64) -> String - convert unsigned 64-bit integer to string
-        self.register_builtin_fn("u64_to_string", vec![u64_ty.clone()], Type::string());
+        // int_to_string(i32) -> &str - convert integer to string
+        self.register_builtin_fn("int_to_string", vec![i32_ty.clone()], ref_str_ty.clone());
 
-        // bool_to_string(bool) -> String - convert boolean to string
-        self.register_builtin_fn("bool_to_string", vec![bool_ty.clone()], Type::string());
+        // i64_to_string(i64) -> &str - convert 64-bit integer to string
+        self.register_builtin_fn("i64_to_string", vec![i64_ty.clone()], ref_str_ty.clone());
 
-        // char_to_string(char) -> String - convert character to string
-        self.register_builtin_fn("char_to_string", vec![char_ty.clone()], Type::string());
+        // i128_to_string(i128) -> &str - convert 128-bit integer to string
+        self.register_builtin_fn("i128_to_string", vec![i128_ty.clone()], ref_str_ty.clone());
 
-        // f32_to_string(f32) -> String - convert f32 to string
-        self.register_builtin_fn("f32_to_string", vec![f32_ty.clone()], Type::string());
+        // Unsigned integer to string conversions
+        // u8_to_string(u8) -> &str - convert unsigned 8-bit integer to string
+        self.register_builtin_fn("u8_to_string", vec![u8_ty.clone()], ref_str_ty.clone());
 
-        // f64_to_string(f64) -> String - convert f64 to string
-        self.register_builtin_fn("f64_to_string", vec![f64_ty.clone()], Type::string());
+        // u16_to_string(u16) -> &str - convert unsigned 16-bit integer to string
+        self.register_builtin_fn("u16_to_string", vec![u16_ty.clone()], ref_str_ty.clone());
+
+        // u32_to_string(u32) -> &str - convert unsigned 32-bit integer to string
+        self.register_builtin_fn("u32_to_string", vec![u32_ty.clone()], ref_str_ty.clone());
+
+        // u64_to_string(u64) -> &str - convert unsigned 64-bit integer to string
+        self.register_builtin_fn("u64_to_string", vec![u64_ty.clone()], ref_str_ty.clone());
+
+        // u128_to_string(u128) -> &str - convert unsigned 128-bit integer to string
+        self.register_builtin_fn("u128_to_string", vec![u128_ty.clone()], ref_str_ty.clone());
+
+        // bool_to_string(bool) -> &str - convert boolean to string
+        self.register_builtin_fn("bool_to_string", vec![bool_ty.clone()], ref_str_ty.clone());
+
+        // char_to_string(char) -> &str - convert character to string
+        self.register_builtin_fn("char_to_string", vec![char_ty.clone()], ref_str_ty.clone());
+
+        // f32_to_string(f32) -> &str - convert f32 to string
+        self.register_builtin_fn("f32_to_string", vec![f32_ty.clone()], ref_str_ty.clone());
+
+        // f64_to_string(f64) -> &str - convert f64 to string
+        self.register_builtin_fn("f64_to_string", vec![f64_ty.clone()], ref_str_ty.clone());
 
         // i32_to_i64(i32) -> i64
         self.register_builtin_fn("i32_to_i64", vec![i32_ty.clone()], i64_ty.clone());
@@ -564,6 +594,92 @@ impl<'a> TypeContext<'a> {
             "str_len_usize",
         );
 
+        // str.char_at(&self, index: usize) -> Option<char>
+        let option_char = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![Type::char()],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "char_at",
+            false,
+            vec![Type::reference(Type::str(), false), usize_ty.clone()],
+            option_char.clone(),
+            "str_char_at",
+        );
+
+        // &str.char_at(&self, index: usize) -> Option<char>
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "char_at",
+            false,
+            vec![Type::reference(Type::str(), false), usize_ty.clone()],
+            option_char.clone(),
+            "str_char_at",
+        );
+
+        // str.char_at_index(&self, index: usize) -> Option<char>
+        // Character-based (not byte-based) indexing
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "char_at_index",
+            false,
+            vec![Type::reference(Type::str(), false), usize_ty.clone()],
+            option_char.clone(),
+            "str_char_at_index",
+        );
+
+        // &str.char_at_index(&self, index: usize) -> Option<char>
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "char_at_index",
+            false,
+            vec![Type::reference(Type::str(), false), usize_ty.clone()],
+            option_char.clone(),
+            "str_char_at_index",
+        );
+
+        // str.len_chars(&self) -> usize - count of UTF-8 characters (not bytes)
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "len_chars",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            usize_ty.clone(),
+            "str_len_chars",
+        );
+
+        // &str.len_chars(&self) -> usize - count of UTF-8 characters (not bytes)
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "len_chars",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            usize_ty.clone(),
+            "str_len_chars",
+        );
+
+        // str.as_bytes(&self) -> &[u8]
+        let byte_slice_ty = Type::reference(Type::slice(Type::u8()), false);
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "as_bytes",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            byte_slice_ty.clone(),
+            "str_as_bytes",
+        );
+
+        // &str.as_bytes(&self) -> &[u8]
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "as_bytes",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            byte_slice_ty.clone(),
+            "str_as_bytes",
+        );
+
         // === char methods ===
 
         // char.is_whitespace(self) -> bool
@@ -741,6 +857,26 @@ impl<'a> TypeContext<'a> {
             vec![Type::reference(string_ty.clone(), false), usize_ty.clone()],
             option_char,
             "string_char_at",
+        );
+
+        // String.len_chars(&self) -> usize - count of UTF-8 characters (not bytes)
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "len_chars",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            usize_ty.clone(),
+            "string_len_chars",
+        );
+
+        // String.as_bytes(&self) -> &[u8]
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "as_bytes",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            byte_slice_ty,  // reuse from str method above
+            "string_as_bytes",
         );
 
         // === Option methods ===

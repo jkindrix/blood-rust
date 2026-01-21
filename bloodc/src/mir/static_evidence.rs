@@ -327,7 +327,12 @@ fn contains_nested_handle(expr: &Expr) -> bool {
                 || message.as_ref().map_or(false, |m| contains_nested_handle(m))
         }
 
-        ExprKind::MacroExpansion { args, .. } => args.iter().any(contains_nested_handle),
+        ExprKind::MacroExpansion { args, named_args, .. } => {
+            args.iter().any(contains_nested_handle)
+                || named_args.iter().any(|(_, a)| contains_nested_handle(a))
+        }
+        ExprKind::SliceLen(inner) => contains_nested_handle(inner),
+        ExprKind::ArrayToSlice { expr, .. } => contains_nested_handle(expr),
 
         // Leaf expressions: no nested handles possible
         ExprKind::Literal(_)
@@ -784,14 +789,18 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
                 || message.as_ref().map_or(false, |m| contains_escaping_control_flow(m))
         }
 
-        ExprKind::MacroExpansion { args, .. } => {
+        ExprKind::MacroExpansion { args, named_args, .. } => {
             args.iter().any(contains_escaping_control_flow)
+                || named_args.iter().any(|(_, a)| contains_escaping_control_flow(a))
         }
 
         ExprKind::MethodFamily { .. } => {
             // Method family is a call site marker, not directly executable
             false
         }
+
+        ExprKind::SliceLen(inner) => contains_escaping_control_flow(inner),
+        ExprKind::ArrayToSlice { expr, .. } => contains_escaping_control_flow(expr),
 
         // Leaf expressions: no sub-expressions to check
         ExprKind::Literal(_)

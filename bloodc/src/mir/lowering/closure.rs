@@ -410,6 +410,45 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                     expr.span,
                 )])
             }
+
+            ExprKind::SliceLen(slice_expr) => {
+                // Lower slice/array length to Rvalue::Len
+                let slice_op = self.lower_expr(slice_expr)?;
+
+                // Get a place for the slice/array
+                let slice_place = match slice_op {
+                    Operand::Copy(place) | Operand::Move(place) => place,
+                    Operand::Constant(_) => {
+                        // For constants, store in temp first
+                        let temp = self.new_temp(slice_expr.ty.clone(), expr.span);
+                        self.push_assign(Place::local(temp), Rvalue::Use(slice_op));
+                        Place::local(temp)
+                    }
+                };
+
+                // Create Rvalue::Len for the place
+                let len_temp = self.new_temp(Type::u64(), expr.span);
+                self.push_assign(Place::local(len_temp), Rvalue::Len(slice_place));
+
+                Ok(Operand::Copy(Place::local(len_temp)))
+            }
+
+            ExprKind::ArrayToSlice { expr: array_expr, array_len } => {
+                // Lower array-to-slice coercion: &[T; N] -> &[T]
+                let array_ref_op = self.lower_expr(array_expr)?;
+
+                // Create the fat pointer (slice reference) using Rvalue::ArrayToSlice
+                let slice_temp = self.new_temp(expr.ty.clone(), expr.span);
+                self.push_assign(
+                    Place::local(slice_temp),
+                    Rvalue::ArrayToSlice {
+                        array_ref: array_ref_op,
+                        array_len: *array_len,
+                    },
+                );
+
+                Ok(Operand::Copy(Place::local(slice_temp)))
+            }
         }
     }
 

@@ -539,8 +539,9 @@ impl EffectLowering {
                 false
             }
             // Macro expansion expressions - check subexpressions
-            ExprKind::MacroExpansion { args, .. } => {
+            ExprKind::MacroExpansion { args, named_args, .. } => {
                 args.iter().any(|a| self.detect_row_poly_recursive(a))
+                    || named_args.iter().any(|(_, a)| self.detect_row_poly_recursive(a))
             }
             ExprKind::VecLiteral(exprs) => {
                 exprs.iter().any(|e| self.detect_row_poly_recursive(e))
@@ -553,6 +554,8 @@ impl EffectLowering {
                     || message.as_ref().is_some_and(|m| self.detect_row_poly_recursive(m))
             }
             ExprKind::Dbg(inner) => self.detect_row_poly_recursive(inner),
+            ExprKind::SliceLen(inner) => self.detect_row_poly_recursive(inner),
+            ExprKind::ArrayToSlice { expr, .. } => self.detect_row_poly_recursive(expr),
 
             // Leaf expressions are not polymorphic
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Def(_)
@@ -746,8 +749,11 @@ impl EffectLowering {
                 // Closures have their own effect analysis
             }
             // Macro expansion expressions - collect effects from subexpressions
-            ExprKind::MacroExpansion { args, .. } => {
+            ExprKind::MacroExpansion { args, named_args, .. } => {
                 for arg in args {
+                    self.collect_effects_recursive(arg, effects);
+                }
+                for (_, arg) in named_args {
                     self.collect_effects_recursive(arg, effects);
                 }
             }
@@ -768,6 +774,12 @@ impl EffectLowering {
             }
             ExprKind::Dbg(inner) => {
                 self.collect_effects_recursive(inner, effects);
+            }
+            ExprKind::SliceLen(inner) => {
+                self.collect_effects_recursive(inner, effects);
+            }
+            ExprKind::ArrayToSlice { expr, .. } => {
+                self.collect_effects_recursive(expr, effects);
             }
             // Leaf expressions don't contain effect operations
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Def(_)

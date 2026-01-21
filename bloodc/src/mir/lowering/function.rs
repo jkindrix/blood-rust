@@ -244,7 +244,9 @@ pub fn collect_local_refs(expr: &Expr, refs: &mut Vec<CaptureCandidate>, in_muta
         | ExprKind::VecLiteral(_)
         | ExprKind::VecRepeat { .. }
         | ExprKind::Assert { .. }
-        | ExprKind::Dbg(_) => {}
+        | ExprKind::Dbg(_)
+        | ExprKind::SliceLen(_)
+        | ExprKind::ArrayToSlice { .. } => {}
     }
 }
 
@@ -586,6 +588,45 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                     "dbg! macro should be expanded before MIR lowering".to_string(),
                     expr.span,
                 )])
+            }
+
+            ExprKind::SliceLen(slice_expr) => {
+                // Lower slice/array length to Rvalue::Len
+                let slice_op = self.lower_expr(slice_expr)?;
+
+                // Get a place for the slice/array
+                let slice_place = match slice_op {
+                    Operand::Copy(place) | Operand::Move(place) => place,
+                    Operand::Constant(_) => {
+                        // For constants, store in temp first
+                        let temp = self.new_temp(slice_expr.ty.clone(), expr.span);
+                        self.push_assign(Place::local(temp), Rvalue::Use(slice_op));
+                        Place::local(temp)
+                    }
+                };
+
+                // Create Rvalue::Len for the place
+                let len_temp = self.new_temp(Type::u64(), expr.span);
+                self.push_assign(Place::local(len_temp), Rvalue::Len(slice_place));
+
+                Ok(Operand::Copy(Place::local(len_temp)))
+            }
+
+            ExprKind::ArrayToSlice { expr: array_expr, array_len } => {
+                // Lower array-to-slice coercion: &[T; N] -> &[T]
+                let array_ref_op = self.lower_expr(array_expr)?;
+
+                // Create the fat pointer (slice reference) using Rvalue::ArrayToSlice
+                let slice_temp = self.new_temp(expr.ty.clone(), expr.span);
+                self.push_assign(
+                    Place::local(slice_temp),
+                    Rvalue::ArrayToSlice {
+                        array_ref: array_ref_op,
+                        array_len: *array_len,
+                    },
+                );
+
+                Ok(Operand::Copy(Place::local(slice_temp)))
             }
         }
     }
@@ -1918,25 +1959,68 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        let base_place = self.lower_place(base)?;
-        let index_op = self.lower_expr(index)?;
+        use crate::hir::{TypeKind, PrimitiveTy};
 
-        // Index needs to be a local
-        let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-            p.local
-        } else {
-            // Use the actual type of the index expression, not hardcoded u64
-            let temp = self.new_temp(index.ty.clone(), span);
-            self.push_assign(Place::local(temp), Rvalue::Use(index_op));
-            temp
+        // Check if this is string indexing (requires runtime call)
+        let is_string = match base.ty.kind() {
+            TypeKind::Primitive(PrimitiveTy::Str) => true,
+            TypeKind::Primitive(PrimitiveTy::String) => true,
+            TypeKind::Ref { inner, .. } => matches!(
+                inner.kind(),
+                TypeKind::Primitive(PrimitiveTy::Str) |
+                TypeKind::Primitive(PrimitiveTy::String)
+            ),
+            _ => false,
         };
 
-        let indexed_place = base_place.project(PlaceElem::Index(index_local));
+        if is_string {
+            // For strings, use the StringIndex Rvalue which will call str_char_at_index
+            let base_op = self.lower_expr(base)?;
+            let index_op = self.lower_expr(index)?;
 
-        let temp = self.new_temp(ty.clone(), span);
-        self.push_assign(Place::local(temp), Rvalue::Use(Operand::Copy(indexed_place)));
+            let temp = self.new_temp(ty.clone(), span);
+            self.push_assign(Place::local(temp), Rvalue::StringIndex {
+                base: base_op,
+                index: index_op,
+            });
 
-        Ok(Operand::Copy(Place::local(temp)))
+            Ok(Operand::Copy(Place::local(temp)))
+        } else {
+            // Standard array/slice indexing
+            let base_place = self.lower_place(base)?;
+            let index_op = self.lower_expr(index)?;
+
+            // Index needs to be a local
+            let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
+                p.local
+            } else {
+                // Use the actual type of the index expression, not hardcoded u64
+                let temp = self.new_temp(index.ty.clone(), span);
+                self.push_assign(Place::local(temp), Rvalue::Use(index_op));
+                temp
+            };
+
+            let indexed_place = base_place.project(PlaceElem::Index(index_local));
+
+            // Check if the result type is a reference - if so, compute address
+            if let TypeKind::Ref { inner: _, mutable } = ty.kind() {
+                // Result is a reference: compute address of indexed element
+                let temp = self.new_temp(ty.clone(), span);
+                self.push_assign(
+                    Place::local(temp),
+                    Rvalue::Ref {
+                        place: indexed_place,
+                        mutable: *mutable,
+                    },
+                );
+                Ok(Operand::Copy(Place::local(temp)))
+            } else {
+                // Result is the element value: copy from indexed place
+                let temp = self.new_temp(ty.clone(), span);
+                self.push_assign(Place::local(temp), Rvalue::Use(Operand::Copy(indexed_place)));
+                Ok(Operand::Copy(Place::local(temp)))
+            }
+        }
     }
 
     /// Lower a borrow expression.

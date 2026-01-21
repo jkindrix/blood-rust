@@ -514,27 +514,12 @@ impl Resolver {
             return Ok(id);
         }
 
-        // No version found - for now, create a placeholder
-        // In a real implementation, this would query the registry
-        let placeholder_version = Version::new(0, 0, 0);
-        let id = PackageId::new(name.to_string(), placeholder_version);
-
-        if self.resolution.get(&id).is_none() {
-            let resolved = ResolvedPackage {
-                id: id.clone(),
-                source: ResolvedSource::Registry {
-                    url: PackageSource::default_registry(),
-                    checksum: None,
-                },
-                features: req.features.clone(),
-            };
-
-            self.resolution.packages.push(resolved);
-            self.resolution.to_fetch.push(id.clone());
-        }
-
-        self.add_edge(parent, &id);
-        Ok(id)
+        // No version found - return an error
+        // The package is not in the lockfile and not in registered available versions
+        Err(ResolveError::NoMatchingVersion {
+            package: name.to_string(),
+            requirement: version_req.to_string(),
+        })
     }
 
     fn add_edge(&mut self, from: &PackageId, to: &PackageId) {

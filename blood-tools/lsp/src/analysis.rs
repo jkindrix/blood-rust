@@ -758,8 +758,11 @@ impl SemanticAnalyzer {
             // Macro call expressions - collect symbols from arguments
             ExprKind::MacroCall { kind, .. } => {
                 match kind {
-                    ast::MacroCallKind::Format { args, .. } => {
+                    ast::MacroCallKind::Format { args, named_args, .. } => {
                         for arg in args {
+                            self.collect_expr_symbols(arg, source, interner, symbols, symbol_at_offset);
+                        }
+                        for (_, arg) in named_args {
                             self.collect_expr_symbols(arg, source, interner, symbols, symbol_at_offset);
                         }
                     }

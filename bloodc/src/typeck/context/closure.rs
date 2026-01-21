@@ -441,8 +441,11 @@ impl<'a> TypeContext<'a> {
                 }
             }
             // Macro expansion nodes - collect from subexpressions
-            hir::ExprKind::MacroExpansion { args, .. } => {
+            hir::ExprKind::MacroExpansion { args, named_args, .. } => {
                 for arg in args {
+                    self.collect_captures(arg, is_move, captures, seen);
+                }
+                for (_, arg) in named_args {
                     self.collect_captures(arg, is_move, captures, seen);
                 }
             }
@@ -463,6 +466,12 @@ impl<'a> TypeContext<'a> {
             }
             hir::ExprKind::Dbg(inner) => {
                 self.collect_captures(inner, is_move, captures, seen);
+            }
+            hir::ExprKind::SliceLen(inner) => {
+                self.collect_captures(inner, is_move, captures, seen);
+            }
+            hir::ExprKind::ArrayToSlice { expr, .. } => {
+                self.collect_captures(expr, is_move, captures, seen);
             }
             // These don't contain local references directly
             hir::ExprKind::Literal(_)

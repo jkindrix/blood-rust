@@ -403,6 +403,13 @@ fn substitute_rvalue_types(rvalue: &mut crate::mir::types::Rvalue, subst: &HashM
         Rvalue::ZeroInit(ty) => {
             *ty = substitute_type(ty, subst);
         }
+        Rvalue::StringIndex { base, index } => {
+            substitute_operand_types(base, subst);
+            substitute_operand_types(index, subst);
+        }
+        Rvalue::ArrayToSlice { array_ref, .. } => {
+            substitute_operand_types(array_ref, subst);
+        }
     }
 }
 
@@ -2405,6 +2412,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let str_len_type = i64_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("str_len", str_len_type, None);
 
+        // str_len_usize({*i8, i64}*) -> i64 - get string length as usize (takes pointer for method call semantics)
+        let str_ptr_type = str_slice_type.ptr_type(inkwell::AddressSpace::default());
+        let str_len_usize_type = i64_type.fn_type(&[str_ptr_type.into()], false);
+        self.module.add_function("str_len_usize", str_len_usize_type, None);
+
         // str_eq({*i8, i64}, {*i8, i64}) -> i1 - compare strings
         let bool_type = self.context.bool_type();
         let str_eq_type = bool_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
@@ -2413,6 +2425,37 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // blood_str_concat({*i8, i64}, {*i8, i64}) -> {*i8, i64} - concatenate strings
         let str_concat_type = str_slice_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
         self.module.add_function("blood_str_concat", str_concat_type, None);
+
+        // Option<char> type: { i32 tag, i32 value }
+        // tag=0 is None, tag=1 is Some(char)
+        let option_char_type = self.context.struct_type(&[i32_type.into(), i32_type.into()], false);
+
+        // str_char_at({*i8, i64}*, i64) -> {i32, i32} - get char at byte index (takes pointer for method call semantics)
+        let str_char_at_type = option_char_type.fn_type(&[str_ptr_type.into(), i64_type.into()], false);
+        self.module.add_function("str_char_at", str_char_at_type, None);
+
+        // str_char_at_index({*i8, i64}*, i64) -> {i32, i32} - get char at character index
+        self.module.add_function("str_char_at_index", str_char_at_type, None);
+
+        // string_char_at({*i8, i64, i64}*, i64) -> {i32, i32} - get char at byte index from String
+        // String layout starts the same as BloodStr, so we can use str_ptr_type for the pointer
+        self.module.add_function("string_char_at", str_char_at_type, None);
+
+        // str_as_bytes({*i8, i64}*) -> {*i8, i64} - convert str to byte slice (essentially identity)
+        let str_as_bytes_type = str_slice_type.fn_type(&[str_ptr_type.into()], false);
+        self.module.add_function("str_as_bytes", str_as_bytes_type, None);
+
+        // string_as_bytes({*i8, i64, i64}*) -> {*i8, i64} - convert String to byte slice
+        // String layout starts the same as BloodStr, so we can use str_ptr_type for the pointer
+        self.module.add_function("string_as_bytes", str_as_bytes_type, None);
+
+        // str_len_chars({*i8, i64}*) -> i64 - count UTF-8 characters (not bytes)
+        let str_len_chars_type = i64_type.fn_type(&[str_ptr_type.into()], false);
+        self.module.add_function("str_len_chars", str_len_chars_type, None);
+
+        // string_len_chars({*i8, i64, i64}*) -> i64 - count UTF-8 characters (not bytes)
+        // String layout starts the same as BloodStr, so we can use str_ptr_type for the pointer
+        self.module.add_function("string_len_chars", str_len_chars_type, None);
 
         // int_to_string(i32) -> {*i8, i64} - convert integer to string
         let int_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false);
@@ -2443,6 +2486,37 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let f64_type_def = self.context.f64_type();
         let f64_to_string_type = str_slice_type.fn_type(&[f64_type_def.into()], false);
         self.module.add_function("f64_to_string", f64_to_string_type, None);
+
+        // i8_to_string(i8) -> {*i8, i64} - convert i8 to string
+        let i8_type = self.context.i8_type();
+        let i8_to_string_type = str_slice_type.fn_type(&[i8_type.into()], false);
+        self.module.add_function("i8_to_string", i8_to_string_type, None);
+
+        // i16_to_string(i16) -> {*i8, i64} - convert i16 to string
+        let i16_type = self.context.i16_type();
+        let i16_to_string_type = str_slice_type.fn_type(&[i16_type.into()], false);
+        self.module.add_function("i16_to_string", i16_to_string_type, None);
+
+        // i128_to_string(i128) -> {*i8, i64} - convert i128 to string
+        let i128_type = self.context.i128_type();
+        let i128_to_string_type = str_slice_type.fn_type(&[i128_type.into()], false);
+        self.module.add_function("i128_to_string", i128_to_string_type, None);
+
+        // u8_to_string(u8) -> {*i8, i64} - convert u8 to string
+        let u8_to_string_type = str_slice_type.fn_type(&[i8_type.into()], false); // u8 has same LLVM type as i8
+        self.module.add_function("u8_to_string", u8_to_string_type, None);
+
+        // u16_to_string(u16) -> {*i8, i64} - convert u16 to string
+        let u16_to_string_type = str_slice_type.fn_type(&[i16_type.into()], false); // u16 has same LLVM type as i16
+        self.module.add_function("u16_to_string", u16_to_string_type, None);
+
+        // u32_to_string(u32) -> {*i8, i64} - convert u32 to string
+        let u32_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false); // u32 has same LLVM type as i32
+        self.module.add_function("u32_to_string", u32_to_string_type, None);
+
+        // u128_to_string(u128) -> {*i8, i64} - convert u128 to string
+        let u128_to_string_type = str_slice_type.fn_type(&[i128_type.into()], false); // u128 has same LLVM type as i128
+        self.module.add_function("u128_to_string", u128_to_string_type, None);
 
         // read_line() -> {*i8, i64} - read a line from stdin
         let read_line_type = str_slice_type.fn_type(&[], false);

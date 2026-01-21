@@ -285,6 +285,13 @@ pub trait Visitor: Sized {
             Rvalue::ZeroInit(_) => {
                 // Zero-initialization has no operands to visit
             }
+            Rvalue::StringIndex { base, index } => {
+                self.visit_operand(base, location);
+                self.visit_operand(index, location);
+            }
+            Rvalue::ArrayToSlice { array_ref, .. } => {
+                self.visit_operand(array_ref, location);
+            }
         }
     }
 

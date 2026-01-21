@@ -1020,6 +1020,7 @@ impl<'src> Parser<'src> {
                     span: self.previous.span,
                 },
                 args: Vec::new(),
+                named_args: Vec::new(),
             };
         }
 
@@ -1040,14 +1041,72 @@ impl<'src> Parser<'src> {
             }
         };
 
-        // Parse remaining arguments
+        // Parse remaining arguments (positional and named)
+        // Named arguments have the form: name = expr
+        // Once a named argument is seen, all remaining arguments must be named
         let mut args = Vec::new();
+        let mut named_args = Vec::new();
+        let mut seen_named = false;
+
         while self.check(TokenKind::Comma) {
             self.advance(); // consume comma
             if self.check(close_kind) {
                 break; // trailing comma
             }
-            args.push(self.parse_expr());
+
+            // Check for named argument: ident = expr
+            if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
+                // Look ahead to see if this is `name = expr`
+                let name_span = self.current.span;
+                self.advance(); // consume ident
+                let name_symbol = self.spanned_symbol();
+                let name_str = self.interner.resolve(name_symbol.node).unwrap_or("").to_string();
+
+                if self.check(TokenKind::Eq) {
+                    // This is a named argument
+                    self.advance(); // consume =
+                    let expr = self.parse_expr();
+                    named_args.push((name_str, expr));
+                    seen_named = true;
+                } else {
+                    // Not a named argument - it's an expression starting with an identifier
+                    // Need to parse as expression starting from the identifier we consumed
+                    if seen_named {
+                        self.error_at(
+                            name_span,
+                            "positional arguments cannot follow named arguments",
+                            crate::diagnostics::ErrorCode::UnexpectedToken, // Use existing error code
+                        );
+                    }
+                    // The identifier we consumed is the start of a path/variable reference
+                    // Create a single-segment path and continue parsing
+                    let path = ExprPath {
+                        segments: vec![ExprPathSegment {
+                            name: name_symbol,
+                            args: None,
+                        }],
+                        span: name_span,
+                    };
+                    let expr = Expr {
+                        kind: ExprKind::Path(path),
+                        span: name_span,
+                    };
+                    // Continue parsing postfix operators (method calls, indexing, etc.)
+                    // and binary operators
+                    let expr = self.parse_postfix_continuation(expr);
+                    let expr = self.parse_expr_prec_with(expr, Precedence::None);
+                    args.push(expr);
+                }
+            } else {
+                // Not starting with an identifier - must be a positional argument
+                if seen_named {
+                    self.error_at_current(
+                        "positional arguments cannot follow named arguments",
+                        crate::diagnostics::ErrorCode::UnexpectedToken, // Use existing error code
+                    );
+                }
+                args.push(self.parse_expr());
+            }
         }
 
         // Consume closing delimiter
@@ -1060,7 +1119,7 @@ impl<'src> Parser<'src> {
             self.advance();
         }
 
-        MacroCallKind::Format { format_str, args }
+        MacroCallKind::Format { format_str, args, named_args }
     }
 
     /// Parse vec! macro arguments: `[1, 2, 3]` or `[0; 10]`

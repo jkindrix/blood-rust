@@ -365,6 +365,8 @@ pub enum ExprKind {
         macro_name: String,
         format_str: String,
         args: Vec<Expr>,
+        /// Named arguments: (name, expr) pairs
+        named_args: Vec<(String, Expr)>,
     },
 
     /// Vec literal: `vec![1, 2, 3]`
@@ -384,6 +386,24 @@ pub enum ExprKind {
 
     /// Debug expression: `dbg!(expr)`
     Dbg(Box<Expr>),
+
+    /// Slice/array length: `slice.len()`
+    ///
+    /// This is a compiler intrinsic that extracts the length from a slice or array.
+    /// For arrays, this is the compile-time known size.
+    /// For slices, this extracts the length from the fat pointer.
+    SliceLen(Box<Expr>),
+
+    /// Array-to-slice coercion: `&[T; N]` -> `&[T]`
+    ///
+    /// This coercion creates a fat pointer (slice reference) from an array reference.
+    /// The fat pointer contains: (pointer to array data, array length).
+    ArrayToSlice {
+        /// The array reference expression (type: &[T; N])
+        expr: Box<Expr>,
+        /// The compile-time known array length
+        array_len: u64,
+    },
 
     /// Error placeholder (for error recovery).
     Error,

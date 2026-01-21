@@ -719,6 +719,23 @@ pub enum Rvalue {
     /// Zero-initialize a value of the given type.
     /// Used for `default` expressions and uninitialized struct fields.
     ZeroInit(Type),
+
+    /// String indexing operation.
+    /// Returns the character at the given index (by character, not byte index).
+    /// Calls str_char_at_index runtime function.
+    StringIndex {
+        base: Operand,
+        index: Operand,
+    },
+
+    /// Array-to-slice coercion: &[T; N] -> &[T]
+    /// Creates a fat pointer (slice reference) from an array reference.
+    ArrayToSlice {
+        /// The array reference (type: &[T; N])
+        array_ref: Operand,
+        /// The compile-time known array length
+        array_len: u64,
+    },
 }
 
 /// Binary operations.

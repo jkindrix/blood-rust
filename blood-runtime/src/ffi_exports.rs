@@ -151,6 +151,19 @@ pub extern "C" fn str_len(s: BloodStr) -> i64 {
     s.len as i64
 }
 
+/// Get the length of a string in bytes, returning usize.
+/// Takes a pointer to the string struct (for method call semantics).
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn str_len_usize(s: *const BloodStr) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    (*s).len as usize
+}
+
 /// Compare two strings for equality.
 ///
 /// # Safety
@@ -205,6 +218,157 @@ pub unsafe extern "C" fn blood_str_concat(a: BloodStr, b: BloodStr) -> BloodStr 
         ptr: ptr as *const u8,
         len: total_len as u64,
     }
+}
+
+/// Representation of Option<char> for FFI.
+/// tag: 0 = None, 1 = Some
+/// value: the char as u32 (valid only if tag == 1)
+#[repr(C)]
+pub struct BloodOptionChar {
+    pub tag: i32,
+    pub value: i32,
+}
+
+/// Get character at byte index from a string slice.
+///
+/// Returns Option<char> as { tag: i32, value: i32 }.
+/// tag=0 means None (index out of bounds or invalid UTF-8),
+/// tag=1 means Some(char) with the character as value.
+///
+/// Note: This operates on byte indices, not character indices.
+/// For UTF-8 strings, use char_at_char_index for character-based indexing.
+///
+/// # Safety
+/// The pointer must be valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn str_char_at(s: *const BloodStr, index: u64) -> BloodOptionChar {
+    if s.is_null() {
+        return BloodOptionChar { tag: 0, value: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() || index >= s.len {
+        return BloodOptionChar { tag: 0, value: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    if let Ok(str_val) = std::str::from_utf8(slice) {
+        // Get the character at the byte index
+        if let Some(ch) = str_val.get(index as usize..).and_then(|s| s.chars().next()) {
+            return BloodOptionChar { tag: 1, value: ch as i32 };
+        }
+    }
+    BloodOptionChar { tag: 0, value: 0 }
+}
+
+/// Get character at character (not byte) index from a string slice.
+///
+/// Returns Option<char> as { tag: i32, value: i32 }.
+/// This is slower than str_char_at because it iterates through characters.
+///
+/// # Safety
+/// The pointer must be valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn str_char_at_index(s: *const BloodStr, char_index: u64) -> BloodOptionChar {
+    if s.is_null() {
+        return BloodOptionChar { tag: 0, value: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() {
+        return BloodOptionChar { tag: 0, value: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    if let Ok(str_val) = std::str::from_utf8(slice) {
+        if let Some(ch) = str_val.chars().nth(char_index as usize) {
+            return BloodOptionChar { tag: 1, value: ch as i32 };
+        }
+    }
+    BloodOptionChar { tag: 0, value: 0 }
+}
+
+/// Get character at byte index from a String (heap-allocated).
+///
+/// String layout: { ptr: *u8, len: u64, capacity: u64 }
+/// We only use ptr and len for this operation.
+///
+/// # Safety
+/// The pointer must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn string_char_at(s: *const BloodStr, index: u64) -> BloodOptionChar {
+    // String has same ptr/len layout at the beginning as BloodStr
+    str_char_at(s, index)
+}
+
+/// Convert a str to a byte slice.
+///
+/// Since str is already stored as {ptr, len} which is the same as &[u8],
+/// this is essentially an identity operation. We return the same fat pointer.
+///
+/// Returns: {ptr: *u8, len: i64} - a byte slice fat pointer
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn str_as_bytes(s: *const BloodStr) -> BloodStr {
+    if s.is_null() {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+    // Return the same {ptr, len} - str bytes ARE the byte slice
+    BloodStr { ptr: (*s).ptr, len: (*s).len }
+}
+
+/// Convert a String to a byte slice.
+///
+/// String layout: { ptr: *u8, len: u64, capacity: u64 }
+/// We only use ptr and len to create the slice.
+///
+/// Returns: {ptr: *u8, len: i64} - a byte slice fat pointer
+///
+/// # Safety
+/// The pointer must point to a valid BloodString.
+#[no_mangle]
+pub unsafe extern "C" fn string_as_bytes(s: *const BloodStr) -> BloodStr {
+    // String has same ptr/len layout at the beginning as BloodStr
+    str_as_bytes(s)
+}
+
+/// Count the number of UTF-8 characters in a string (not bytes).
+///
+/// Returns: i64 - the character count
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr containing valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn str_len_chars(s: *const BloodStr) -> i64 {
+    if s.is_null() {
+        return 0;
+    }
+    let s = &*s;
+    if s.ptr.is_null() || s.len == 0 {
+        return 0;
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    if let Ok(str_val) = std::str::from_utf8(slice) {
+        str_val.chars().count() as i64
+    } else {
+        0
+    }
+}
+
+/// Count the number of UTF-8 characters in a String (not bytes).
+///
+/// String layout: { ptr: *u8, len: u64, capacity: u64 }
+/// We only use ptr and len.
+///
+/// Returns: i64 - the character count
+///
+/// # Safety
+/// The pointer must point to a valid BloodString containing valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn string_len_chars(s: *const BloodStr) -> i64 {
+    // String has same ptr/len layout at the beginning as BloodStr
+    str_len_chars(s)
 }
 
 // ============================================================================
@@ -368,6 +532,69 @@ pub extern "C" fn f32_to_string(n: f32) -> BloodStr {
 /// Returns a newly allocated BloodStr containing the string representation.
 #[no_mangle]
 pub extern "C" fn f64_to_string(n: f64) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert an i8 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn i8_to_string(n: i8) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert an i16 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn i16_to_string(n: i16) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert an i128 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn i128_to_string(n: i128) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert a u8 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn u8_to_string(n: u8) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert a u16 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn u16_to_string(n: u16) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert a u32 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn u32_to_string(n: u32) -> BloodStr {
+    let s = n.to_string();
+    string_to_blood_str(s)
+}
+
+/// Convert a u128 to a string.
+///
+/// Returns a newly allocated BloodStr containing the string representation.
+#[no_mangle]
+pub extern "C" fn u128_to_string(n: u128) -> BloodStr {
     let s = n.to_string();
     string_to_blood_str(s)
 }

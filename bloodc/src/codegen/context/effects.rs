@@ -220,6 +220,12 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
         }
         Dbg(inner) => check_expr_tail_resumptive(inner, false),
 
+        // SliceLen - check inner expression
+        SliceLen(inner) => check_expr_tail_resumptive(inner, false),
+
+        // ArrayToSlice - check inner expression
+        ArrayToSlice { expr, .. } => check_expr_tail_resumptive(expr, false),
+
         // Leaf nodes - no resume inside
         Literal(_) | Local(_) | Def(_) | Continue { .. } | Error
         | MethodFamily { .. } | Default => true,

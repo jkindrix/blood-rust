@@ -18,6 +18,8 @@ use super::super::resolve::{Binding, ScopeKind};
 impl<'a> TypeContext<'a> {
     /// Check an expression against an expected type.
     pub(crate) fn check_expr(&mut self, expr: &ast::Expr, expected: &Type) -> Result<hir::Expr, TypeError> {
+        use crate::hir::TypeKind;
+
         // Special case for literals: use expected type to guide numeric literal inference
         if let ast::ExprKind::Literal(lit) = &expr.kind {
             return self.check_literal(lit, expected, expr.span);
@@ -42,6 +44,34 @@ impl<'a> TypeContext<'a> {
 
         // Unify expected type with inferred - order matters for error messages
         self.unifier.unify(expected, &inferred.ty, expr.span)?;
+
+        // Check if we need to insert an array-to-slice coercion.
+        // This happens when expected is &[T] and inferred is &[T; N].
+        let expected_resolved = self.unifier.resolve(expected);
+        let inferred_resolved = self.unifier.resolve(&inferred.ty);
+
+        if let (
+            TypeKind::Ref { inner: expected_inner, mutable: m1 },
+            TypeKind::Ref { inner: inferred_inner, mutable: m2 },
+        ) = (expected_resolved.kind(), inferred_resolved.kind())
+        {
+            if m1 == m2 {
+                if let (TypeKind::Slice { .. }, TypeKind::Array { size, .. }) =
+                    (expected_inner.kind(), inferred_inner.kind())
+                {
+                    // Need to insert array-to-slice coercion
+                    let coerced_ty = expected_resolved.clone();
+                    return Ok(hir::Expr::new(
+                        hir::ExprKind::ArrayToSlice {
+                            expr: Box::new(inferred),
+                            array_len: *size,
+                        },
+                        coerced_ty,
+                        expr.span,
+                    ));
+                }
+            }
+        }
 
         Ok(inferred)
     }
@@ -460,7 +490,7 @@ impl<'a> TypeContext<'a> {
             }
 
             for (idx, (pattern, param_ty)) in handler.params.iter().zip(param_types.iter()).enumerate() {
-                // For now, only support simple identifier patterns
+                // Support identifier, wildcard, tuple, and parenthesized patterns
                 match &pattern.kind {
                     ast::PatternKind::Ident { name, .. } => {
                         let local_name = self.symbol_to_string(name.node);
@@ -495,11 +525,110 @@ impl<'a> TypeContext<'a> {
                         param_locals.push(local_id);
                         param_type_vec.push(param_ty.clone());
                     }
+                    ast::PatternKind::Tuple { fields, .. } => {
+                        // Tuple destructuring pattern in handler parameter
+                        let elem_types = match param_ty.kind() {
+                            hir::TypeKind::Tuple(elems) => elems.clone(),
+                            _ => {
+                                self.resolver.pop_scope();
+                                return Err(TypeError::new(
+                                    TypeErrorKind::NotATuple { ty: param_ty.clone() },
+                                    pattern.span,
+                                ));
+                            }
+                        };
+
+                        if fields.len() != elem_types.len() {
+                            self.resolver.pop_scope();
+                            return Err(TypeError::new(
+                                TypeErrorKind::WrongArity {
+                                    expected: elem_types.len(),
+                                    found: fields.len(),
+                                },
+                                pattern.span,
+                            ));
+                        }
+
+                        // Define each element of the tuple pattern
+                        for (field_pat, elem_ty) in fields.iter().zip(elem_types.iter()) {
+                            self.define_pattern(field_pat, elem_ty.clone())?;
+                        }
+
+                        // Create a hidden tuple local for the parameter
+                        let hidden_name = format!("__handler_param_{}_{}", idx, pattern.span.start);
+                        let tuple_local_id = self.resolver.next_local_id();
+                        self.locals.push(hir::Local {
+                            id: tuple_local_id,
+                            name: Some(hidden_name),
+                            ty: param_ty.clone(),
+                            mutable: false,
+                            span: pattern.span,
+                        });
+
+                        // Record tuple destructuring for MIR lowering
+                        let element_locals: Vec<_> = (0..fields.len())
+                            .map(|i| hir::LocalId::new(tuple_local_id.index - fields.len() as u32 + i as u32))
+                            .collect();
+                        self.tuple_destructures.insert(tuple_local_id, element_locals);
+
+                        param_locals.push(tuple_local_id);
+                        param_type_vec.push(param_ty.clone());
+                    }
+                    ast::PatternKind::Paren(inner) => {
+                        // Unwrap parenthesized pattern and process the inner pattern
+                        // We need to handle this recursively, but since we're in a loop
+                        // processing individual params, we handle paren specially here
+                        match &inner.kind {
+                            ast::PatternKind::Ident { name, .. } => {
+                                let local_name = self.symbol_to_string(name.node);
+                                let local_id = self.resolver.next_local_id();
+                                self.locals.push(hir::Local {
+                                    id: local_id,
+                                    name: Some(local_name.clone()),
+                                    ty: param_ty.clone(),
+                                    mutable: false,
+                                    span: inner.span,
+                                });
+                                self.resolver.current_scope_mut()
+                                    .bindings
+                                    .insert(local_name.clone(), Binding::Local {
+                                        local_id,
+                                        ty: param_ty.clone(),
+                                        mutable: false,
+                                        span: inner.span,
+                                    });
+                                param_locals.push(local_id);
+                                param_type_vec.push(param_ty.clone());
+                            }
+                            ast::PatternKind::Wildcard => {
+                                let local_id = self.resolver.next_local_id();
+                                self.locals.push(hir::Local {
+                                    id: local_id,
+                                    name: Some(format!("_param_{}", idx)),
+                                    ty: param_ty.clone(),
+                                    mutable: false,
+                                    span: inner.span,
+                                });
+                                param_locals.push(local_id);
+                                param_type_vec.push(param_ty.clone());
+                            }
+                            _ => {
+                                // For other patterns inside parens, use define_pattern
+                                let local_id = self.define_pattern(inner, param_ty.clone())?;
+                                param_locals.push(local_id);
+                                param_type_vec.push(param_ty.clone());
+                            }
+                        }
+                    }
                     _ => {
                         self.resolver.pop_scope();
                         return Err(TypeError::new(
                             TypeErrorKind::UnsupportedFeature {
-                                feature: "Complex patterns in inline handler parameters are not yet supported".into(),
+                                feature: format!(
+                                    "pattern kind {:?} in inline handler parameters \
+                                     (only identifiers, wildcards, and tuples are supported)",
+                                    std::mem::discriminant(&pattern.kind)
+                                ),
                             },
                             pattern.span,
                         ));
@@ -914,6 +1043,35 @@ impl<'a> TypeContext<'a> {
         for arg in args {
             let arg_expr = self.infer_expr(&arg.value)?;
             hir_args.push(arg_expr);
+        }
+
+        // Special handling for .len() on arrays and slices
+        if method_name == "len" && hir_args.is_empty() {
+            // Get the underlying type (auto-deref if needed)
+            let underlying_ty = match receiver_expr.ty.kind() {
+                TypeKind::Ref { inner, .. } => inner,
+                _ => &receiver_expr.ty,
+            };
+
+            match underlying_ty.kind() {
+                // Array: return constant length
+                TypeKind::Array { size, .. } => {
+                    return Ok(hir::Expr::new(
+                        hir::ExprKind::Literal(hir::LiteralValue::Int(*size as i128)),
+                        Type::usize(),
+                        span,
+                    ));
+                }
+                // Slice: return SliceLen expression
+                TypeKind::Slice { .. } => {
+                    return Ok(hir::Expr::new(
+                        hir::ExprKind::SliceLen(Box::new(receiver_expr)),
+                        Type::usize(),
+                        span,
+                    ));
+                }
+                _ => {}
+            }
         }
 
         // Try to find method signature
@@ -1484,6 +1642,7 @@ impl<'a> TypeContext<'a> {
                     // Store found def_id and whether it's opaque (no type args)
                     let mut found_def_id: Option<DefId> = None;
                     let mut is_opaque = false;
+                    let mut alias_underlying_ty: Option<Type> = None;
 
                     for bridge_info in &self.bridge_defs {
                         if bridge_info.name == module_name {
@@ -1497,10 +1656,11 @@ impl<'a> TypeContext<'a> {
                             }
                             if found_def_id.is_some() { break; }
 
-                            // Check type aliases
+                            // Check type aliases - store the underlying type for expansion
                             for alias in &bridge_info.type_aliases {
                                 if alias.name == type_name {
                                     found_def_id = Some(alias.def_id);
+                                    alias_underlying_ty = Some(alias.ty.clone());
                                     break;
                                 }
                             }
@@ -1540,7 +1700,11 @@ impl<'a> TypeContext<'a> {
                             // Opaque types don't have type arguments
                             return Ok(Type::adt(def_id, Vec::new()));
                         }
-                        // Extract type arguments if any
+                        // If this is a type alias, return the underlying type
+                        if let Some(underlying_ty) = alias_underlying_ty {
+                            return Ok(underlying_ty);
+                        }
+                        // Extract type arguments if any (for structs/enums)
                         let type_args = if let Some(ref args) = path.segments[1].args {
                             let mut parsed_args = Vec::new();
                             for arg in &args.args {
@@ -1602,7 +1766,25 @@ impl<'a> TypeContext<'a> {
             }
             ast::TypeKind::Array { element, size } => {
                 let elem_ty = self.ast_type_to_hir_type(element)?;
-                let size = const_eval::eval_const_expr(size)?
+                // Create a lookup function that can resolve const items by name
+                let const_values = &self.const_values;
+                let resolver = &self.resolver;
+                let interner = &self.interner;
+                let lookup = |path: &ast::ExprPath| -> Option<const_eval::ConstResult> {
+                    // Only handle single-segment paths (simple const names)
+                    if path.segments.len() == 1 {
+                        let symbol = path.segments[0].name.node;
+                        if let Some(name) = interner.resolve(symbol) {
+                            // Look up the DefId for this name
+                            if let Some(Binding::Def(def_id)) = resolver.lookup(name) {
+                                // Check if we have an evaluated value for this const
+                                return const_values.get(&def_id).copied();
+                            }
+                        }
+                    }
+                    None
+                };
+                let size = const_eval::eval_const_expr_with_lookup(size, &lookup)?
                     .as_u64()
                     .ok_or_else(|| TypeError::new(
                         TypeErrorKind::ConstEvalError {
@@ -1726,10 +1908,21 @@ impl<'a> TypeContext<'a> {
         let elem_ty = match base_expr.ty.kind() {
             TypeKind::Array { element, .. } => element.clone(),
             TypeKind::Slice { element } => element.clone(),
+            TypeKind::Primitive(PrimitiveTy::Str) => {
+                // String indexing returns char (by character index)
+                // Note: This uses character-based indexing (O(n)), not byte-based
+                Type::char()
+            }
+            TypeKind::Primitive(PrimitiveTy::String) => {
+                // String indexing returns char
+                Type::char()
+            }
             TypeKind::Ref { inner, .. } => {
                 match inner.kind() {
                     TypeKind::Array { element, .. } => element.clone(),
                     TypeKind::Slice { element } => element.clone(),
+                    TypeKind::Primitive(PrimitiveTy::Str) => Type::char(),
+                    TypeKind::Primitive(PrimitiveTy::String) => Type::char(),
                     _ => {
                         return Err(TypeError::new(
                             TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
@@ -3229,25 +3422,16 @@ impl<'a> TypeContext<'a> {
                     TypeKind::Array { element, size } => {
                         return self.infer_for_array(pattern, iter_expr, element.clone(), *size, body, label, span);
                     }
-                    TypeKind::Slice { element: _ } => {
-                        // Slices require runtime length - not yet supported
-                        return Err(TypeError::new(
-                            TypeErrorKind::UnsupportedFeature {
-                                feature: "For loop over slices requires runtime length check (use while loop)".into(),
-                            },
-                            iter.span,
-                        ));
+                    TypeKind::Slice { element } => {
+                        // Slice iteration with runtime length check
+                        return self.infer_for_slice(pattern, iter_expr, element.clone(), body, label, span);
                     }
                     _ => {}
                 }
             }
-            TypeKind::Slice { element: _ } => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "For loop over slices requires runtime length check (use while loop)".into(),
-                    },
-                    iter.span,
-                ));
+            TypeKind::Slice { element } => {
+                // Slice iteration with runtime length check
+                return self.infer_for_slice(pattern, iter_expr, element.clone(), body, label, span);
             }
             _ => {}
         }
@@ -3645,6 +3829,261 @@ impl<'a> TypeContext<'a> {
         Ok(hir::Expr::new(
             hir::ExprKind::Block {
                 stmts: vec![array_init_stmt, idx_init_stmt],
+                expr: Some(Box::new(while_loop)),
+            },
+            Type::unit(),
+            span,
+        ))
+    }
+
+    /// Helper: Infer for loop over a slice (runtime length).
+    ///
+    /// Desugars `for item in slice` to:
+    /// ```text
+    /// let _slice = slice;
+    /// let mut _idx = 0;
+    /// while _idx < _slice.len() {
+    ///     let item = _slice[_idx];
+    ///     body;
+    ///     _idx = _idx + 1;
+    /// }
+    /// ```
+    fn infer_for_slice(
+        &mut self,
+        pattern: &ast::Pattern,
+        slice_expr: hir::Expr,
+        element_ty: Type,
+        body: &ast::Block,
+        label: Option<&Spanned<ast::Symbol>>,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Extract variable name, or None for wildcard pattern
+        let var_name = match &pattern.kind {
+            ast::PatternKind::Ident { name, .. } => Some(self.symbol_to_string(name.node)),
+            ast::PatternKind::Wildcard => None,
+            _ => {
+                return Err(TypeError::new(
+                    TypeErrorKind::UnsupportedFeature {
+                        feature: "For loop currently only supports simple identifier or wildcard patterns".into(),
+                    },
+                    pattern.span,
+                ));
+            }
+        };
+
+        let label_str = label.map(|l| self.symbol_to_string(l.node));
+        let loop_id = self.enter_loop(label_str.as_deref());
+
+        self.resolver.push_scope(ScopeKind::Loop, span);
+
+        let idx_ty = Type::i64(); // Use i64 for slice indices (same as arrays)
+
+        // Store the slice in a temporary to avoid re-evaluating
+        let slice_local_id = self.resolver.next_local_id();
+        self.locals.push(hir::Local {
+            id: slice_local_id,
+            ty: slice_expr.ty.clone(),
+            mutable: false,
+            name: Some("_slice".to_string()),
+            span,
+        });
+
+        // Create internal loop index
+        let idx_local_id = self.resolver.next_local_id();
+        self.locals.push(hir::Local {
+            id: idx_local_id,
+            ty: idx_ty.clone(),
+            mutable: true,
+            name: Some("_loop_idx".to_string()),
+            span,
+        });
+
+        // Create a local for the length (we'll compute it once before the loop)
+        let len_local_id = self.resolver.next_local_id();
+        self.locals.push(hir::Local {
+            id: len_local_id,
+            ty: Type::u64(), // SliceLen returns u64
+            mutable: false,
+            name: Some("_slice_len".to_string()),
+            span,
+        });
+
+        // For slice iteration, the loop variable is a reference to the element
+        let ref_element_ty = Type::reference(element_ty.clone(), false);
+
+        // Register user's loop variable (only if not a wildcard pattern)
+        let var_local_id = if let Some(ref name) = var_name {
+            let local_id = self.resolver.define_local(
+                name.clone(),
+                ref_element_ty.clone(),
+                false,
+                pattern.span,
+            )?;
+
+            self.locals.push(hir::Local {
+                id: local_id,
+                ty: ref_element_ty.clone(),
+                mutable: false,
+                name: Some(name.clone()),
+                span: pattern.span,
+            });
+            Some(local_id)
+        } else {
+            None
+        };
+
+        let body_expr = self.check_block(body, &Type::unit())?;
+
+        self.resolver.pop_scope();
+
+        self.exit_loop(label_str.as_deref());
+
+        // Build condition: _idx < _slice_len (cast _slice_len to i64 for comparison)
+        let condition = hir::Expr::new(
+            hir::ExprKind::Binary {
+                op: ast::BinOp::Lt,
+                left: Box::new(hir::Expr::new(
+                    hir::ExprKind::Local(idx_local_id),
+                    idx_ty.clone(),
+                    span,
+                )),
+                right: Box::new(hir::Expr::new(
+                    hir::ExprKind::Cast {
+                        expr: Box::new(hir::Expr::new(
+                            hir::ExprKind::Local(len_local_id),
+                            Type::u64(),
+                            span,
+                        )),
+                        target_ty: idx_ty.clone(),
+                    },
+                    idx_ty.clone(),
+                    span,
+                )),
+            },
+            Type::bool(),
+            span,
+        );
+
+        // Helper to build slice access: slice[_idx] returns &element_ty
+        let slice_ty = slice_expr.ty.clone();
+        let make_slice_access = || {
+            hir::Expr::new(
+                hir::ExprKind::Index {
+                    base: Box::new(hir::Expr::new(
+                        hir::ExprKind::Local(slice_local_id),
+                        slice_ty.clone(),
+                        span,
+                    )),
+                    index: Box::new(hir::Expr::new(
+                        hir::ExprKind::Local(idx_local_id),
+                        idx_ty.clone(),
+                        span,
+                    )),
+                },
+                ref_element_ty.clone(),
+                span,
+            )
+        };
+
+        // Build bind statement if we have a named variable
+        let bind_stmt = var_local_id.map(|local_id| hir::Stmt::Let {
+            local_id,
+            init: Some(make_slice_access()),
+        });
+
+        // Build increment: _idx = _idx + 1
+        let increment = hir::Expr::new(
+            hir::ExprKind::Assign {
+                target: Box::new(hir::Expr::new(
+                    hir::ExprKind::Local(idx_local_id),
+                    idx_ty.clone(),
+                    span,
+                )),
+                value: Box::new(hir::Expr::new(
+                    hir::ExprKind::Binary {
+                        op: ast::BinOp::Add,
+                        left: Box::new(hir::Expr::new(
+                            hir::ExprKind::Local(idx_local_id),
+                            idx_ty.clone(),
+                            span,
+                        )),
+                        right: Box::new(hir::Expr::new(
+                            hir::ExprKind::Literal(hir::LiteralValue::Int(1)),
+                            idx_ty.clone(),
+                            span,
+                        )),
+                    },
+                    idx_ty.clone(),
+                    span,
+                )),
+            },
+            Type::unit(),
+            span,
+        );
+
+        // Build loop body statements
+        let mut body_stmts = Vec::new();
+        if let Some(stmt) = bind_stmt {
+            body_stmts.push(stmt);
+        } else {
+            // Even for wildcard, we still need to do the slice access (for side effects)
+            body_stmts.push(hir::Stmt::Expr(make_slice_access()));
+        }
+        body_stmts.push(hir::Stmt::Expr(body_expr));
+        body_stmts.push(hir::Stmt::Expr(increment));
+
+        let while_body = hir::Expr::new(
+            hir::ExprKind::Block {
+                stmts: body_stmts,
+                expr: None,
+            },
+            Type::unit(),
+            span,
+        );
+
+        let while_loop = hir::Expr::new(
+            hir::ExprKind::While {
+                condition: Box::new(condition),
+                body: Box::new(while_body),
+                label: Some(loop_id),
+            },
+            Type::unit(),
+            span,
+        );
+
+        // Initialize slice local
+        let slice_init_stmt = hir::Stmt::Let {
+            local_id: slice_local_id,
+            init: Some(slice_expr.clone()),
+        };
+
+        // Initialize length local using SliceLen
+        let len_init_stmt = hir::Stmt::Let {
+            local_id: len_local_id,
+            init: Some(hir::Expr::new(
+                hir::ExprKind::SliceLen(Box::new(hir::Expr::new(
+                    hir::ExprKind::Local(slice_local_id),
+                    slice_ty,
+                    span,
+                ))),
+                Type::u64(),
+                span,
+            )),
+        };
+
+        // Initialize index local
+        let idx_init_stmt = hir::Stmt::Let {
+            local_id: idx_local_id,
+            init: Some(hir::Expr::new(
+                hir::ExprKind::Literal(hir::LiteralValue::Int(0)),
+                idx_ty,
+                span,
+            )),
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Block {
+                stmts: vec![slice_init_stmt, len_init_stmt, idx_init_stmt],
                 expr: Some(Box::new(while_loop)),
             },
             Type::unit(),
@@ -4536,8 +4975,8 @@ impl<'a> TypeContext<'a> {
 
         match kind {
             // Format-style macros
-            ast::MacroCallKind::Format { format_str, args } => {
-                self.expand_format_macro(&macro_name, format_str, args, span)
+            ast::MacroCallKind::Format { format_str, args, named_args } => {
+                self.expand_format_macro(&macro_name, format_str, args, named_args, span)
             }
 
             // vec! macro
@@ -4578,20 +5017,30 @@ impl<'a> TypeContext<'a> {
         macro_name: &str,
         format_str: &crate::span::Spanned<String>,
         args: &[ast::Expr],
+        named_args: &[(String, ast::Expr)],
         span: Span,
     ) -> Result<hir::Expr, TypeError> {
-        // Type-check all arguments
+        // Type-check all positional arguments
         let mut checked_args = Vec::new();
         for arg in args {
             let arg_expr = self.infer_expr(arg)?;
             checked_args.push(arg_expr);
         }
 
+        // Type-check all named arguments
+        let mut checked_named_args = Vec::new();
+        for (name, arg) in named_args {
+            let arg_expr = self.infer_expr(arg)?;
+            checked_named_args.push((name.clone(), arg_expr));
+        }
+
         // Determine return type based on macro
         let return_ty = match macro_name {
             "format" => {
-                // format! returns String (an owned string)
-                Type::new(hir::TypeKind::Primitive(hir::PrimitiveTy::String))
+                // format! returns &str (a string slice)
+                // Note: The underlying conversion functions return BloodStr {ptr, len}
+                // which is the runtime representation of &str.
+                Type::reference(Type::str(), false)
             }
             "println" | "print" | "eprintln" | "eprint" => {
                 // print macros return unit
@@ -4616,6 +5065,7 @@ impl<'a> TypeContext<'a> {
                 macro_name: macro_name.to_string(),
                 format_str: format_str.node.clone(),
                 args: checked_args,
+                named_args: checked_named_args,
             },
             return_ty,
             span,

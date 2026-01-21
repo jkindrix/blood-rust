@@ -149,7 +149,19 @@ impl Unifier {
             (
                 TypeKind::Ref { inner: i1, mutable: m1 },
                 TypeKind::Ref { inner: i2, mutable: m2 },
-            ) if m1 == m2 => self.unify(i1, i2, span),
+            ) if m1 == m2 => {
+                // Try to unify inner types, with coercion for &[T; N] -> &[T]
+                let i1_res = self.resolve(i1);
+                let i2_res = self.resolve(i2);
+                match (i1_res.kind(), i2_res.kind()) {
+                    // Coercion: expected &[T], found &[T; N]
+                    (TypeKind::Slice { element: elem1 }, TypeKind::Array { element: elem2, .. }) => {
+                        self.unify(elem1, elem2, span)
+                    }
+                    // Otherwise, unify inner types normally
+                    _ => self.unify(i1, i2, span)
+                }
+            }
 
             // Pointers with same mutability
             (
@@ -316,6 +328,24 @@ impl Unifier {
             // (Only when the found type is NOT an ownership type)
             (TypeKind::Ownership { inner, .. }, found) if !matches!(found, TypeKind::Ownership { .. }) => {
                 self.unify(inner, &t2, span)
+            }
+
+            // Coercion: &[T; N] -> &[T] (array reference to slice reference)
+            // This allows using a reference to a fixed-size array where a slice reference is expected.
+            (
+                TypeKind::Ref { inner: i1, mutable: m1 },
+                TypeKind::Ref { inner: i2, mutable: m2 },
+            ) if m1 == m2 => {
+                let i1_res = self.resolve(i1);
+                let i2_res = self.resolve(i2);
+                match (i1_res.kind(), i2_res.kind()) {
+                    // Expected: &[T], Found: &[T; N]
+                    (TypeKind::Slice { element: elem1 }, TypeKind::Array { element: elem2, .. }) => {
+                        self.unify(elem1, elem2, span)
+                    }
+                    // Otherwise, unify inner types normally
+                    _ => self.unify(&i1_res, &i2_res, span)
+                }
             }
 
             // No match

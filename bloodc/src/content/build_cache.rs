@@ -1157,12 +1157,17 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
         hir::ExprKind::Default => {
             hasher.update_u8(0x25);
         }
-        hir::ExprKind::MacroExpansion { macro_name, format_str, args } => {
+        hir::ExprKind::MacroExpansion { macro_name, format_str, args, named_args } => {
             hasher.update_u8(0x26);
             hasher.update_str(macro_name);
             hasher.update_str(format_str);
             hasher.update_u32(args.len() as u32);
             for arg in args {
+                hash_expr(arg, items, hasher);
+            }
+            hasher.update_u32(named_args.len() as u32);
+            for (name, arg) in named_args {
+                hasher.update_str(name);
                 hash_expr(arg, items, hasher);
             }
         }
@@ -1191,6 +1196,15 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
         hir::ExprKind::Dbg(inner) => {
             hasher.update_u8(0x2A);
             hash_expr(inner, items, hasher);
+        }
+        hir::ExprKind::SliceLen(inner) => {
+            hasher.update_u8(0x2B);
+            hash_expr(inner, items, hasher);
+        }
+        hir::ExprKind::ArrayToSlice { expr, array_len } => {
+            hasher.update_u8(0x2C);
+            hash_expr(expr, items, hasher);
+            hasher.update_u64(*array_len);
         }
         hir::ExprKind::Error => {
             hasher.update_u8(0xFF);
@@ -1763,8 +1777,11 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
             }
         }
         // Macro expansion nodes - extract dependencies from subexpressions
-        hir::ExprKind::MacroExpansion { args, .. } => {
+        hir::ExprKind::MacroExpansion { args, named_args, .. } => {
             for arg in args {
+                extract_expr_deps(arg, deps);
+            }
+            for (_, arg) in named_args {
                 extract_expr_deps(arg, deps);
             }
         }
@@ -1785,6 +1802,12 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
         }
         hir::ExprKind::Dbg(inner) => {
             extract_expr_deps(inner, deps);
+        }
+        hir::ExprKind::SliceLen(inner) => {
+            extract_expr_deps(inner, deps);
+        }
+        hir::ExprKind::ArrayToSlice { expr, .. } => {
+            extract_expr_deps(expr, deps);
         }
         // Leaf expressions that don't contain dependencies
         // (Local is handled above at line 1330)

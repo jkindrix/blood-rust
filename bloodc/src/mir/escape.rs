@@ -742,6 +742,14 @@ impl EscapeAnalyzer {
             Rvalue::ZeroInit(_) => {
                 // Zero-initialization doesn't reference any locals
             }
+            Rvalue::StringIndex { base, index } => {
+                // String indexing reads but doesn't cause escape
+                let _ = (base, index);
+            }
+            Rvalue::ArrayToSlice { array_ref, .. } => {
+                // Array-to-slice coercion reads the array reference but doesn't cause escape
+                let _ = array_ref;
+            }
         }
 
         changed

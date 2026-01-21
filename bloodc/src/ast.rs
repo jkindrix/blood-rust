@@ -1146,6 +1146,8 @@ pub enum MacroCallKind {
     Format {
         format_str: Spanned<String>,
         args: Vec<Expr>,
+        /// Named arguments: `name = expr`
+        named_args: Vec<(String, Expr)>,
     },
     /// Built-in vec macro: `vec![1, 2, 3]` or `vec![0; 10]`
     Vec(VecMacroArgs),

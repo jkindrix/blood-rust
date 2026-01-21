@@ -18,6 +18,7 @@ use super::{
 };
 use super::super::error::{TypeError, TypeErrorKind};
 use super::super::resolve::{Binding, ScopeKind};
+use crate::typeck::const_eval;
 
 impl<'a> TypeContext<'a> {
     /// Expand derive macros after collection but before type checking bodies.
@@ -73,6 +74,11 @@ impl<'a> TypeContext<'a> {
 
     /// Resolve names in a program.
     pub fn resolve_program(&mut self, program: &ast::Program) -> Result<(), Vec<Diagnostic>> {
+        // Phase 0: Import prelude items (unless --no-std is set)
+        if !self.no_std {
+            self.import_prelude();
+        }
+
         // Phase 1: Pre-register all type names so forward references work.
         // This allows struct A { b: B } to compile when B is defined after A.
         for decl in &program.declarations {
@@ -100,6 +106,147 @@ impl<'a> TypeContext<'a> {
         }
 
         Ok(())
+    }
+
+    /// Import prelude items from the standard library.
+    ///
+    /// This automatically imports commonly used items so they're available
+    /// without explicit `use` statements. Called automatically unless `--no-std`
+    /// is specified.
+    ///
+    /// The prelude is loaded from `prelude.blood` or `prelude/mod.blood` in the
+    /// stdlib path. All public items from the prelude are imported into the
+    /// global scope.
+    ///
+    /// If no stdlib_path is set or the prelude doesn't exist, this silently
+    /// succeeds (having no prelude is valid).
+    fn import_prelude(&mut self) {
+        // Built-in macros (println!, print!, format!, etc.) are already globally
+        // available through builtin function registration in TypeContext::new().
+        // The prelude adds standard library types and traits.
+
+        // Check if stdlib_path is set
+        let stdlib_path = match &self.stdlib_path {
+            Some(p) => p.clone(),
+            None => return, // No stdlib configured, nothing to import
+        };
+
+        // Look for prelude file: try prelude.blood, then prelude/mod.blood
+        let prelude_file = if stdlib_path.is_file() {
+            // stdlib_path points to a single file (e.g., std.blood)
+            // Look for prelude.blood in the same directory
+            if let Some(parent) = stdlib_path.parent() {
+                let prelude_path = parent.join("prelude.blood");
+                let alt_path = parent.join("prelude").join("mod.blood");
+                if prelude_path.exists() {
+                    prelude_path
+                } else if alt_path.exists() {
+                    alt_path
+                } else {
+                    return; // No prelude file found, that's fine
+                }
+            } else {
+                return;
+            }
+        } else {
+            // stdlib_path is a directory
+            let prelude_path = stdlib_path.join("prelude.blood");
+            let alt_path = stdlib_path.join("prelude").join("mod.blood");
+            if prelude_path.exists() {
+                prelude_path
+            } else if alt_path.exists() {
+                alt_path
+            } else {
+                return; // No prelude file found, that's fine
+            }
+        };
+
+        // Read and parse the prelude file
+        let prelude_source = match std::fs::read_to_string(&prelude_file) {
+            Ok(s) => s,
+            Err(_) => return, // Can't read prelude, silently continue
+        };
+
+        // Parse the prelude
+        let interner = std::mem::take(&mut self.interner);
+        let mut parser = crate::parser::Parser::with_interner(&prelude_source, interner);
+        let prelude_ast = parser.parse_program();
+        self.interner = parser.take_interner();
+
+        let prelude_ast = match prelude_ast {
+            Ok(ast) => ast,
+            Err(_) => return, // Parse error in prelude, silently continue
+        };
+
+        // Collect prelude declarations in a temporary scope, then re-export to global
+        // This ensures proper DefId assignment while making items globally available
+        let prelude_span = crate::span::Span::new(0, 0, 0, 0);
+        self.resolver.push_scope(ScopeKind::Module, prelude_span);
+
+        // Pre-register type names first (for forward references within prelude)
+        for decl in &prelude_ast.declarations {
+            if let Err(e) = self.register_type_name(decl) {
+                self.errors.push(e);
+            }
+        }
+
+        // Collect all declarations
+        for decl in &prelude_ast.declarations {
+            if let Err(e) = self.collect_declaration(decl) {
+                self.errors.push(e);
+            }
+        }
+
+        // Get all bindings from the prelude scope before popping
+        let prelude_bindings = self.resolver.get_current_scope_bindings();
+        let prelude_type_bindings = self.resolver.get_current_scope_type_bindings();
+
+        self.resolver.pop_scope();
+
+        // Re-import public value bindings into global scope
+        // This makes prelude items available without qualification
+        for (name, binding) in prelude_bindings {
+            // Extract DefId(s) from the binding
+            let def_ids: Vec<DefId> = match &binding {
+                Binding::Def(def_id) => vec![*def_id],
+                Binding::Methods(def_ids) => def_ids.clone(),
+                Binding::Local { .. } => continue, // Don't import locals
+            };
+
+            for def_id in def_ids {
+                // Only import public items (check visibility in def_info)
+                if let Some(def_info) = self.resolver.def_info.get(&def_id) {
+                    if def_info.visibility == crate::ast::Visibility::Public {
+                        // Import into global scope
+                        if let Err(e) = self.resolver.import_binding(name.clone(), def_id, prelude_span) {
+                            // Ignore conflicts with user-defined items (user takes precedence)
+                            // DuplicateDefinition errors are expected when user code shadows prelude
+                            if !matches!(e.kind, TypeErrorKind::DuplicateDefinition { .. }) {
+                                self.errors.push(e);
+                            }
+                        }
+                        // Only import the first def_id for a given name to avoid conflicts
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Re-import public type bindings into global scope
+        for (name, def_id) in prelude_type_bindings {
+            // Only import public types (check visibility in def_info)
+            if let Some(def_info) = self.resolver.def_info.get(&def_id) {
+                if def_info.visibility == crate::ast::Visibility::Public {
+                    // Import type into global scope
+                    if let Err(e) = self.resolver.import_type_binding(name.clone(), def_id, prelude_span) {
+                        // Ignore conflicts with user-defined types (user takes precedence)
+                        if !matches!(e.kind, TypeErrorKind::DuplicateDefinition { .. }) {
+                            self.errors.push(e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Pre-register type names for forward reference support.
@@ -587,7 +734,7 @@ impl<'a> TypeContext<'a> {
                         hir::DefKind::Struct,
                         s.span,
                     )?;
-                    let fields: Vec<_> = s.fields.iter()
+                    let bridge_fields: Vec<_> = s.fields.iter()
                         .map(|f| {
                             let field_name = self.symbol_to_string(f.name.node);
                             let ty = self.ast_type_to_hir_type(&f.ty)?;
@@ -599,13 +746,29 @@ impl<'a> TypeContext<'a> {
                         })
                         .collect::<Result<_, TypeError>>()?;
 
+                    // Also register in struct_defs for field access and struct literals
+                    let struct_fields: Vec<super::FieldInfo> = bridge_fields.iter()
+                        .enumerate()
+                        .map(|(i, f)| super::FieldInfo {
+                            name: f.name.clone(),
+                            ty: f.ty.clone(),
+                            index: i as u32,
+                        })
+                        .collect();
+
+                    self.struct_defs.insert(def_id, super::StructInfo {
+                        name: name.clone(),
+                        fields: struct_fields,
+                        generics: Vec::new(), // Bridge structs don't have generics
+                    });
+
                     // Extract packed and align from attributes
                     let (is_packed, align) = self.extract_struct_attrs(&s.attrs);
 
                     structs.push(BridgeStructInfo {
                         def_id,
                         name,
-                        fields,
+                        fields: bridge_fields,
                         is_packed,
                         align,
                         span: s.span,
@@ -1305,6 +1468,13 @@ impl<'a> TypeContext<'a> {
             def_info.ty = Some(ty.clone());
         }
 
+        // Try to evaluate the const value for use in const contexts (e.g., array sizes).
+        // This is a best-effort evaluation - complex expressions that reference other consts
+        // may fail here but succeed during full type checking.
+        if let Ok(value) = const_eval::eval_const_expr(&const_decl.value) {
+            self.const_values.insert(def_id, value);
+        }
+
         // Queue for body type-checking (the value expression)
         self.pending_consts.push((def_id, const_decl.clone()));
 
@@ -1312,7 +1482,7 @@ impl<'a> TypeContext<'a> {
         // We use a dummy body_id here that will be replaced
         let placeholder_body_id = hir::BodyId::new(u32::MAX);
         self.const_defs.insert(def_id, super::ConstInfo {
-            name,
+            name: name.clone(),
             ty,
             body_id: placeholder_body_id,
             span: const_decl.span,
@@ -2239,18 +2409,48 @@ impl<'a> TypeContext<'a> {
                 let file_path = source_dir.join(format!("{}.blood", name));
                 let alt_path = source_dir.join(&name).join("mod.blood");
 
+                // For "std" module, also check stdlib_path if set
+                let stdlib_file_path = if name == "std" {
+                    self.stdlib_path.as_ref().map(|p| {
+                        if p.is_file() {
+                            p.clone()
+                        } else {
+                            p.join("mod.blood")
+                        }
+                    })
+                } else {
+                    None
+                };
+
+                let mut searched_paths = vec![
+                    file_path.display().to_string(),
+                    alt_path.display().to_string(),
+                ];
+                if let Some(ref sp) = stdlib_file_path {
+                    searched_paths.push(sp.display().to_string());
+                }
+
                 let module_path = if file_path.exists() {
                     file_path
                 } else if alt_path.exists() {
                     alt_path
+                } else if let Some(ref sp) = stdlib_file_path {
+                    if sp.exists() {
+                        sp.clone()
+                    } else {
+                        return Err(TypeError::new(
+                            TypeErrorKind::ModuleNotFound {
+                                name: name.clone(),
+                                searched_paths,
+                            },
+                            module.span,
+                        ));
+                    }
                 } else {
                     return Err(TypeError::new(
                         TypeErrorKind::ModuleNotFound {
                             name: name.clone(),
-                            searched_paths: vec![
-                                file_path.display().to_string(),
-                                alt_path.display().to_string(),
-                            ],
+                            searched_paths,
                         },
                         module.span,
                     ));

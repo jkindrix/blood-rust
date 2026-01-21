@@ -274,8 +274,11 @@ impl HandlerLintContext {
             }
 
             // Macro expansion nodes - check subexpressions
-            ExprKind::MacroExpansion { args, .. } => {
+            ExprKind::MacroExpansion { args, named_args, .. } => {
                 for arg in args {
+                    self.check_handler_nesting(arg, depth);
+                }
+                for (_, arg) in named_args {
                     self.check_handler_nesting(arg, depth);
                 }
             }
@@ -296,6 +299,12 @@ impl HandlerLintContext {
             }
             ExprKind::Dbg(inner) => {
                 self.check_handler_nesting(inner, depth);
+            }
+            ExprKind::SliceLen(inner) => {
+                self.check_handler_nesting(inner, depth);
+            }
+            ExprKind::ArrayToSlice { expr, .. } => {
+                self.check_handler_nesting(expr, depth);
             }
 
             // Terminal expressions - no recursion needed

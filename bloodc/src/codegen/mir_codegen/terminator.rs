@@ -429,25 +429,47 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Convert args for C runtime (e.g., i1 -> i32 for print_bool)
                         let fn_type = fn_value.get_type();
                         let param_types = fn_type.get_param_types();
-                        let converted_args: Vec<BasicMetadataValueEnum> = arg_vals.iter()
-                            .enumerate()
-                            .map(|(i, val)| {
-                                if let Some(param_type) = param_types.get(i) {
-                                    if val.is_int_value() && param_type.is_int_type() {
-                                        let val_int = val.into_int_value();
-                                        let param_int_type = param_type.into_int_type();
-                                        // Zero-extend if arg is smaller (e.g., i1 -> i32)
-                                        if val_int.get_type().get_bit_width() < param_int_type.get_bit_width() {
-                                            return self.builder
-                                                .build_int_z_extend(val_int, param_int_type, "zext")
-                                                .map(|v| v.into())
-                                                .unwrap_or((*val).into());
-                                        }
+                        let mut converted_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arg_vals.len());
+
+                        for (i, val) in arg_vals.iter().enumerate() {
+                            let converted = if let Some(param_type) = param_types.get(i) {
+                                if val.is_int_value() && param_type.is_int_type() {
+                                    let val_int = val.into_int_value();
+                                    let param_int_type = param_type.into_int_type();
+                                    // Zero-extend if arg is smaller (e.g., i1 -> i32)
+                                    if val_int.get_type().get_bit_width() < param_int_type.get_bit_width() {
+                                        self.builder
+                                            .build_int_z_extend(val_int, param_int_type, "zext")
+                                            .map(|v| v.into())
+                                            .unwrap_or((*val).into())
+                                    } else {
+                                        (*val).into()
                                     }
+                                } else if param_type.is_pointer_type() && val.is_struct_value() {
+                                    // Parameter expects a pointer but we have a struct value
+                                    // Allocate on stack and pass pointer (for &self method semantics)
+                                    let struct_val = val.into_struct_value();
+                                    let alloca = self.builder
+                                        .build_alloca(struct_val.get_type(), "method_self_tmp")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM alloca error: {}", e), span
+                                        )])?;
+                                    self.builder.build_store(alloca, struct_val)
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM store error: {}", e), span
+                                        )])?;
+                                    alloca.into()
+                                } else if param_type.is_pointer_type() && val.is_pointer_value() {
+                                    // Parameter expects pointer and we have pointer - pass through
+                                    (*val).into()
+                                } else {
+                                    (*val).into()
                                 }
+                            } else {
                                 (*val).into()
-                            })
-                            .collect();
+                            };
+                            converted_args.push(converted);
+                        }
 
                         self.builder.build_call(fn_value, &converted_args, "builtin_call")
                             .map_err(|e| vec![Diagnostic::error(

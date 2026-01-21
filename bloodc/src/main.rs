@@ -674,8 +674,16 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
     }
 
     // Type check the program
-    let mut ctx = bloodc::typeck::TypeContext::new(&source, interner)
-        .with_source_path(&args.file);
+    let ctx = bloodc::typeck::TypeContext::new(&source, interner)
+        .with_source_path(&args.file)
+        .with_no_std(args.no_std);
+
+    // Set stdlib path if provided
+    let mut ctx = if let Some(ref stdlib_path) = args.stdlib_path {
+        ctx.with_stdlib_path(stdlib_path)
+    } else {
+        ctx
+    };
 
     // Collect declarations and build type information
     if let Err(errors) = ctx.resolve_program(&program) {
@@ -856,8 +864,17 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     }
 
     // Type check and lower to HIR
-    let mut ctx = bloodc::typeck::TypeContext::new(&source, interner)
-        .with_source_path(&args.file);
+    let ctx = bloodc::typeck::TypeContext::new(&source, interner)
+        .with_source_path(&args.file)
+        .with_no_std(args.no_std);
+
+    // Set stdlib path if provided
+    let mut ctx = if let Some(ref stdlib_path) = args.stdlib_path {
+        ctx.with_stdlib_path(stdlib_path)
+    } else {
+        ctx
+    };
+
     if let Err(errors) = ctx.resolve_program(&program) {
         for error in &errors {
             emitter.emit(error);

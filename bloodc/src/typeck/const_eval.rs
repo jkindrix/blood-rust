@@ -51,10 +51,20 @@ impl ConstResult {
 /// Evaluate an AST expression as a compile-time constant.
 ///
 /// Returns `Ok(value)` if the expression can be evaluated at compile time,
-/// or an error if it cannot.
+/// or an error if it cannot. This version does not support const item lookup;
+/// use `eval_const_expr_with_lookup` if you need to resolve const paths.
 pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, TypeError> {
     match &expr.kind {
         ast::ExprKind::Literal(lit) => eval_literal(lit, expr.span),
+
+        ast::ExprKind::Path(_) => {
+            Err(TypeError::new(
+                TypeErrorKind::ConstEvalError {
+                    reason: "cannot evaluate path at compile time; only const items are allowed in const contexts".to_string(),
+                },
+                expr.span,
+            ))
+        }
 
         ast::ExprKind::Binary { left, op, right } => {
             let left_val = eval_const_expr(left)?;
@@ -94,9 +104,79 @@ pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, TypeError> {
             }
         }
 
+        ast::ExprKind::Block(block) => eval_block(block),
+
+        _ => Err(TypeError::new(
+            TypeErrorKind::ConstEvalError {
+                reason: "expression cannot be evaluated at compile time".to_string(),
+            },
+            expr.span,
+        )),
+    }
+}
+
+/// Evaluate an AST expression as a compile-time constant with path lookup support.
+///
+/// The `lookup` function is called for path expressions to resolve const items.
+/// It receives the path expression and returns the const value if found.
+pub fn eval_const_expr_with_lookup<F>(expr: &ast::Expr, lookup: &F) -> Result<ConstResult, TypeError>
+where
+    F: Fn(&ast::ExprPath) -> Option<ConstResult>,
+{
+    match &expr.kind {
+        ast::ExprKind::Literal(lit) => eval_literal(lit, expr.span),
+
+        ast::ExprKind::Path(path) => {
+            // Try to look up the path as a const item
+            lookup(path).ok_or_else(|| TypeError::new(
+                TypeErrorKind::ConstEvalError {
+                    reason: "cannot evaluate path at compile time; only const items are allowed in const contexts".to_string(),
+                },
+                expr.span,
+            ))
+        }
+
+        ast::ExprKind::Binary { left, op, right } => {
+            let left_val = eval_const_expr_with_lookup(left, lookup)?;
+            let right_val = eval_const_expr_with_lookup(right, lookup)?;
+            eval_binary_op(*op, left_val, right_val, expr.span)
+        }
+
+        ast::ExprKind::Unary { op, operand } => {
+            let val = eval_const_expr_with_lookup(operand, lookup)?;
+            eval_unary_op(*op, val, expr.span)
+        }
+
+        ast::ExprKind::Paren(inner) => eval_const_expr_with_lookup(inner, lookup),
+
+        ast::ExprKind::If { condition, then_branch, else_branch } => {
+            let cond = eval_const_expr_with_lookup(condition, lookup)?;
+            match cond {
+                ConstResult::Bool(true) => eval_block_with_lookup(then_branch, lookup),
+                ConstResult::Bool(false) => {
+                    if let Some(else_expr) = else_branch {
+                        eval_else_branch_with_lookup(else_expr, lookup)
+                    } else {
+                        Err(TypeError::new(
+                            TypeErrorKind::ConstEvalError {
+                                reason: "if expression without else branch in const context".to_string(),
+                            },
+                            expr.span,
+                        ))
+                    }
+                }
+                _ => Err(TypeError::new(
+                    TypeErrorKind::ConstEvalError {
+                        reason: "condition must be a boolean".to_string(),
+                    },
+                    condition.span,
+                )),
+            }
+        }
+
         ast::ExprKind::Block(block) => {
             // Only pure expression blocks without statements are allowed
-            eval_block(block)
+            eval_block_with_lookup(block, lookup)
         }
 
         _ => Err(TypeError::new(
@@ -108,11 +188,19 @@ pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, TypeError> {
     }
 }
 
-/// Evaluate a block expression.
+/// Evaluate a block expression as a compile-time constant.
 fn eval_block(block: &ast::Block) -> Result<ConstResult, TypeError> {
+    eval_block_with_lookup(block, &|_| None)
+}
+
+/// Evaluate a block expression with path lookup support.
+fn eval_block_with_lookup<F>(block: &ast::Block, lookup: &F) -> Result<ConstResult, TypeError>
+where
+    F: Fn(&ast::ExprPath) -> Option<ConstResult>,
+{
     if block.statements.is_empty() {
         if let Some(final_expr) = &block.expr {
-            eval_const_expr(final_expr)
+            eval_const_expr_with_lookup(final_expr, lookup)
         } else {
             Err(TypeError::new(
                 TypeErrorKind::ConstEvalError {
@@ -131,11 +219,19 @@ fn eval_block(block: &ast::Block) -> Result<ConstResult, TypeError> {
     }
 }
 
-/// Evaluate an else branch.
+/// Evaluate an else branch as a compile-time constant.
 fn eval_else_branch(branch: &ast::ElseBranch) -> Result<ConstResult, TypeError> {
+    eval_else_branch_with_lookup(branch, &|_| None)
+}
+
+/// Evaluate an else branch with path lookup support.
+fn eval_else_branch_with_lookup<F>(branch: &ast::ElseBranch, lookup: &F) -> Result<ConstResult, TypeError>
+where
+    F: Fn(&ast::ExprPath) -> Option<ConstResult>,
+{
     match branch {
-        ast::ElseBranch::Block(block) => eval_block(block),
-        ast::ElseBranch::If(if_expr) => eval_const_expr(if_expr),
+        ast::ElseBranch::Block(block) => eval_block_with_lookup(block, lookup),
+        ast::ElseBranch::If(if_expr) => eval_const_expr_with_lookup(if_expr, lookup),
     }
 }
 

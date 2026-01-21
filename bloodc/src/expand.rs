@@ -17,8 +17,23 @@ use crate::span::Span;
 enum FormatPart {
     /// A literal string segment.
     Literal(String),
-    /// A placeholder at the given argument index.
+    /// A placeholder at the given argument index (positional).
     Placeholder(usize),
+    /// A named placeholder.
+    Named(String),
+}
+
+/// Check if a string is a valid identifier (letters, digits, underscores, starting with letter/underscore).
+fn is_valid_identifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Expand all macros in a HIR crate.
@@ -84,8 +99,8 @@ impl<'a> MacroExpander<'a> {
         let kind = match expr.kind {
             // === Macro nodes to expand ===
 
-            ExprKind::MacroExpansion { macro_name, format_str, args } => {
-                self.expand_format_macro(&macro_name, &format_str, args, &ty, span)
+            ExprKind::MacroExpansion { macro_name, format_str, args, named_args } => {
+                self.expand_format_macro(&macro_name, &format_str, args, named_args, &ty, span)
             }
 
             ExprKind::VecLiteral(exprs) => {
@@ -339,6 +354,17 @@ impl<'a> MacroExpander<'a> {
                 ExprKind::Closure { body_id, captures }
             }
 
+            ExprKind::SliceLen(inner) => {
+                ExprKind::SliceLen(Box::new(self.expand_expr(*inner)))
+            }
+
+            ExprKind::ArrayToSlice { expr, array_len } => {
+                ExprKind::ArrayToSlice {
+                    expr: Box::new(self.expand_expr(*expr)),
+                    array_len,
+                }
+            }
+
             // === Leaf nodes - no expansion needed ===
             kind @ (ExprKind::Literal(_)
                 | ExprKind::Local(_)
@@ -376,6 +402,7 @@ impl<'a> MacroExpander<'a> {
         macro_name: &str,
         format_str: &str,
         args: Vec<Expr>,
+        named_args: Vec<(String, Expr)>,
         _ty: &Type,
         span: Span,
     ) -> ExprKind {
@@ -384,7 +411,12 @@ impl<'a> MacroExpander<'a> {
             .map(|a| self.expand_expr(a))
             .collect();
 
-        if expanded_args.is_empty() {
+        // Expand named arguments
+        let expanded_named_args: Vec<(String, Expr)> = named_args.into_iter()
+            .map(|(name, a)| (name, self.expand_expr(a)))
+            .collect();
+
+        if expanded_args.is_empty() && expanded_named_args.is_empty() {
             // Simple case: no format args, just a string literal
             match macro_name {
                 "println" => self.make_println_str_call(format_str, span),
@@ -428,7 +460,7 @@ impl<'a> MacroExpander<'a> {
             }
         } else {
             // Complex case: has format args - build interpolated string
-            match self.build_format_string(format_str, expanded_args, span) {
+            match self.build_format_string(format_str, expanded_args, expanded_named_args, span) {
                 Ok(formatted_expr) => {
                     match macro_name {
                         "println" => self.make_println_expr_call(formatted_expr, span),
@@ -494,11 +526,13 @@ impl<'a> MacroExpander<'a> {
 
     /// Parse format string and build concatenated result.
     ///
-    /// Handles format strings like "x = {}, y = {}" with positional arguments.
+    /// Handles format strings like "x = {}, y = {}" with positional arguments,
+    /// and named arguments like "{name}".
     fn build_format_string(
         &mut self,
         format_str: &str,
         args: Vec<Expr>,
+        named_args: Vec<(String, Expr)>,
         span: Span,
     ) -> Result<Expr, String> {
         // Parse the format string to find {} placeholders
@@ -510,7 +544,7 @@ impl<'a> MacroExpander<'a> {
         let max_index = parts.iter()
             .filter_map(|p| match p {
                 FormatPart::Placeholder(idx) => Some(*idx),
-                FormatPart::Literal(_) => None,
+                FormatPart::Literal(_) | FormatPart::Named(_) => None,
             })
             .max();
 
@@ -521,6 +555,18 @@ impl<'a> MacroExpander<'a> {
                     max_idx,
                     args.len()
                 ));
+            }
+        }
+
+        // Check that all named arguments in format string exist in named_args
+        for part in &parts {
+            if let FormatPart::Named(name) = part {
+                if !named_args.iter().any(|(n, _)| n == name) {
+                    return Err(format!(
+                        "named argument `{}` not found; add `{} = <value>` to the argument list",
+                        name, name
+                    ));
+                }
             }
         }
 
@@ -551,6 +597,24 @@ impl<'a> MacroExpander<'a> {
                     let arg = &args[idx];
                     let stringified = self.convert_to_string(arg.clone(), span)?;
                     result_parts.push(stringified);
+                }
+                FormatPart::Named(name) => {
+                    // Look up the named argument
+                    let arg = named_args.iter()
+                        .find(|(n, _)| n == &name)
+                        .map(|(_, e)| e);
+                    match arg {
+                        Some(expr) => {
+                            let stringified = self.convert_to_string(expr.clone(), span)?;
+                            result_parts.push(stringified);
+                        }
+                        None => {
+                            return Err(format!(
+                                "named argument `{}` not found",
+                                name
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -597,7 +661,9 @@ impl<'a> MacroExpander<'a> {
                     parts.push(FormatPart::Placeholder(placeholder_idx));
                     placeholder_idx += 1;
                 } else {
-                    // Check for positional or named arguments (not yet supported)
+                    // Parse placeholder content - supports:
+                    // - Positional: {0}, {1}, etc.
+                    // - Named: {name}, {foo}, etc.
                     let mut placeholder_content = String::new();
                     while let Some(&ch) = chars.peek() {
                         if ch == '}' {
@@ -608,7 +674,7 @@ impl<'a> MacroExpander<'a> {
                         chars.next();
                     }
 
-                    // For now, only support empty {} or simple positional {0}, {1}
+                    // Handle empty {}, positional {0}, {1}, or named {name}
                     if placeholder_content.is_empty() {
                         if !current_literal.is_empty() {
                             parts.push(FormatPart::Literal(std::mem::take(&mut current_literal)));
@@ -621,9 +687,15 @@ impl<'a> MacroExpander<'a> {
                             parts.push(FormatPart::Literal(std::mem::take(&mut current_literal)));
                         }
                         parts.push(FormatPart::Placeholder(idx));
+                    } else if is_valid_identifier(&placeholder_content) {
+                        // Named argument {name}
+                        if !current_literal.is_empty() {
+                            parts.push(FormatPart::Literal(std::mem::take(&mut current_literal)));
+                        }
+                        parts.push(FormatPart::Named(placeholder_content));
                     } else {
                         return Err(format!(
-                            "unsupported format specifier: {{{}}}; only {{}} and {{n}} are supported",
+                            "unsupported format specifier: {{{}}}; expected {{}}, {{0}}, {{1}}, or {{name}}",
                             placeholder_content
                         ));
                     }
@@ -664,31 +736,17 @@ impl<'a> MacroExpander<'a> {
                 PrimitiveTy::Char => ("char_to_string", true),
                 PrimitiveTy::Float(FloatTy::F32) => ("f32_to_string", true),
                 PrimitiveTy::Float(FloatTy::F64) => ("f64_to_string", true),
-                PrimitiveTy::Int(IntTy::I8) => {
-                    return Err("i8 format arguments not yet supported".to_string());
-                }
-                PrimitiveTy::Int(IntTy::I16) => {
-                    return Err("i16 format arguments not yet supported".to_string());
-                }
-                PrimitiveTy::Int(IntTy::I128) => {
-                    return Err("i128 format arguments not yet supported".to_string());
-                }
+                PrimitiveTy::Int(IntTy::I8) => ("i8_to_string", true),
+                PrimitiveTy::Int(IntTy::I16) => ("i16_to_string", true),
+                PrimitiveTy::Int(IntTy::I128) => ("i128_to_string", true),
                 PrimitiveTy::Int(IntTy::Isize) => {
                     // Treat isize as i64
                     ("i64_to_string", true)
                 }
-                PrimitiveTy::Uint(UintTy::U8) => {
-                    return Err("u8 format arguments not yet supported".to_string());
-                }
-                PrimitiveTy::Uint(UintTy::U16) => {
-                    return Err("u16 format arguments not yet supported".to_string());
-                }
-                PrimitiveTy::Uint(UintTy::U32) => {
-                    return Err("u32 format arguments not yet supported".to_string());
-                }
-                PrimitiveTy::Uint(UintTy::U128) => {
-                    return Err("u128 format arguments not yet supported".to_string());
-                }
+                PrimitiveTy::Uint(UintTy::U8) => ("u8_to_string", true),
+                PrimitiveTy::Uint(UintTy::U16) => ("u16_to_string", true),
+                PrimitiveTy::Uint(UintTy::U32) => ("u32_to_string", true),
+                PrimitiveTy::Uint(UintTy::U128) => ("u128_to_string", true),
                 PrimitiveTy::Uint(UintTy::Usize) => {
                     // Treat usize as u64
                     ("u64_to_string", true)

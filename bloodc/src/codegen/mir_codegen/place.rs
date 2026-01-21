@@ -319,16 +319,33 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             format!("LLVM load error: {}", e), body.span
                         )])?;
 
-                    // Check if this is a direct array or a reference to an array
-                    let (is_direct_array, is_ref_to_array) = match current_ty.kind() {
-                        TypeKind::Array { .. } | TypeKind::Slice { .. } => (true, false),
+                    // Classify the indexable type:
+                    // - Direct array [T; N]: ptr is [N x T]*, two-index GEP
+                    // - Direct slice [T]: ptr is {T*, i64}* (fat pointer), extract data ptr, single-index GEP
+                    // - Ref to array &[T; N]: ptr is [N x T]**, load to get [N x T]*, two-index GEP
+                    // - Slice ref &[T]: ptr is {T*, i64}* (fat pointer), load struct, extract data ptr, single-index GEP
+                    enum IndexKind {
+                        DirectArray,
+                        DirectSlice,
+                        RefToArray,
+                        SliceRef,
+                        Other,
+                    }
+
+                    let index_kind = match current_ty.kind() {
+                        TypeKind::Array { .. } => IndexKind::DirectArray,
+                        TypeKind::Slice { .. } => IndexKind::DirectSlice,
                         TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-                            (false, matches!(inner.kind(), TypeKind::Array { .. } | TypeKind::Slice { .. }))
+                            match inner.kind() {
+                                TypeKind::Array { .. } => IndexKind::RefToArray,
+                                TypeKind::Slice { .. } => IndexKind::SliceRef,
+                                _ => IndexKind::Other,
+                            }
                         }
-                        _ => (false, false),
+                        _ => IndexKind::Other,
                     };
 
-                    // Update current_ty to element type (handle both direct and through-reference)
+                    // Update current_ty to element type
                     current_ty = match current_ty.kind() {
                         TypeKind::Array { element, .. } => element.clone(),
                         TypeKind::Slice { element } => element.clone(),
@@ -343,40 +360,87 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     };
 
                     unsafe {
-                        if is_direct_array {
-                            // Direct array: current_ptr is [N x T]*, use two-index GEP
-                            let zero = self.context.i64_type().const_zero();
-                            self.builder.build_in_bounds_gep(
-                                current_ptr,
-                                &[zero, idx_val.into_int_value()],
-                                "idx_gep"
-                            ).map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM GEP error: {}", e), body.span
-                            )])?
-                        } else if is_ref_to_array {
-                            // Reference to array: current_ptr is [N x T]**, load to get [N x T]*
-                            // then use two-index GEP
-                            let array_ptr = self.builder.build_load(current_ptr, "array_ptr")
-                                .map_err(|e| vec![Diagnostic::error(
-                                    format!("LLVM load error: {}", e), body.span
-                                )])?.into_pointer_value();
-                            let zero = self.context.i64_type().const_zero();
-                            self.builder.build_in_bounds_gep(
-                                array_ptr,
-                                &[zero, idx_val.into_int_value()],
-                                "idx_gep"
-                            ).map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM GEP error: {}", e), body.span
-                            )])?
-                        } else {
-                            // Other pointer type: single-index GEP
-                            self.builder.build_in_bounds_gep(
-                                current_ptr,
-                                &[idx_val.into_int_value()],
-                                "idx_gep"
-                            ).map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM GEP error: {}", e), body.span
-                            )])?
+                        match index_kind {
+                            IndexKind::DirectArray => {
+                                // Direct array: current_ptr is [N x T]*, use two-index GEP
+                                let zero = self.context.i64_type().const_zero();
+                                self.builder.build_in_bounds_gep(
+                                    current_ptr,
+                                    &[zero, idx_val.into_int_value()],
+                                    "idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
+                            IndexKind::DirectSlice => {
+                                // Direct slice (fat pointer): current_ptr is {T*, i64}*
+                                // Extract the data pointer (field 0), then single-index GEP
+                                let data_ptr_ptr = self.builder.build_struct_gep(
+                                    current_ptr,
+                                    0,
+                                    "slice_data_ptr_ptr"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?;
+                                let data_ptr = self.builder.build_load(data_ptr_ptr, "slice_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                self.builder.build_in_bounds_gep(
+                                    data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
+                            IndexKind::RefToArray => {
+                                // Reference to array: current_ptr is [N x T]**, load to get [N x T]*
+                                let array_ptr = self.builder.build_load(current_ptr, "array_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                let zero = self.context.i64_type().const_zero();
+                                self.builder.build_in_bounds_gep(
+                                    array_ptr,
+                                    &[zero, idx_val.into_int_value()],
+                                    "idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
+                            IndexKind::SliceRef => {
+                                // Slice reference (fat pointer): current_ptr is {T*, i64}*
+                                // Load the fat pointer struct, extract data pointer (field 0), single-index GEP
+                                let data_ptr_ptr = self.builder.build_struct_gep(
+                                    current_ptr,
+                                    0,
+                                    "slice_data_ptr_ptr"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?;
+                                let data_ptr = self.builder.build_load(data_ptr_ptr, "slice_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                self.builder.build_in_bounds_gep(
+                                    data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
+                            IndexKind::Other => {
+                                // Other pointer type: single-index GEP
+                                self.builder.build_in_bounds_gep(
+                                    current_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
                         }
                     }
                 }

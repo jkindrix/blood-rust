@@ -162,6 +162,164 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 let zero = llvm_ty.const_zero();
                 Ok(zero)
             }
+
+            Rvalue::StringIndex { base, index } => {
+                // String indexing: call str_char_at_index(str_ptr, index) -> {i32, i32}
+                let base_val = self.compile_mir_operand(base, body, escape_results)?;
+                let index_val = self.compile_mir_operand(index, body, escape_results)?;
+
+                let func = self.module.get_function("str_char_at_index")
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "Runtime function 'str_char_at_index' not declared",
+                        body.span,
+                    )])?;
+
+                // Convert index to i64 if needed
+                let idx_i64 = match index_val {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 64 {
+                            iv
+                        } else {
+                            self.builder.build_int_z_extend(iv, self.context.i64_type(), "idx.zext")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?
+                        }
+                    }
+                    _ => return Err(vec![Diagnostic::error("String index must be integer", body.span)]),
+                };
+
+                // Get a pointer to the string struct for the function call
+                // If base_val is a struct value, we need to allocate it on the stack
+                let str_ptr = match base_val {
+                    BasicValueEnum::PointerValue(ptr) => ptr,
+                    BasicValueEnum::StructValue(sv) => {
+                        let alloca = self.builder
+                            .build_alloca(sv.get_type(), "str.tmp")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+                        self.builder.build_store(alloca, sv)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+                        alloca
+                    }
+                    _ => return Err(vec![Diagnostic::error("String indexing requires string type", body.span)]),
+                };
+
+                // Call str_char_at_index(str_ptr, index)
+                let result = self.builder
+                    .build_call(func, &[str_ptr.into(), idx_i64.into()], "char_at_result")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| vec![Diagnostic::error("str_char_at_index should return value", body.span)])?;
+
+                // Result is {i32 tag, i32 value} - extract tag and value
+                // tag=0 means None (out of bounds), tag=1 means Some(char)
+                let result_struct = result.into_struct_value();
+
+                // Extract the tag to check for out-of-bounds
+                let tag = self.builder
+                    .build_extract_value(result_struct, 0, "tag")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?
+                    .into_int_value();
+
+                // Check if tag == 0 (None/out-of-bounds)
+                let zero = self.context.i32_type().const_zero();
+                let is_none = self.builder
+                    .build_int_compare(IntPredicate::EQ, tag, zero, "is_none")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                // Get current function for creating basic blocks
+                let fn_value = self.current_fn.ok_or_else(|| {
+                    vec![Diagnostic::error("No current function for string index bounds check", body.span)]
+                })?;
+
+                // Create basic blocks for bounds check
+                let panic_bb = self.context.append_basic_block(fn_value, "str_index_oob");
+                let continue_bb = self.context.append_basic_block(fn_value, "str_index_ok");
+
+                // Branch: if tag == 0, panic; else continue
+                self.builder.build_conditional_branch(is_none, panic_bb, continue_bb)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                // Panic block: call blood_panic with out-of-bounds message
+                self.builder.position_at_end(panic_bb);
+
+                let panic_fn = self.module.get_function("blood_panic")
+                    .unwrap_or_else(|| {
+                        let void_type = self.context.void_type();
+                        let i8_type = self.context.i8_type();
+                        let i8_ptr_type = i8_type.ptr_type(AddressSpace::default());
+                        let panic_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+                        self.module.add_function("blood_panic", panic_type, None)
+                    });
+
+                let msg_global = self.builder
+                    .build_global_string_ptr("string index out of bounds", "str_oob_msg")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                self.builder.build_call(panic_fn, &[msg_global.as_pointer_value().into()], "")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                self.builder.build_unreachable()
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                // Continue block: extract and return the char value
+                self.builder.position_at_end(continue_bb);
+
+                let char_val = self.builder
+                    .build_extract_value(result_struct, 1, "char_val")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?;
+
+                Ok(char_val)
+            }
+
+            Rvalue::ArrayToSlice { array_ref, array_len } => {
+                // Array-to-slice coercion: &[T; N] -> &[T]
+                // Creates a fat pointer struct { T*, i64 } from an array reference.
+
+                // The array reference is a pointer to [N x T]
+                let array_ptr_val = self.compile_mir_operand(array_ref, body, escape_results)?;
+                let array_ptr = match array_ptr_val {
+                    BasicValueEnum::PointerValue(ptr) => ptr,
+                    _ => return Err(vec![Diagnostic::error(
+                        "ArrayToSlice expects pointer value for array reference",
+                        body.span,
+                    )]),
+                };
+
+                // Create the length constant
+                let len_val = self.context.i64_type().const_int(*array_len, false);
+
+                // Build the fat pointer struct { T*, i64 }
+                // First, get the element pointer type
+                let elem_ptr = unsafe {
+                    self.builder.build_in_bounds_gep(
+                        array_ptr,
+                        &[self.context.i64_type().const_zero(), self.context.i64_type().const_zero()],
+                        "slice_data_ptr"
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM GEP error: {}", e),
+                        body.span,
+                    )])?
+                };
+
+                // Create the slice struct type { T*, i64 }
+                let slice_struct_type = self.context.struct_type(
+                    &[elem_ptr.get_type().into(), self.context.i64_type().into()],
+                    false,
+                );
+
+                // Build the struct value
+                let mut slice_struct = slice_struct_type.get_undef();
+                slice_struct = self.builder
+                    .build_insert_value(slice_struct, elem_ptr, 0, "slice.ptr")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?
+                    .into_struct_value();
+                slice_struct = self.builder
+                    .build_insert_value(slice_struct, len_val, 1, "slice.len")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), body.span)])?
+                    .into_struct_value();
+
+                Ok(slice_struct.into())
+            }
         }
     }
 
@@ -239,17 +397,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         Ok(len_val.into())
                     }
                     TypeKind::Slice { .. } => {
-                        // For &[T] or *[T], load the pointer and extract length from fat pointer
-                        // First, load the pointer to get the slice value
-                        let ref_ptr = self.compile_mir_place(place, body, escape_results)?;
-                        let slice_ptr = self.builder.build_load(ref_ptr, "slice_deref")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM load error: {}", e), Span::dummy()
-                            )])?.into_pointer_value();
+                        // For &[T], the local contains the fat pointer struct { ptr*, len } directly.
+                        // We need to GEP to field 1 (length) and load it.
+                        let slice_storage_ptr = self.compile_mir_place(place, body, escape_results)?;
 
-                        // Get pointer to the length field (index 1)
+                        // Get pointer to the length field (index 1) in the fat pointer struct
                         let len_ptr = self.builder.build_struct_gep(
-                            slice_ptr,
+                            slice_storage_ptr,
                             1,
                             "slice_len_ptr"
                         ).map_err(|e| vec![Diagnostic::error(

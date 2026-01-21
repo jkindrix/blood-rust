@@ -33,6 +33,10 @@ pub struct TypeContext<'a> {
     pub(crate) _source: &'a str,
     /// The path to the source file (for resolving external modules).
     pub(crate) source_path: Option<PathBuf>,
+    /// The path to the standard library (for resolving `std::*` imports).
+    pub(crate) stdlib_path: Option<PathBuf>,
+    /// Whether to disable automatic standard library prelude imports.
+    pub(crate) no_std: bool,
     /// The string interner for resolving symbols.
     pub(crate) interner: DefaultStringInterner,
     /// The name resolver.
@@ -49,6 +53,8 @@ pub struct TypeContext<'a> {
     pub(crate) type_aliases: HashMap<DefId, TypeAliasInfo>,
     /// Const definitions.
     pub(crate) const_defs: HashMap<DefId, ConstInfo>,
+    /// Cached evaluated const values for use in const contexts (e.g., array sizes).
+    pub(crate) const_values: HashMap<DefId, crate::typeck::const_eval::ConstResult>,
     /// Static definitions.
     pub(crate) static_defs: HashMap<DefId, StaticInfo>,
     /// Const items to type-check (includes full declaration for the value expression).
@@ -619,6 +625,8 @@ impl<'a> TypeContext<'a> {
         let mut ctx = Self {
             _source: source,
             source_path: None,
+            stdlib_path: None,
+            no_std: false,
             interner,
             resolver: Resolver::new(source),
             unifier: Unifier::new(),
@@ -627,6 +635,7 @@ impl<'a> TypeContext<'a> {
             enum_defs: HashMap::new(),
             type_aliases: HashMap::new(),
             const_defs: HashMap::new(),
+            const_values: HashMap::new(),
             static_defs: HashMap::new(),
             pending_consts: Vec::new(),
             pending_statics: Vec::new(),
@@ -686,10 +695,23 @@ impl<'a> TypeContext<'a> {
         self
     }
 
-    /// Convert a Symbol to a String.
+    /// Set the stdlib path (for resolving `std::*` imports).
+    pub fn with_stdlib_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stdlib_path = Some(path.into());
+        self
+    }
+
+    /// Configure no_std mode (disables automatic prelude imports).
+    pub fn with_no_std(mut self, no_std: bool) -> Self {
+        self.no_std = no_std;
+        self
+    }
+
+    /// Convert a Symbol to a String using the string interner.
     ///
-    /// Note: This is a temporary implementation. In the real implementation,
-    /// we'd use the string interner from the parser.
+    /// Symbols are interned during parsing, and this method resolves them back
+    /// to their original string representation. Falls back to a synthetic name
+    /// if the symbol is not found in the interner (which indicates a bug).
     pub(crate) fn symbol_to_string(&self, symbol: ast::Symbol) -> String {
         self.interner.resolve(symbol)
             .map(|s| s.to_string())
@@ -1054,11 +1076,12 @@ impl<'a> TypeContext<'a> {
                 }
             }
             // Macro expansion nodes - zonk subexpressions
-            hir::ExprKind::MacroExpansion { macro_name, format_str, args } => {
+            hir::ExprKind::MacroExpansion { macro_name, format_str, args, named_args } => {
                 hir::ExprKind::MacroExpansion {
                     macro_name,
                     format_str,
                     args: args.into_iter().map(|a| Self::zonk_expr_with_unifier(unifier, a)).collect(),
+                    named_args: named_args.into_iter().map(|(name, a)| (name, Self::zonk_expr_with_unifier(unifier, a))).collect(),
                 }
             }
             hir::ExprKind::VecLiteral(exprs) => {
@@ -1080,6 +1103,15 @@ impl<'a> TypeContext<'a> {
             }
             hir::ExprKind::Dbg(inner) => {
                 hir::ExprKind::Dbg(Box::new(Self::zonk_expr_with_unifier(unifier, *inner)))
+            }
+            hir::ExprKind::SliceLen(inner) => {
+                hir::ExprKind::SliceLen(Box::new(Self::zonk_expr_with_unifier(unifier, *inner)))
+            }
+            hir::ExprKind::ArrayToSlice { expr, array_len } => {
+                hir::ExprKind::ArrayToSlice {
+                    expr: Box::new(Self::zonk_expr_with_unifier(unifier, *expr)),
+                    array_len,
+                }
             }
             kind @ (hir::ExprKind::Literal(_)
                 | hir::ExprKind::Local(_)
