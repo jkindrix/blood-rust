@@ -1610,13 +1610,7 @@ impl<'a> TypeContext<'a> {
 
                     // Look up user-defined types (structs, enums, type aliases)
                     if let Some(def_id) = self.resolver.lookup_type(&name) {
-                        // Check if it's a type alias and expand it
-                        if let Some(alias_info) = self.type_aliases.get(&def_id).cloned() {
-                            // For now, simple type aliases without generic args
-                            return Ok(alias_info.ty);
-                        }
-
-                        // Extract type arguments if any
+                        // Extract type arguments first
                         let type_args = if let Some(ref args) = path.segments[0].args {
                             let mut parsed_args = Vec::new();
                             for arg in &args.args {
@@ -1628,6 +1622,19 @@ impl<'a> TypeContext<'a> {
                         } else {
                             Vec::new()
                         };
+
+                        // Check if it's a type alias and expand it
+                        if let Some(alias_info) = self.type_aliases.get(&def_id).cloned() {
+                            // If the alias has generic parameters, substitute them
+                            if !alias_info.generics.is_empty() && !type_args.is_empty() {
+                                let subst: HashMap<TyVarId, Type> = alias_info.generics.iter()
+                                    .zip(type_args.iter())
+                                    .map(|(&var, ty)| (var, ty.clone()))
+                                    .collect();
+                                return Ok(self.substitute_type_vars(&alias_info.ty, &subst));
+                            }
+                            return Ok(alias_info.ty);
+                        }
 
                         return Ok(Type::adt(def_id, type_args));
                     }
@@ -1727,7 +1734,7 @@ impl<'a> TypeContext<'a> {
                                 if let Some(def_info) = self.resolver.def_info.get(&item_def_id) {
                                     if def_info.name == type_name {
                                         match def_info.kind {
-                                            hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias => {
+                                            hir::DefKind::Struct | hir::DefKind::Enum => {
                                                 // Extract type arguments if any
                                                 let type_args = if let Some(ref args) = path.segments[1].args {
                                                     let mut parsed_args = Vec::new();
@@ -1741,6 +1748,35 @@ impl<'a> TypeContext<'a> {
                                                     Vec::new()
                                                 };
                                                 return Ok(Type::adt(item_def_id, type_args));
+                                            }
+                                            hir::DefKind::TypeAlias => {
+                                                // Look up the alias and return its underlying type
+                                                if let Some(alias_info) = self.type_aliases.get(&item_def_id).cloned() {
+                                                    // Parse type arguments if provided (e.g., `helper::Pair<i32>`)
+                                                    let type_args = if let Some(ref args) = path.segments[1].args {
+                                                        let mut parsed_args = Vec::new();
+                                                        for arg in &args.args {
+                                                            if let ast::TypeArg::Type(arg_ty) = arg {
+                                                                parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                                            }
+                                                        }
+                                                        parsed_args
+                                                    } else {
+                                                        Vec::new()
+                                                    };
+
+                                                    // If the alias has generic parameters, substitute them
+                                                    if !alias_info.generics.is_empty() && !type_args.is_empty() {
+                                                        let subst: HashMap<TyVarId, Type> = alias_info.generics.iter()
+                                                            .zip(type_args.iter())
+                                                            .map(|(&var, ty)| (var, ty.clone()))
+                                                            .collect();
+                                                        return Ok(self.substitute_type_vars(&alias_info.ty, &subst));
+                                                    }
+                                                    return Ok(alias_info.ty.clone());
+                                                }
+                                                // Fallback to ADT if alias info not found (shouldn't happen)
+                                                return Ok(Type::adt(item_def_id, Vec::new()));
                                             }
                                             _ => {}
                                         }
@@ -2003,6 +2039,27 @@ impl<'a> TypeContext<'a> {
                         hir::DefKind::TypeAlias => {
                             // Look up and return the aliased type
                             if let Some(alias_info) = self.type_aliases.get(&item_def_id).cloned() {
+                                // Extract type arguments from the last segment
+                                let type_args = if let Some(ref args) = path.segments.last().and_then(|s| s.args.as_ref()) {
+                                    let mut parsed_args = Vec::new();
+                                    for arg in &args.args {
+                                        if let ast::TypeArg::Type(arg_ty) = arg {
+                                            parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                        }
+                                    }
+                                    parsed_args
+                                } else {
+                                    Vec::new()
+                                };
+
+                                // If the alias has generic parameters, substitute them
+                                if !alias_info.generics.is_empty() && !type_args.is_empty() {
+                                    let subst: HashMap<TyVarId, Type> = alias_info.generics.iter()
+                                        .zip(type_args.iter())
+                                        .map(|(&var, ty)| (var, ty.clone()))
+                                        .collect();
+                                    return Ok(self.substitute_type_vars(&alias_info.ty, &subst));
+                                }
                                 return Ok(alias_info.ty);
                             }
                             return Ok(Type::adt(item_def_id, Vec::new()));
