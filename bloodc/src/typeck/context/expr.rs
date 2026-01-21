@@ -1719,6 +1719,37 @@ impl<'a> TypeContext<'a> {
                         return Ok(Type::adt(def_id, type_args));
                     }
 
+                    // Check module_defs for regular modules (e.g., `mod helper;`)
+                    for (_mod_def_id, mod_info) in &self.module_defs {
+                        if mod_info.name == module_name {
+                            // Search for type within this module's items
+                            for &item_def_id in &mod_info.items {
+                                if let Some(def_info) = self.resolver.def_info.get(&item_def_id) {
+                                    if def_info.name == type_name {
+                                        match def_info.kind {
+                                            hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias => {
+                                                // Extract type arguments if any
+                                                let type_args = if let Some(ref args) = path.segments[1].args {
+                                                    let mut parsed_args = Vec::new();
+                                                    for arg in &args.args {
+                                                        if let ast::TypeArg::Type(arg_ty) = arg {
+                                                            parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                                        }
+                                                    }
+                                                    parsed_args
+                                                } else {
+                                                    Vec::new()
+                                                };
+                                                return Ok(Type::adt(item_def_id, type_args));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Fall back to looking up type directly (for non-bridge modules)
                     if let Some(def_id) = self.resolver.lookup_type(&type_name) {
                         let type_args = if let Some(ref args) = path.segments[1].args {
@@ -2654,10 +2685,10 @@ impl<'a> TypeContext<'a> {
                 span,
             ))
         } else if path.segments.len() == 3 {
-            // Three-segment path: module::Type::method
+            // Three-segment path: module::Type::method or module::Enum::Variant
             let module_name = self.symbol_to_string(path.segments[0].name.node);
             let type_name = self.symbol_to_string(path.segments[1].name.node);
-            let method_name = self.symbol_to_string(path.segments[2].name.node);
+            let third_name = self.symbol_to_string(path.segments[2].name.node);
 
             // First, find the module
             let mut module_def_id: Option<DefId> = None;
@@ -2668,17 +2699,80 @@ impl<'a> TypeContext<'a> {
                 }
             }
 
-            if let Some(_mod_def_id) = module_def_id {
-                // Find the type (struct) by name
+            if let Some(mod_def_id) = module_def_id {
+                // First, check if the second segment is an enum and third is a variant
+                // This handles module::Enum::Variant pattern
+                if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                    for &item_def_id in &mod_info.items {
+                        if let Some(enum_info) = self.enum_defs.get(&item_def_id).cloned() {
+                            if enum_info.name == type_name {
+                                // Found the enum, now look for the variant
+                                if let Some(variant) = enum_info.variants.iter().find(|v| v.name == third_name) {
+                                    let variant_idx = variant.index;
+                                    let variant_def_id = variant.def_id;
+                                    let variant_fields = variant.fields.clone();
+
+                                    if variant_fields.is_empty() {
+                                        let type_args: Vec<Type> = enum_info.generics.iter()
+                                            .map(|_| self.unifier.fresh_var())
+                                            .collect();
+                                        let enum_ty = Type::adt(item_def_id, type_args);
+
+                                        return Ok(hir::Expr::new(
+                                            hir::ExprKind::Variant {
+                                                def_id: item_def_id,
+                                                variant_idx,
+                                                fields: vec![],
+                                            },
+                                            enum_ty,
+                                            span,
+                                        ));
+                                    } else {
+                                        // Enum variant with fields - return as constructor function
+                                        let type_args: Vec<Type> = enum_info.generics.iter()
+                                            .map(|_| self.unifier.fresh_var())
+                                            .collect();
+
+                                        let subst: std::collections::HashMap<TyVarId, Type> = enum_info.generics.iter()
+                                            .zip(type_args.iter())
+                                            .map(|(&tyvar, ty)| (tyvar, ty.clone()))
+                                            .collect();
+
+                                        let field_types: Vec<Type> = variant_fields.iter()
+                                            .map(|f| self.substitute_type_vars(&f.ty, &subst))
+                                            .collect();
+
+                                        let enum_ty = Type::adt(item_def_id, type_args);
+                                        let fn_ty = Type::function(field_types, enum_ty);
+
+                                        return Ok(hir::Expr::new(
+                                            hir::ExprKind::Def(variant_def_id),
+                                            fn_ty,
+                                            span,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Not an enum variant, try to find a struct and method
+                // Find the type (struct) within the module's items (properly scoped)
                 let mut type_def_id: Option<DefId> = None;
-                for (def_id, struct_info) in &self.struct_defs {
-                    if struct_info.name == type_name {
-                        type_def_id = Some(*def_id);
-                        break;
+                if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                    for &item_def_id in &mod_info.items {
+                        if let Some(struct_info) = self.struct_defs.get(&item_def_id) {
+                            if struct_info.name == type_name {
+                                type_def_id = Some(item_def_id);
+                                break;
+                            }
+                        }
                     }
                 }
 
                 if let Some(type_def_id) = type_def_id {
+                    let method_name = third_name;
                     // Now look for the associated function on this type
                     let self_ty = Type::adt(type_def_id, Vec::new());
                     let mut found_method: Option<(DefId, hir::FnSig, Vec<TyVarId>)> = None;
@@ -4613,13 +4707,18 @@ impl<'a> TypeContext<'a> {
                         }
                     }
 
-                    if let Some(_mod_def_id) = module_def_id {
-                        // Find the type in the module's items by looking up the struct definition
+                    if let Some(mod_def_id) = module_def_id {
+                        // Find the struct within the module's items (properly scoped)
                         let mut found_struct: Option<(DefId, super::StructInfo)> = None;
-                        for (def_id, struct_info) in &self.struct_defs {
-                            if struct_info.name == type_name {
-                                found_struct = Some((*def_id, struct_info.clone()));
-                                break;
+
+                        if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                            for &item_def_id in &mod_info.items {
+                                if let Some(struct_info) = self.struct_defs.get(&item_def_id) {
+                                    if struct_info.name == type_name {
+                                        found_struct = Some((item_def_id, struct_info.clone()));
+                                        break;
+                                    }
+                                }
                             }
                         }
 

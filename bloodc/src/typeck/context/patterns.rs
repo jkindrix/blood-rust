@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use crate::ast;
-use crate::hir::{self, LocalId, Type, TypeKind};
+use crate::hir::{self, DefId, LocalId, Type, TypeKind};
 use crate::hir::ty::TyVarId;
 
 use super::TypeContext;
@@ -526,6 +526,54 @@ impl<'a> TypeContext<'a> {
                             ));
                         }
                     }
+                } else if path.segments.len() == 3 {
+                    // Three-segment path: module::EnumName::VariantName
+                    let module_name = self.symbol_to_string(path.segments[0].name.node);
+                    let enum_name = self.symbol_to_string(path.segments[1].name.node);
+                    let variant_name = self.symbol_to_string(path.segments[2].name.node);
+
+                    // Find the module
+                    let mut module_def_id: Option<DefId> = None;
+                    for (def_id, info) in &self.module_defs {
+                        if info.name == module_name {
+                            module_def_id = Some(*def_id);
+                            break;
+                        }
+                    }
+
+                    let mod_def_id = module_def_id.ok_or_else(|| TypeError::new(
+                        TypeErrorKind::NotFound { name: format!("module '{}'", module_name) },
+                        pattern.span,
+                    ))?;
+
+                    // Find the enum within the module's items
+                    let mut found_enum: Option<(DefId, super::EnumInfo)> = None;
+                    if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                        for &item_def_id in &mod_info.items {
+                            if let Some(enum_info) = self.enum_defs.get(&item_def_id).cloned() {
+                                if enum_info.name == enum_name {
+                                    found_enum = Some((item_def_id, enum_info));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let (enum_def_id, enum_info) = found_enum.ok_or_else(|| TypeError::new(
+                        TypeErrorKind::NotFound { name: format!("{}::{}", module_name, enum_name) },
+                        pattern.span,
+                    ))?;
+
+                    // Find the variant
+                    let variant = enum_info.variants.iter()
+                        .find(|v| v.name == variant_name)
+                        .cloned()
+                        .ok_or_else(|| TypeError::new(
+                            TypeErrorKind::NotFound { name: format!("{}::{}::{}", module_name, enum_name, variant_name) },
+                            pattern.span,
+                        ))?;
+
+                    (enum_def_id, variant)
                 } else {
                     return Err(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{path:?}") },
@@ -625,7 +673,11 @@ impl<'a> TypeContext<'a> {
                 // e.g., Status::Active { value } where Status is an enum
                 if let Some(enum_info) = self.enum_defs.get(&adt_def_id).cloned() {
                     // This is an enum - extract variant name from path
-                    let variant_name = if path.segments.len() == 2 {
+                    // The variant name is always the last segment
+                    let variant_name = if path.segments.len() == 3 {
+                        // module::EnumName::VariantName { ... }
+                        self.symbol_to_string(path.segments[2].name.node)
+                    } else if path.segments.len() == 2 {
                         // EnumName::VariantName { ... }
                         self.symbol_to_string(path.segments[1].name.node)
                     } else if path.segments.len() == 1 {
@@ -1073,6 +1125,57 @@ impl<'a> TypeContext<'a> {
                                 pattern.span,
                             ));
                         }
+                    }
+                } else if path.segments.len() == 3 {
+                    // Three-segment path: module::EnumName::VariantName
+                    let module_name = self.symbol_to_string(path.segments[0].name.node);
+                    let enum_name = self.symbol_to_string(path.segments[1].name.node);
+                    let variant_name = self.symbol_to_string(path.segments[2].name.node);
+
+                    // Find the module
+                    let mut module_def_id: Option<DefId> = None;
+                    for (def_id, info) in &self.module_defs {
+                        if info.name == module_name {
+                            module_def_id = Some(*def_id);
+                            break;
+                        }
+                    }
+
+                    let mod_def_id = module_def_id.ok_or_else(|| TypeError::new(
+                        TypeErrorKind::NotFound { name: format!("module '{}'", module_name) },
+                        pattern.span,
+                    ))?;
+
+                    // Find the enum within the module's items
+                    let mut found_enum: Option<(DefId, super::EnumInfo)> = None;
+                    if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                        for &item_def_id in &mod_info.items {
+                            if let Some(enum_info) = self.enum_defs.get(&item_def_id).cloned() {
+                                if enum_info.name == enum_name {
+                                    found_enum = Some((item_def_id, enum_info));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let (_enum_def_id, enum_info) = found_enum.ok_or_else(|| TypeError::new(
+                        TypeErrorKind::NotFound { name: format!("{}::{}", module_name, enum_name) },
+                        pattern.span,
+                    ))?;
+
+                    // Find the variant
+                    let variant = enum_info.variants.iter()
+                        .find(|v| v.name == variant_name)
+                        .ok_or_else(|| TypeError::new(
+                            TypeErrorKind::NotFound { name: format!("{}::{}::{}", module_name, enum_name, variant_name) },
+                            pattern.span,
+                        ))?;
+
+                    hir::PatternKind::Variant {
+                        def_id: variant.def_id,
+                        variant_idx: variant.index,
+                        fields: vec![],
                     }
                 } else {
                     return Err(TypeError::new(

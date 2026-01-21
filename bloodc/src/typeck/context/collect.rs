@@ -2501,6 +2501,10 @@ impl<'a> TypeContext<'a> {
                 let saved_module = self.current_module;
                 self.current_module = Some(def_id);
 
+                // Save and update source path for nested module resolution
+                let saved_source_path = self.source_path.take();
+                self.source_path = Some(module_path);
+
                 // Track the starting DefId counter
                 let def_id_start = self.resolver.current_def_id_counter();
 
@@ -2516,7 +2520,8 @@ impl<'a> TypeContext<'a> {
                     .map(DefId::new)
                     .collect();
 
-                // Restore previous module context
+                // Restore previous module context and source path
+                self.source_path = saved_source_path;
                 self.current_module = saved_module;
                 self.resolver.pop_scope();
 
