@@ -93,3 +93,6 @@ analysis/
 # Test fixture build artifacts
 bloodc/tests/fixtures/*_test
 bloodc/tests/fixtures/builtin_methods
+
+# Runtime build artifacts
+runtime/*.o
