@@ -875,3 +875,54 @@ fn main() -> i32 {
     cleanup_fixture(&file_b);
     cleanup_test_cache(&cache_dir);
 }
+
+/// Test that files with identical function content but different source paths
+/// produce different cache entries. This prevents cache contamination when
+/// building multiple files in sequence.
+#[test]
+fn test_cache_isolation_by_source_path() {
+    let cache_dir = create_test_cache("source_path_isolation");
+
+    // Two files with identical function names and signatures but different return values
+    let file_a = create_fixture("cache_iso_a", r#"
+fn compute() -> i32 {
+    100
+}
+
+fn main() -> i32 {
+    compute()
+}
+"#);
+
+    let file_b = create_fixture("cache_iso_b", r#"
+fn compute() -> i32 {
+    200
+}
+
+fn main() -> i32 {
+    compute()
+}
+"#);
+
+    // Compile file_a first
+    let result_a = compile_with_cache(&file_a, &cache_dir);
+    assert!(result_a.success, "File A compilation failed");
+    let exit_a = run_executable(result_a.executable.as_ref().unwrap()).exit_code;
+    assert_eq!(exit_a, 100, "File A should return 100");
+
+    // Compile file_b - if source path isn't included in cache hash,
+    // this would incorrectly reuse file_a's cached code and return 100
+    let result_b = compile_with_cache(&file_b, &cache_dir);
+    assert!(result_b.success, "File B compilation failed");
+    let exit_b = run_executable(result_b.executable.as_ref().unwrap()).exit_code;
+    assert_eq!(exit_b, 200, "File B should return 200 (not polluted by file A's cache)");
+
+    // Verify file_a still works correctly after file_b was compiled
+    let result_a2 = compile_with_cache(&file_a, &cache_dir);
+    let exit_a2 = run_executable(result_a2.executable.as_ref().unwrap()).exit_code;
+    assert_eq!(exit_a2, 100, "File A should still return 100");
+
+    cleanup_fixture(&file_a);
+    cleanup_fixture(&file_b);
+    cleanup_test_cache(&cache_dir);
+}
