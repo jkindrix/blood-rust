@@ -433,13 +433,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let param_types = fn_type.get_param_types();
                         let mut converted_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arg_vals.len());
 
+                        // Track output buffer allocation for functions that return via out pointer
+                        let mut output_buffer_alloca: Option<inkwell::values::PointerValue> = None;
+
                         // Check for special built-in methods that need additional arguments
                         let needs_elem_size = matches!(
                             builtin_name.as_str(),
-                            "box_new" | "vec_push" | "vec_pop" | "vec_contains" |
+                            "box_new" | "box_into_inner" |
+                            "vec_push" | "vec_pop" | "vec_contains" |
                             "vec_reverse" | "vec_get" | "vec_get_ptr" | "vec_free" |
-                            "option_unwrap" | "option_try" |
-                            "result_unwrap" | "result_unwrap_err" | "result_try"
+                            "vec_first" | "vec_last" |
+                            "option_unwrap" | "option_try" | "option_expect" | "option_unwrap_or" |
+                            "option_ok_or" | "option_and" | "option_or" | "option_xor" |
+                            "option_as_ref" | "option_as_mut" | "option_take" | "option_replace" |
+                            "result_unwrap" | "result_unwrap_err" | "result_try" |
+                            "result_ok" | "result_err" | "result_expect" | "result_expect_err" |
+                            "result_unwrap_or" | "result_and" | "result_or" |
+                            "result_as_ref" | "result_as_mut"
                         );
 
                         for (i, val) in arg_vals.iter().enumerate() {
@@ -530,6 +540,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     let llvm_ty = self.lower_type(&value_ty);
                                     self.get_type_size_in_bytes(llvm_ty)
                                 },
+                                "box_into_inner" => {
+                                    // For box_into_inner, first arg is Box<T>, extract T's size
+                                    let box_ty = self.get_operand_type(&args[0], body);
+                                    // Get T from Box<T>
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = box_ty.kind() {
+                                        if let Some(inner_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(inner_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
                                 "vec_push" | "vec_contains" => {
                                     // Second arg is the element
                                     if args.len() >= 2 {
@@ -540,7 +565,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         8 // Default size
                                     }
                                 },
-                                "vec_pop" | "vec_reverse" | "vec_get" | "vec_get_ptr" | "vec_free" => {
+                                "vec_pop" | "vec_reverse" | "vec_get" | "vec_get_ptr" | "vec_free" |
+                                "vec_first" | "vec_last" => {
                                     // First arg is Vec<T>, extract T's size from the type
                                     let vec_ty = self.get_operand_type(&args[0], body);
                                     // Strip reference if present
@@ -560,7 +586,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         8
                                     }
                                 },
-                                "option_unwrap" | "option_try" => {
+                                "option_unwrap" | "option_try" | "option_expect" | "option_unwrap_or" |
+                                "option_ok_or" | "option_as_ref" | "option_as_mut" | "option_take" => {
                                     // First arg is Option<T>, extract T's size from the type
                                     let opt_ty = self.get_operand_type(&args[0], body);
                                     // Strip reference if present
@@ -569,6 +596,50 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         _ => opt_ty.clone(),
                                     };
                                     // Get payload type from Option<T>
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(payload_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(payload_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "option_and" => {
+                                    // Second arg is Option<U>, extract U's size (other_size)
+                                    if args.len() >= 2 {
+                                        let other_ty = self.get_operand_type(&args[1], body);
+                                        let inner_ty = match other_ty.kind() {
+                                            crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                            _ => other_ty.clone(),
+                                        };
+                                        // Get the whole Option<U> size for other_size
+                                        let llvm_ty = self.lower_type(&inner_ty);
+                                        self.get_type_size_in_bytes(llvm_ty)
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "option_or" | "option_xor" => {
+                                    // First arg is Option<T>, extract the whole Option<T> size
+                                    let opt_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match opt_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => opt_ty.clone(),
+                                    };
+                                    let llvm_ty = self.lower_type(&inner_ty);
+                                    self.get_type_size_in_bytes(llvm_ty)
+                                },
+                                "option_replace" => {
+                                    // First arg is &mut Option<T>, second is T value
+                                    // Need T's size (payload_size)
+                                    let opt_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match opt_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => opt_ty.clone(),
+                                    };
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(payload_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(payload_ty);
@@ -599,7 +670,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         8
                                     }
                                 },
-                                "result_unwrap_err" => {
+                                "result_unwrap_err" | "result_expect_err" => {
                                     // First arg is Result<T, E>, extract E's size (Err payload)
                                     let res_ty = self.get_operand_type(&args[0], body);
                                     let inner_ty = match res_ty.kind() {
@@ -618,15 +689,112 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         8
                                     }
                                 },
+                                "result_err" => {
+                                    // For result_err, we need the E's size (error type)
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if type_args.len() >= 2 {
+                                            let llvm_ty = self.lower_type(&type_args[1]);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "result_ok" | "result_expect" | "result_unwrap_or" => {
+                                    // First arg is Result<T, E>, extract T's size (Ok payload)
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(ok_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(ok_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "result_and" => {
+                                    // result_and(res, other, other_size, err_size, out)
+                                    // Second arg is Result<U, E>, need other_size (whole Result<U, E> size)
+                                    if args.len() >= 2 {
+                                        let other_ty = self.get_operand_type(&args[1], body);
+                                        let inner_ty = match other_ty.kind() {
+                                            crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                            _ => other_ty.clone(),
+                                        };
+                                        let llvm_ty = self.lower_type(&inner_ty);
+                                        self.get_type_size_in_bytes(llvm_ty)
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "result_or" => {
+                                    // result_or(res, other, ok_size, other_size, out)
+                                    // First arg is Result<T, E>, need T's size (ok_size)
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(ok_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(ok_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
+                                "result_as_ref" | "result_as_mut" => {
+                                    // result_as_ref/as_mut(res, ok_size, err_size, out)
+                                    // First arg is Result<T, E>, need T's size (ok_size)
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let inner_ty = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
+                                        if let Some(ok_ty) = type_args.first() {
+                                            let llvm_ty = self.lower_type(ok_ty);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    }
+                                },
                                 _ => 8,
                             };
 
                             let size_val = self.context.i64_type().const_int(elem_size, false);
                             converted_args.push(size_val.into());
 
-                            // For Option/Result unwrap/try methods, we need an output buffer
+                            // For Option/Result unwrap/try methods, Vec first/last, and Box into_inner, we need an output buffer
                             if matches!(builtin_name.as_str(), "option_unwrap" | "option_try" |
-                                "result_unwrap" | "result_unwrap_err" | "result_try") {
+                                "option_expect" | "option_unwrap_or" | "option_ok_or" |
+                                "option_and" | "option_or" | "option_xor" |
+                                "option_as_ref" | "option_as_mut" | "option_take" | "option_replace" |
+                                "result_unwrap" | "result_unwrap_err" | "result_try" |
+                                "result_ok" | "result_err" | "result_expect" | "result_expect_err" |
+                                "result_unwrap_or" | "result_and" | "result_or" |
+                                "result_as_ref" | "result_as_mut" |
+                                "vec_first" | "vec_last" | "vec_pop" |
+                                "box_into_inner") {
                                 // Get the type to determine the output buffer type
                                 let container_ty = self.get_operand_type(&args[0], body);
                                 let inner_ty = match container_ty.kind() {
@@ -634,24 +802,392 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     _ => container_ty.clone(),
                                 };
 
+                                let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+
+                                // Handle expect/expect_err string message argument
+                                if matches!(builtin_name.as_str(), "option_expect" | "result_expect" | "result_expect_err") {
+                                    // Second argument is &str (fat pointer: ptr + len)
+                                    // Already in converted_args, but we need to extract ptr and len
+                                    if args.len() >= 2 {
+                                        let str_val = &arg_vals[1];
+                                        if str_val.is_struct_value() {
+                                            // Fat pointer struct {ptr, len}
+                                            let struct_val = str_val.into_struct_value();
+                                            let str_ptr = self.builder
+                                                .build_extract_value(struct_val, 0, "str_ptr")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM extract error: {}", e), span
+                                                )])?;
+                                            let str_len = self.builder
+                                                .build_extract_value(struct_val, 1, "str_len")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM extract error: {}", e), span
+                                                )])?;
+                                            // Cast ptr to i8*
+                                            let str_ptr_cast = if str_ptr.is_pointer_value() {
+                                                self.builder.build_pointer_cast(
+                                                    str_ptr.into_pointer_value(),
+                                                    i8_ptr_type,
+                                                    "msg_ptr_cast"
+                                                ).map(|p| p.into()).unwrap_or(str_ptr)
+                                            } else {
+                                                str_ptr
+                                            };
+                                            converted_args.push(str_ptr_cast.into());
+                                            converted_args.push(str_len.into());
+                                        } else {
+                                            // Fallback: null ptr and 0 len
+                                            let null_ptr = i8_ptr_type.const_null();
+                                            converted_args.push(null_ptr.into());
+                                            converted_args.push(self.context.i64_type().const_int(0, false).into());
+                                        }
+                                    }
+                                }
+
+                                // Handle unwrap_or default value argument
+                                if matches!(builtin_name.as_str(), "option_unwrap_or" | "result_unwrap_or") {
+                                    // Second argument is the default value T
+                                    if args.len() >= 2 {
+                                        let default_val = &arg_vals[1];
+                                        // Allocate on stack and pass pointer
+                                        if default_val.is_int_value() {
+                                            let int_val = default_val.into_int_value();
+                                            let alloca = self.builder
+                                                .build_alloca(int_val.get_type(), "default_tmp")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM alloca error: {}", e), span
+                                                )])?;
+                                            self.builder.build_store(alloca, int_val)
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM store error: {}", e), span
+                                                )])?;
+                                            let ptr = self.builder
+                                                .build_pointer_cast(alloca, i8_ptr_type, "default_ptr_cast")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM pointer cast error: {}", e), span
+                                                )])?;
+                                            converted_args.push(ptr.into());
+                                        } else if default_val.is_struct_value() {
+                                            let struct_val = default_val.into_struct_value();
+                                            let alloca = self.builder
+                                                .build_alloca(struct_val.get_type(), "default_tmp")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM alloca error: {}", e), span
+                                                )])?;
+                                            self.builder.build_store(alloca, struct_val)
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM store error: {}", e), span
+                                                )])?;
+                                            let ptr = self.builder
+                                                .build_pointer_cast(alloca, i8_ptr_type, "default_ptr_cast")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM pointer cast error: {}", e), span
+                                                )])?;
+                                            converted_args.push(ptr.into());
+                                        } else if default_val.is_pointer_value() {
+                                            let ptr = self.builder
+                                                .build_pointer_cast(default_val.into_pointer_value(), i8_ptr_type, "default_ptr_cast")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM pointer cast error: {}", e), span
+                                                )])?;
+                                            converted_args.push(ptr.into());
+                                        } else {
+                                            // Fallback: null ptr
+                                            converted_args.push(i8_ptr_type.const_null().into());
+                                        }
+                                    }
+                                }
+
+                                // Handle option_ok_or: needs error value ptr and error size
+                                if builtin_name.as_str() == "option_ok_or" {
+                                    // Second argument is the error value E
+                                    if args.len() >= 2 {
+                                        let err_val = &arg_vals[1];
+                                        // Allocate on stack and pass pointer
+                                        if err_val.is_int_value() {
+                                            let int_val = err_val.into_int_value();
+                                            let alloca = self.builder
+                                                .build_alloca(int_val.get_type(), "err_tmp")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM alloca error: {}", e), span
+                                                )])?;
+                                            self.builder.build_store(alloca, int_val)
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM store error: {}", e), span
+                                                )])?;
+                                            let ptr = self.builder
+                                                .build_pointer_cast(alloca, i8_ptr_type, "err_ptr_cast")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM pointer cast error: {}", e), span
+                                                )])?;
+                                            converted_args.push(ptr.into());
+                                            // Add error size
+                                            let err_size = self.get_type_size_in_bytes(int_val.get_type().into());
+                                            converted_args.push(self.context.i64_type().const_int(err_size, false).into());
+                                        } else if err_val.is_struct_value() {
+                                            let struct_val = err_val.into_struct_value();
+                                            let alloca = self.builder
+                                                .build_alloca(struct_val.get_type(), "err_tmp")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM alloca error: {}", e), span
+                                                )])?;
+                                            self.builder.build_store(alloca, struct_val)
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM store error: {}", e), span
+                                                )])?;
+                                            let ptr = self.builder
+                                                .build_pointer_cast(alloca, i8_ptr_type, "err_ptr_cast")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM pointer cast error: {}", e), span
+                                                )])?;
+                                            converted_args.push(ptr.into());
+                                            // Add error size
+                                            let err_size = self.get_type_size_in_bytes(struct_val.get_type().into());
+                                            converted_args.push(self.context.i64_type().const_int(err_size, false).into());
+                                        } else if err_val.is_pointer_value() {
+                                            let ptr = self.builder
+                                                .build_pointer_cast(err_val.into_pointer_value(), i8_ptr_type, "err_ptr_cast")
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM pointer cast error: {}", e), span
+                                                )])?;
+                                            converted_args.push(ptr.into());
+                                            // Add default error size
+                                            converted_args.push(self.context.i64_type().const_int(8, false).into());
+                                        } else {
+                                            // Fallback
+                                            converted_args.push(i8_ptr_type.const_null().into());
+                                            converted_args.push(self.context.i64_type().const_int(8, false).into());
+                                        }
+                                    }
+                                }
+
+                                // Handle result_and: needs err_size as 4th argument
+                                if builtin_name.as_str() == "result_and" {
+                                    // Get err_size from the first Result<T, E>
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let res_inner = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    let err_size = if let crate::hir::TypeKind::Adt { args: type_args, .. } = res_inner.kind() {
+                                        if type_args.len() >= 2 {
+                                            let llvm_ty = self.lower_type(&type_args[1]);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    };
+                                    converted_args.push(self.context.i64_type().const_int(err_size, false).into());
+                                }
+
+                                // Handle result_or: needs other_size as 4th argument
+                                if builtin_name.as_str() == "result_or" {
+                                    // Get the whole Result<T, F> size from second argument
+                                    if args.len() >= 2 {
+                                        let other_ty = self.get_operand_type(&args[1], body);
+                                        let other_inner = match other_ty.kind() {
+                                            crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                            _ => other_ty.clone(),
+                                        };
+                                        let llvm_ty = self.lower_type(&other_inner);
+                                        let other_size = self.get_type_size_in_bytes(llvm_ty);
+                                        converted_args.push(self.context.i64_type().const_int(other_size, false).into());
+                                    }
+                                }
+
+                                // Handle result_as_ref/as_mut: needs err_size as 3rd argument
+                                if matches!(builtin_name.as_str(), "result_as_ref" | "result_as_mut") {
+                                    // Get err_size from Result<T, E>
+                                    let res_ty = self.get_operand_type(&args[0], body);
+                                    let res_inner = match res_ty.kind() {
+                                        crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                        _ => res_ty.clone(),
+                                    };
+                                    let err_size = if let crate::hir::TypeKind::Adt { args: type_args, .. } = res_inner.kind() {
+                                        if type_args.len() >= 2 {
+                                            let llvm_ty = self.lower_type(&type_args[1]);
+                                            self.get_type_size_in_bytes(llvm_ty)
+                                        } else {
+                                            8
+                                        }
+                                    } else {
+                                        8
+                                    };
+                                    converted_args.push(self.context.i64_type().const_int(err_size, false).into());
+                                }
+
                                 // Get the appropriate payload type based on the method
                                 let payload_llvm_ty = if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                     match builtin_name.as_str() {
-                                        // Option<T> and Result<T, E>.unwrap/try return T (first type arg)
-                                        "option_unwrap" | "option_try" | "result_unwrap" | "result_try" => {
+                                        // Option<T> and Result<T, E>.unwrap/try/expect return T (first type arg)
+                                        "option_unwrap" | "option_try" | "option_expect" | "option_unwrap_or" |
+                                        "result_unwrap" | "result_try" | "result_expect" | "result_unwrap_or" => {
                                             if let Some(payload_ty) = type_args.first() {
                                                 self.lower_type(payload_ty)
                                             } else {
                                                 self.context.i64_type().into()
                                             }
                                         }
-                                        // Result<T, E>.unwrap_err returns E (second type arg)
-                                        "result_unwrap_err" => {
+                                        // Result<T, E>.unwrap_err/expect_err returns E (second type arg)
+                                        "result_unwrap_err" | "result_expect_err" => {
                                             if type_args.len() >= 2 {
                                                 self.lower_type(&type_args[1])
                                             } else {
                                                 self.context.i64_type().into()
                                             }
+                                        }
+                                        // result_ok returns Option<T>, so output is Option struct
+                                        "result_ok" => {
+                                            // Option<T> = { tag: i32, payload: T }
+                                            if let Some(ok_ty) = type_args.first() {
+                                                let payload_ty = self.lower_type(ok_ty);
+                                                // Create Option struct type: { i32, payload_ty }
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    payload_ty,
+                                                ], false).into()
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // result_err returns Option<E>, so output is Option struct
+                                        "result_err" => {
+                                            // Option<E> = { tag: i32, payload: E }
+                                            if type_args.len() >= 2 {
+                                                let payload_ty = self.lower_type(&type_args[1]);
+                                                // Create Option struct type: { i32, payload_ty }
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    payload_ty,
+                                                ], false).into()
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // option_ok_or returns Result<T, E>, so output is Result struct
+                                        "option_ok_or" => {
+                                            // Result<T, E> = { tag: i32, payload: max(T, E) }
+                                            // For simplicity, we'll use T's type since E might be inferred
+                                            if let Some(ok_ty) = type_args.first() {
+                                                let payload_ty = self.lower_type(ok_ty);
+                                                // Create Result struct type: { i32, payload_ty }
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    payload_ty,
+                                                ], false).into()
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // vec_first/vec_last return Option<&T>, so output is Option struct with pointer
+                                        "vec_first" | "vec_last" => {
+                                            // Option<&T> = { tag: i32, payload: *T }
+                                            let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                                            self.context.struct_type(&[
+                                                self.context.i32_type().into(),
+                                                ptr_type.into(),
+                                            ], false).into()
+                                        }
+                                        // vec_pop returns Option<T>, so output is Option struct
+                                        "vec_pop" => {
+                                            // Option<T> = { tag: i32, payload: T }
+                                            if let Some(elem_ty) = type_args.first() {
+                                                let payload_ty = self.lower_type(elem_ty);
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    payload_ty,
+                                                ], false).into()
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // box_into_inner returns T (the inner type of Box<T>)
+                                        "box_into_inner" => {
+                                            if let Some(inner_ty) = type_args.first() {
+                                                self.lower_type(inner_ty)
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // option_and returns Option<U> where U is second arg's inner type
+                                        "option_and" => {
+                                            // Output is Option<U>, need to get U from second arg's type
+                                            if args.len() >= 2 {
+                                                let other_ty = self.get_operand_type(&args[1], body);
+                                                let other_inner = match other_ty.kind() {
+                                                    crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                                    _ => other_ty.clone(),
+                                                };
+                                                self.lower_type(&other_inner)
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // option_or/xor returns Option<T>
+                                        "option_or" | "option_xor" | "option_take" | "option_replace" => {
+                                            // Output is Option<T>
+                                            if let Some(payload_ty) = type_args.first() {
+                                                let t_llvm = self.lower_type(payload_ty);
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    t_llvm,
+                                                ], false).into()
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // option_as_ref returns Option<&T>
+                                        "option_as_ref" => {
+                                            let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                                            self.context.struct_type(&[
+                                                self.context.i32_type().into(),
+                                                ptr_type.into(),
+                                            ], false).into()
+                                        }
+                                        // option_as_mut returns Option<&mut T>
+                                        "option_as_mut" => {
+                                            let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                                            self.context.struct_type(&[
+                                                self.context.i32_type().into(),
+                                                ptr_type.into(),
+                                            ], false).into()
+                                        }
+                                        // result_and returns Result<U, E> - output is the second Result type
+                                        "result_and" => {
+                                            if args.len() >= 2 {
+                                                let other_ty = self.get_operand_type(&args[1], body);
+                                                let other_inner = match other_ty.kind() {
+                                                    crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                                    _ => other_ty.clone(),
+                                                };
+                                                self.lower_type(&other_inner)
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // result_or returns Result<T, F>
+                                        "result_or" => {
+                                            if args.len() >= 2 {
+                                                let other_ty = self.get_operand_type(&args[1], body);
+                                                let other_inner = match other_ty.kind() {
+                                                    crate::hir::TypeKind::Ref { inner, .. } => inner.clone(),
+                                                    _ => other_ty.clone(),
+                                                };
+                                                self.lower_type(&other_inner)
+                                            } else {
+                                                self.context.i64_type().into()
+                                            }
+                                        }
+                                        // result_as_ref/as_mut returns Result<&T, &E> or Result<&mut T, &mut E>
+                                        "result_as_ref" | "result_as_mut" => {
+                                            // Result<&T, &E> = { tag: i32, payload: *void (pointer) }
+                                            let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                                            self.context.struct_type(&[
+                                                self.context.i32_type().into(),
+                                                ptr_type.into(),
+                                            ], false).into()
                                         }
                                         _ => self.context.i64_type().into(),
                                     }
@@ -666,8 +1202,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         format!("LLVM alloca error: {}", e), span
                                     )])?;
 
+                                // Save for later use after call
+                                output_buffer_alloca = Some(out_alloca);
+
                                 // Cast to i8* for the runtime function
-                                let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
                                 let out_ptr = self.builder
                                     .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
                                     .map_err(|e| vec![Diagnostic::error(
@@ -677,10 +1215,67 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             }
                         }
 
-                        self.builder.build_call(fn_value, &converted_args, "builtin_call")
+                        // Handle string_find and string_rfind which need output buffer for Option<usize>
+                        // These don't need elem_size, just an output buffer
+                        if matches!(builtin_name.as_str(), "string_find" | "string_rfind") {
+                            let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                            // Option<usize> = { tag: i32, payload: i64 }
+                            let option_usize_ty = self.context.struct_type(&[
+                                self.context.i32_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+
+                            let out_alloca = self.builder
+                                .build_alloca(option_usize_ty, "find_out")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), span
+                                )])?;
+
+                            // Save for later use after call
+                            output_buffer_alloca = Some(out_alloca);
+
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), span
+                                )])?;
+                            converted_args.push(out_ptr.into());
+                        }
+
+                        // Make the call
+                        let call_instr = self.builder.build_call(fn_value, &converted_args, "builtin_call")
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM call error: {}", e), span
-                            )])?
+                            )])?;
+
+                        // If we used an output buffer, load the result from it and store to destination
+                        if let Some(out_alloca) = output_buffer_alloca {
+                            let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;
+                            let result = self.builder.build_load(out_alloca, "out_result")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM load error: {}", e), span
+                                )])?;
+                            self.builder.build_store(dest_ptr, result)
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM store error: {}", e), span
+                                )])?;
+
+                            // Branch to continuation
+                            if let Some(target_bb_id) = target {
+                                let target_bb = llvm_blocks.get(target_bb_id).ok_or_else(|| {
+                                    vec![Diagnostic::error("Call target block not found", span)]
+                                })?;
+                                self.builder.build_unconditional_branch(*target_bb)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM branch error: {}", e), span
+                                    )])?;
+                            }
+                            return Ok(());
+                        }
+
+                        // For non-output-buffer calls, return the call instruction value
+                        // (this will be void for void functions, which is handled below)
+                        call_instr
                     } else {
                         return Err(vec![Diagnostic::error(
                             format!("Runtime function '{}' not declared", builtin_name), span
@@ -1181,8 +1776,56 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let gep = unsafe {
                     self.builder.build_gep(args_alloca, &[zero, idx], &format!("arg_{}", i))
                 }.map_err(|e| vec![Diagnostic::error(format!("LLVM GEP error: {}", e), span)])?;
-                let val_i64 = self.builder.build_int_z_extend(val.into_int_value(), i64_ty, "arg_i64")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM extend error: {}", e), span)])?;
+
+                // Convert value to i64 based on its type
+                let val_i64 = match *val {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 64 {
+                            iv
+                        } else {
+                            self.builder.build_int_z_extend(iv, i64_ty, "arg_i64")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM extend error: {}", e), span)])?
+                        }
+                    }
+                    BasicValueEnum::FloatValue(fv) => {
+                        self.builder.build_bit_cast(fv, i64_ty, "float_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM bitcast error: {}", e), span)])?
+                            .into_int_value()
+                    }
+                    BasicValueEnum::PointerValue(pv) => {
+                        self.builder.build_ptr_to_int(pv, i64_ty, "ptr_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM ptr_to_int error: {}", e), span)])?
+                    }
+                    BasicValueEnum::StructValue(sv) => {
+                        // Allocate stack space and store the struct
+                        let struct_alloca = self.builder.build_alloca(sv.get_type(), &format!("struct_arg_{}", i))
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), span)])?;
+                        self.builder.build_store(struct_alloca, sv)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), span)])?;
+                        // Pass pointer as i64
+                        self.builder.build_ptr_to_int(struct_alloca, i64_ty, "struct_ptr_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM ptr_to_int error: {}", e), span)])?
+                    }
+                    BasicValueEnum::ArrayValue(av) => {
+                        // Allocate stack space and store the array
+                        let array_alloca = self.builder.build_alloca(av.get_type(), &format!("array_arg_{}", i))
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), span)])?;
+                        self.builder.build_store(array_alloca, av)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), span)])?;
+                        // Pass pointer as i64
+                        self.builder.build_ptr_to_int(array_alloca, i64_ty, "array_ptr_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM ptr_to_int error: {}", e), span)])?
+                    }
+                    BasicValueEnum::VectorValue(_) => {
+                        return Err(vec![ice_err!(
+                            span,
+                            "unsupported argument type in perform expression";
+                            "type" => "VectorValue",
+                            "expected" => "IntValue, FloatValue, PointerValue, StructValue, or ArrayValue"
+                        )]);
+                    }
+                };
+
                 self.builder.build_store(gep, val_i64)
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), span)])?;
             }

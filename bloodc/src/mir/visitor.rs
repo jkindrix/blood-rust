@@ -272,6 +272,9 @@ pub trait Visitor: Sized {
             Rvalue::Len(place) => {
                 self.visit_place(place, PlaceContext::Read, location);
             }
+            Rvalue::VecLen(place) => {
+                self.visit_place(place, PlaceContext::Read, location);
+            }
             Rvalue::ReadGeneration(place) => {
                 self.visit_place(place, PlaceContext::Read, location);
             }

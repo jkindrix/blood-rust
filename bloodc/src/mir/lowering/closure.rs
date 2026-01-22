@@ -433,6 +433,28 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 Ok(Operand::Copy(Place::local(len_temp)))
             }
 
+            ExprKind::VecLen(vec_expr) => {
+                // Lower Vec length to Rvalue::VecLen
+                let vec_op = self.lower_expr(vec_expr)?;
+
+                // Get a place for the Vec reference
+                let vec_place = match vec_op {
+                    Operand::Copy(place) | Operand::Move(place) => place,
+                    Operand::Constant(_) => {
+                        // For constants, store in temp first
+                        let temp = self.new_temp(vec_expr.ty.clone(), expr.span);
+                        self.push_assign(Place::local(temp), Rvalue::Use(vec_op));
+                        Place::local(temp)
+                    }
+                };
+
+                // Create Rvalue::VecLen for the place
+                let len_temp = self.new_temp(Type::usize(), expr.span);
+                self.push_assign(Place::local(len_temp), Rvalue::VecLen(vec_place));
+
+                Ok(Operand::Copy(Place::local(len_temp)))
+            }
+
             ExprKind::ArrayToSlice { expr: array_expr, array_len } => {
                 // Lower array-to-slice coercion: &[T; N] -> &[T]
                 let array_ref_op = self.lower_expr(array_expr)?;

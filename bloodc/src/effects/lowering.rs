@@ -555,6 +555,7 @@ impl EffectLowering {
             }
             ExprKind::Dbg(inner) => self.detect_row_poly_recursive(inner),
             ExprKind::SliceLen(inner) => self.detect_row_poly_recursive(inner),
+            ExprKind::VecLen(inner) => self.detect_row_poly_recursive(inner),
             ExprKind::ArrayToSlice { expr, .. } => self.detect_row_poly_recursive(expr),
 
             // Leaf expressions are not polymorphic
@@ -776,6 +777,9 @@ impl EffectLowering {
                 self.collect_effects_recursive(inner, effects);
             }
             ExprKind::SliceLen(inner) => {
+                self.collect_effects_recursive(inner, effects);
+            }
+            ExprKind::VecLen(inner) => {
                 self.collect_effects_recursive(inner, effects);
             }
             ExprKind::ArrayToSlice { expr, .. } => {

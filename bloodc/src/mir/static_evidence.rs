@@ -332,6 +332,7 @@ fn contains_nested_handle(expr: &Expr) -> bool {
                 || named_args.iter().any(|(_, a)| contains_nested_handle(a))
         }
         ExprKind::SliceLen(inner) => contains_nested_handle(inner),
+        ExprKind::VecLen(inner) => contains_nested_handle(inner),
         ExprKind::ArrayToSlice { expr, .. } => contains_nested_handle(expr),
 
         // Leaf expressions: no nested handles possible
@@ -800,6 +801,7 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
         }
 
         ExprKind::SliceLen(inner) => contains_escaping_control_flow(inner),
+        ExprKind::VecLen(inner) => contains_escaping_control_flow(inner),
         ExprKind::ArrayToSlice { expr, .. } => contains_escaping_control_flow(expr),
 
         // Leaf expressions: no sub-expressions to check

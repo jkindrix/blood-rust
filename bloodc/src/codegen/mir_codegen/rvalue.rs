@@ -124,6 +124,10 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 self.compile_len_rvalue(place, body, escape_results)
             }
 
+            Rvalue::VecLen(place) => {
+                self.compile_vec_len_rvalue(place, body, escape_results)
+            }
+
             Rvalue::Aggregate { kind, operands } => {
                 self.compile_aggregate(kind, operands, body, escape_results)
             }
@@ -363,7 +367,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         match effective_ty.kind() {
             TypeKind::Array { size, .. } => {
                 // For arrays, return the static size as a usize (i64)
-                let len_val = self.context.i64_type().const_int(*size, false);
+                let concrete_size = size.as_u64().unwrap_or(0);
+                let len_val = self.context.i64_type().const_int(concrete_size, false);
                 Ok(len_val.into())
             }
             TypeKind::Slice { .. } => {
@@ -393,7 +398,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // For references/pointers to arrays, extract from the inner type
                 match inner.kind() {
                     TypeKind::Array { size, .. } => {
-                        let len_val = self.context.i64_type().const_int(*size, false);
+                        let concrete_size = size.as_u64().unwrap_or(0);
+                        let len_val = self.context.i64_type().const_int(concrete_size, false);
                         Ok(len_val.into())
                     }
                     TypeKind::Slice { .. } => {
@@ -432,6 +438,73 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     Span::dummy()
                 )])
             }
+        }
+    }
+
+    /// Compile Vec length extraction.
+    /// The place holds a reference to a Vec (&Vec<T> or &mut Vec<T>).
+    /// Vec layout: { ptr: *mut u8, len: i64, capacity: i64 }
+    /// We extract field 1 (len).
+    fn compile_vec_len_rvalue(
+        &mut self,
+        place: &crate::mir::types::Place,
+        body: &MirBody,
+        escape_results: Option<&EscapeResults>,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        // Get the pointer to the Vec struct (the reference)
+        let vec_ptr = self.compile_mir_place(place, body, escape_results)?;
+
+        // The reference to Vec points to the Vec struct { ptr, len, capacity }
+        // We need to load through the reference to get the Vec struct pointer,
+        // then GEP to field 1 (len) and load it.
+
+        // Load the Vec struct pointer from the reference
+        let vec_struct_ptr = self.builder.build_load(vec_ptr, "vec_ptr")
+            .map_err(|e| vec![Diagnostic::error(
+                format!("LLVM load error: {}", e), Span::dummy()
+            )])?;
+
+        // If it's a pointer value, use it to access the len field
+        if let BasicValueEnum::PointerValue(struct_ptr) = vec_struct_ptr {
+            // GEP to field 1 (len) of the Vec struct
+            let len_ptr = self.builder.build_struct_gep(
+                struct_ptr,
+                1,
+                "vec_len_ptr"
+            ).map_err(|e| vec![Diagnostic::error(
+                format!("LLVM struct gep error: {}", e), Span::dummy()
+            )])?;
+
+            // Load the length value
+            let len_val = self.builder.build_load(len_ptr, "vec_len")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM load error: {}", e), Span::dummy()
+                )])?;
+
+            Ok(len_val)
+        } else if let BasicValueEnum::StructValue(sv) = vec_struct_ptr {
+            // If we got a struct value directly, extract field 1
+            let len_val = self.builder.build_extract_value(sv, 1, "vec_len")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM extract error: {}", e), Span::dummy()
+                )])?;
+            Ok(len_val)
+        } else {
+            // The place directly holds a Vec struct, try GEP on it
+            let len_ptr = self.builder.build_struct_gep(
+                vec_ptr,
+                1,
+                "vec_len_ptr"
+            ).map_err(|e| vec![Diagnostic::error(
+                format!("LLVM struct gep error for Vec: {}", e), Span::dummy()
+            )])?;
+
+            let len_val = self.builder.build_load(len_ptr, "vec_len")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM load error: {}", e), Span::dummy()
+                )])?;
+
+            Ok(len_val)
         }
     }
 

@@ -373,6 +373,9 @@ impl EffectInferencer {
             ExprKind::SliceLen(inner) => {
                 self.infer_expr(inner, ctx);
             }
+            ExprKind::VecLen(inner) => {
+                self.infer_expr(inner, ctx);
+            }
             ExprKind::ArrayToSlice { expr, .. } => {
                 self.infer_expr(expr, ctx);
             }

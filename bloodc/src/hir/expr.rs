@@ -394,6 +394,12 @@ pub enum ExprKind {
     /// For slices, this extracts the length from the fat pointer.
     SliceLen(Box<Expr>),
 
+    /// Vec length: `vec.len()`
+    ///
+    /// This is a compiler intrinsic that extracts the length from a Vec.
+    /// Used in for loop desugaring for Vec iteration.
+    VecLen(Box<Expr>),
+
     /// Array-to-slice coercion: `&[T; N]` -> `&[T]`
     ///
     /// This coercion creates a fat pointer (slice reference) from an array reference.

@@ -358,6 +358,10 @@ impl<'a> MacroExpander<'a> {
                 ExprKind::SliceLen(Box::new(self.expand_expr(*inner)))
             }
 
+            ExprKind::VecLen(inner) => {
+                ExprKind::VecLen(Box::new(self.expand_expr(*inner)))
+            }
+
             ExprKind::ArrayToSlice { expr, array_len } => {
                 ExprKind::ArrayToSlice {
                     expr: Box::new(self.expand_expr(*expr)),

@@ -7,8 +7,10 @@ use inkwell::values::BasicValueEnum;
 use inkwell::AddressSpace;
 
 use crate::diagnostics::Diagnostic;
+use crate::effects::evidence::HandlerStateKind;
 use crate::mir::body::MirBody;
 use crate::mir::ptr::MemoryTier;
+use crate::mir::static_evidence::InlineEvidenceMode;
 use crate::mir::types::{Statement, StatementKind};
 use crate::mir::EscapeResults;
 
@@ -241,11 +243,33 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // - ZeroInit: State is zero-initialized, can use BSS
                 // - Dynamic: Must use full runtime allocation (current path)
                 //
+                // Currently all state kinds use the dynamic path. When static evidence
+                // optimization is implemented, Stateless/Constant/ZeroInit can skip
+                // runtime allocation.
+                match state_kind {
+                    HandlerStateKind::Stateless => {
+                        // TODO(EFF-OPT-001): Handler has no state - can skip state allocation.
+                        // For now, fall through to dynamic implementation.
+                    }
+                    HandlerStateKind::Constant => {
+                        // TODO(EFF-OPT-001): State is compile-time known - can embed in static data.
+                        // For now, fall through to dynamic implementation.
+                    }
+                    HandlerStateKind::ZeroInit => {
+                        // TODO(EFF-OPT-001): State is zero-initialized - can use BSS allocation.
+                        // For now, fall through to dynamic implementation.
+                    }
+                    HandlerStateKind::Dynamic => {
+                        // Standard dynamic state - requires runtime allocation (current implementation).
+                    }
+                }
+
                 // STACK ALLOCATION OPTIMIZATION (EFF-OPT-005/006):
                 // When allocation_tier is Stack, the handler is lexically scoped
                 // (no Perform/Resume that could capture the continuation).
                 // We can skip cloning the evidence vector (blood_evidence_create)
                 // and push directly onto the existing one, avoiding heap allocation.
+                // NOTE: allocation_tier is already used below to differentiate stack vs region paths.
                 //
                 // INLINE EVIDENCE OPTIMIZATION (EFF-OPT-003/004):
                 // When inline_mode is Inline or SpecializedPair, the handler evidence
@@ -254,9 +278,22 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // - SpecializedPair: Two handlers, can use fixed-size pair structure
                 // - Vector: Three or more handlers, must use heap-allocated vector
                 //
-                // TODO: Implement optimized paths for static and inline handlers.
-                let _ = state_kind; // Suppress unused warning until static optimization is implemented
-                let _ = inline_mode; // Suppress unused warning until inline optimization is implemented
+                // Currently all modes use the vector-based implementation. When Inline mode
+                // optimization is implemented, single-handler cases can skip the evidence
+                // vector entirely and pass the handler entry directly in registers/stack.
+                match inline_mode {
+                    InlineEvidenceMode::Inline => {
+                        // TODO(EFF-OPT-003): Implement direct evidence passing for single handlers.
+                        // For now, fall through to vector implementation.
+                    }
+                    InlineEvidenceMode::SpecializedPair => {
+                        // Per spec: "Currently treated same as Vector in codegen."
+                        // Future optimization opportunity for two-handler case.
+                    }
+                    InlineEvidenceMode::Vector => {
+                        // Standard vector-based evidence passing - this is the current implementation.
+                    }
+                }
 
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
@@ -497,6 +534,29 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // as named handler declarations. This implementation pushes the handler
                 // similarly to PushHandler but with inline operation functions.
                 //
+                // INLINE EVIDENCE MODE (EFF-OPT-003/004):
+                // The inline_mode parameter specifies the optimal evidence passing strategy:
+                // - Inline: Single handler, could pass directly without vector (optimization not yet implemented)
+                // - SpecializedPair: Two handlers, could use fixed-size pair (per spec, treated same as Vector)
+                // - Vector: Three or more handlers, must use heap-allocated vector
+                //
+                // Currently all modes use the vector-based implementation. When Inline mode
+                // optimization is implemented, single-handler cases can skip the evidence
+                // vector entirely and pass the handler entry directly in registers/stack.
+                match inline_mode {
+                    InlineEvidenceMode::Inline => {
+                        // TODO(EFF-OPT-003): Implement direct evidence passing for single handlers.
+                        // For now, fall through to vector implementation.
+                    }
+                    InlineEvidenceMode::SpecializedPair => {
+                        // Per spec: "Currently treated same as Vector in codegen."
+                        // Future optimization opportunity for two-handler case.
+                    }
+                    InlineEvidenceMode::Vector => {
+                        // Standard vector-based evidence passing - this is the current implementation.
+                    }
+                }
+
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
 

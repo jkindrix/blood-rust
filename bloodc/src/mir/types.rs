@@ -697,6 +697,10 @@ pub enum Rvalue {
     /// Compute length of an array/slice.
     Len(Place),
 
+    /// Compute length of a Vec.
+    /// Takes a place holding a reference to a Vec and extracts the len field.
+    VecLen(Place),
+
     /// Create an aggregate value (struct, tuple, array).
     Aggregate {
         kind: AggregateKind,
