@@ -539,6 +539,28 @@ impl<'a> TypeContext<'a> {
         });
 
         self.box_def_id = Some(box_def_id);
+
+        // Register Iter<T> as a built-in struct (iterator over T)
+        let iter_def_id = self.resolver.define_item(
+            "Iter".to_string(),
+            hir::DefKind::Struct,
+            Span::dummy(),
+        ).expect("BUG: Iter builtin registration failed");
+        self.resolver.define_type("Iter".to_string(), iter_def_id, Span::dummy())
+            .expect("BUG: Iter type registration failed");
+
+        // Iter has one type parameter T (the item type)
+        let iter_t_var_id = TyVarId(self.next_type_param_id);
+        self.next_type_param_id += 1;
+
+        // Register struct info (opaque struct with no exposed fields)
+        self.struct_defs.insert(iter_def_id, StructInfo {
+            name: "Iter".to_string(),
+            fields: vec![],  // opaque - no exposed fields
+            generics: vec![iter_t_var_id],
+        });
+
+        self.iter_def_id = Some(iter_def_id);
     }
 
     /// Register built-in methods for primitive and builtin types.
@@ -680,6 +702,74 @@ impl<'a> TypeContext<'a> {
             vec![Type::reference(Type::str(), false)],
             byte_slice_ty.clone(),
             "str_as_bytes",
+        );
+
+        // str.to_uppercase(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "to_uppercase",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            string_ty.clone(),
+            "str_to_uppercase",
+        );
+
+        // &str.to_uppercase(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "to_uppercase",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            string_ty.clone(),
+            "str_to_uppercase",
+        );
+
+        // str.to_lowercase(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "to_lowercase",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            string_ty.clone(),
+            "str_to_lowercase",
+        );
+
+        // &str.to_lowercase(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "to_lowercase",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            string_ty.clone(),
+            "str_to_lowercase",
+        );
+
+        // str.replace(&self, from: &str, to: &str) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "replace",
+            false,
+            vec![
+                Type::reference(Type::str(), false),
+                Type::reference(Type::str(), false),
+                Type::reference(Type::str(), false),
+            ],
+            string_ty.clone(),
+            "str_replace",
+        );
+
+        // &str.replace(&self, from: &str, to: &str) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "replace",
+            false,
+            vec![
+                Type::reference(Type::str(), false),
+                Type::reference(Type::str(), false),
+                Type::reference(Type::str(), false),
+            ],
+            string_ty.clone(),
+            "str_replace",
         );
 
         // === char methods ===
@@ -881,6 +971,237 @@ impl<'a> TypeContext<'a> {
             "string_as_bytes",
         );
 
+        // String.contains(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "contains",
+            false,
+            vec![Type::reference(string_ty.clone(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "string_contains",
+        );
+
+        // String.starts_with(&self, prefix: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "starts_with",
+            false,
+            vec![Type::reference(string_ty.clone(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "string_starts_with",
+        );
+
+        // String.ends_with(&self, suffix: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "ends_with",
+            false,
+            vec![Type::reference(string_ty.clone(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "string_ends_with",
+        );
+
+        // String.find(&self, pattern: &str) -> Option<usize>
+        let option_usize = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![usize_ty.clone()],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "find",
+            false,
+            vec![Type::reference(string_ty.clone(), false), Type::reference(Type::str(), false)],
+            option_usize.clone(),
+            "string_find",
+        );
+
+        // String.rfind(&self, pattern: &str) -> Option<usize>
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "rfind",
+            false,
+            vec![Type::reference(string_ty.clone(), false), Type::reference(Type::str(), false)],
+            option_usize,
+            "string_rfind",
+        );
+
+        // String.trim(&self) -> &str
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "trim",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            Type::reference(Type::str(), false),
+            "string_trim",
+        );
+
+        // String.trim_start(&self) -> &str
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "trim_start",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            Type::reference(Type::str(), false),
+            "string_trim_start",
+        );
+
+        // String.trim_end(&self) -> &str
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "trim_end",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            Type::reference(Type::str(), false),
+            "string_trim_end",
+        );
+
+        // String.to_uppercase(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "to_uppercase",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            string_ty.clone(),
+            "string_to_uppercase",
+        );
+
+        // String.to_lowercase(&self) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "to_lowercase",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            string_ty.clone(),
+            "string_to_lowercase",
+        );
+
+        // String.replace(&self, from: &str, to: &str) -> String
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "replace",
+            false,
+            vec![
+                Type::reference(string_ty.clone(), false),
+                Type::reference(Type::str(), false),
+                Type::reference(Type::str(), false),
+            ],
+            string_ty.clone(),
+            "string_replace",
+        );
+
+        // String.split(&self, pat: &str) -> Vec<String>
+        // Splits string by pattern delimiter
+        // Note: Returns Vec until Iterator trait is implemented
+        let vec_def_id_early = self.vec_def_id.expect("vec_def_id must be set");
+        let vec_string = Type::adt(vec_def_id_early, vec![string_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "split",
+            false,
+            vec![
+                Type::reference(string_ty.clone(), false),
+                Type::reference(Type::str(), false),
+            ],
+            vec_string.clone(),
+            "string_split",
+        );
+
+        // String.split_whitespace(&self) -> Vec<String>
+        // Splits string by whitespace
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "split_whitespace",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            vec_string.clone(),
+            "string_split_whitespace",
+        );
+
+        // String.lines(&self) -> Vec<String>
+        // Splits string by line endings
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "lines",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            vec_string.clone(),
+            "string_lines",
+        );
+
+        // String.chars(&self) -> Vec<char>
+        // Returns characters as a Vec
+        let vec_char = Type::adt(vec_def_id_early, vec![Type::char()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "chars",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            vec_char,
+            "string_chars",
+        );
+
+        // String.bytes(&self) -> Vec<u8>
+        // Returns bytes as a Vec
+        let vec_u8 = Type::adt(vec_def_id_early, vec![Type::u8()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "bytes",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            vec_u8,
+            "string_bytes",
+        );
+
+        // String.parse<T>(&self) -> Result<T, ParseError>
+        // Note: For now, we register specific parse methods for common types
+        // Full generic parse requires FromStr trait
+
+        // String.parse_i32(&self) -> Result<i32, String>
+        // Returns Result with error message on failure
+        let result_def_id_early = self.result_def_id.expect("result_def_id must be set");
+        let parse_i32_result = Type::adt(result_def_id_early, vec![Type::i32(), string_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "parse_i32",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            parse_i32_result,
+            "string_parse_i32",
+        );
+
+        // String.parse_i64(&self) -> Result<i64, String>
+        let parse_i64_result = Type::adt(result_def_id_early, vec![Type::i64(), string_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "parse_i64",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            parse_i64_result,
+            "string_parse_i64",
+        );
+
+        // String.parse_f64(&self) -> Result<f64, String>
+        let parse_f64_result = Type::adt(result_def_id_early, vec![Type::f64(), string_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "parse_f64",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            parse_f64_result,
+            "string_parse_f64",
+        );
+
+        // String.parse_bool(&self) -> Result<bool, String>
+        let parse_bool_result = Type::adt(result_def_id_early, vec![Type::bool(), string_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "parse_bool",
+            false,
+            vec![Type::reference(string_ty.clone(), false)],
+            parse_bool_result,
+            "string_parse_bool",
+        );
+
         // === Option methods ===
         // Note: Option<T>.unwrap(self) -> T requires generic handling,
         // which is done in find_builtin_method with type substitution.
@@ -932,9 +1253,238 @@ impl<'a> TypeContext<'a> {
             BuiltinMethodType::Option,
             "try_",
             false,
-            vec![option_t],
+            vec![option_t.clone()],
             t_ty.clone(),
             "option_try",
+        );
+
+        // Option<T>.expect(self, msg: &str) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "expect",
+            false,
+            vec![option_t.clone(), Type::reference(Type::str(), false)],
+            t_ty.clone(),
+            "option_expect",
+        );
+
+        // Option<T>.unwrap_or(self, default: T) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "unwrap_or",
+            false,
+            vec![option_t.clone(), t_ty.clone()],
+            t_ty.clone(),
+            "option_unwrap_or",
+        );
+
+        // Option<T>.ok_or(self, err: E) -> Result<T, E>
+        // Note: E is a fresh type parameter
+        let e_var_id = TyVarId(9002);  // synthetic placeholder for E
+        let e_ty_opt = Type::new(TypeKind::Param(e_var_id));
+        let result_te_opt = Type::adt(
+            self.result_def_id.expect("BUG: result_def_id not set"),
+            vec![t_ty.clone(), e_ty_opt.clone()]
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "ok_or",
+            false,
+            vec![option_t.clone(), e_ty_opt.clone()],
+            result_te_opt.clone(),
+            "option_ok_or",
+        );
+
+        // Option<T>.and(self, other: Option<U>) -> Option<U>
+        // Note: U is a fresh type parameter that must be inferred from the argument
+        let u_var_id = TyVarId(9003);  // synthetic placeholder for U
+        let u_ty = Type::new(TypeKind::Param(u_var_id));
+        let option_u = Type::adt(option_def_id, vec![u_ty.clone()]);
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Option,
+            "and",
+            false,
+            vec![option_t.clone(), option_u.clone()],
+            option_u.clone(),
+            "option_and",
+            vec![u_var_id],  // U is a method-level type parameter
+        );
+
+        // Option<T>.or(self, other: Option<T>) -> Option<T>
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "or",
+            false,
+            vec![option_t.clone(), option_t.clone()],
+            option_t.clone(),
+            "option_or",
+        );
+
+        // Option<T>.xor(self, other: Option<T>) -> Option<T>
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "xor",
+            false,
+            vec![option_t.clone(), option_t.clone()],
+            option_t.clone(),
+            "option_xor",
+        );
+
+        // Option<T>.as_ref(&self) -> Option<&T>
+        let option_ref_t_opt = Type::adt(option_def_id, vec![Type::reference(t_ty.clone(), false)]);
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "as_ref",
+            false,
+            vec![Type::reference(option_t.clone(), false)],
+            option_ref_t_opt,
+            "option_as_ref",
+        );
+
+        // Option<T>.as_mut(&mut self) -> Option<&mut T>
+        let option_ref_mut_t = Type::adt(option_def_id, vec![Type::reference(t_ty.clone(), true)]);
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "as_mut",
+            false,
+            vec![Type::reference(option_t.clone(), true)],
+            option_ref_mut_t,
+            "option_as_mut",
+        );
+
+        // Option<T>.take(&mut self) -> Option<T>
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "take",
+            false,
+            vec![Type::reference(option_t.clone(), true)],
+            option_t.clone(),
+            "option_take",
+        );
+
+        // Option<T>.replace(&mut self, value: T) -> Option<T>
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "replace",
+            false,
+            vec![Type::reference(option_t.clone(), true), t_ty.clone()],
+            option_t.clone(),
+            "option_replace",
+        );
+
+        // === Option closure-accepting methods ===
+
+        // Option<T>.map<U>(self, f: fn(T) -> U) -> Option<U>
+        // Applies f to the contained value if Some, otherwise returns None
+        let fn_t_to_u = Type::function(vec![t_ty.clone()], u_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Option,
+            "map",
+            false,
+            vec![option_t.clone(), fn_t_to_u],
+            option_u.clone(),
+            "option_map",
+            vec![u_var_id],
+        );
+
+        // Option<T>.and_then<U>(self, f: fn(T) -> Option<U>) -> Option<U>
+        // Returns None if Option is None, otherwise calls f with the wrapped value
+        let fn_t_to_option_u = Type::function(vec![t_ty.clone()], option_u.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Option,
+            "and_then",
+            false,
+            vec![option_t.clone(), fn_t_to_option_u],
+            option_u.clone(),
+            "option_and_then",
+            vec![u_var_id],
+        );
+
+        // Option<T>.filter(self, predicate: fn(&T) -> bool) -> Option<T>
+        // Returns None if Option is None, otherwise calls predicate with the wrapped value
+        let fn_ref_t_to_bool = Type::function(vec![Type::reference(t_ty.clone(), false)], bool_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "filter",
+            false,
+            vec![option_t.clone(), fn_ref_t_to_bool],
+            option_t.clone(),
+            "option_filter",
+        );
+
+        // Option<T>.map_or<U>(self, default: U, f: fn(T) -> U) -> U
+        // Applies f to the contained value if Some, otherwise returns default
+        let fn_t_to_u_map_or = Type::function(vec![t_ty.clone()], u_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Option,
+            "map_or",
+            false,
+            vec![option_t.clone(), u_ty.clone(), fn_t_to_u_map_or],
+            u_ty.clone(),
+            "option_map_or",
+            vec![u_var_id],
+        );
+
+        // Option<T>.map_or_else<U>(self, default: fn() -> U, f: fn(T) -> U) -> U
+        // Applies f to the contained value if Some, otherwise computes default
+        let fn_void_to_u = Type::function(vec![], u_ty.clone());
+        let fn_t_to_u_map_or_else = Type::function(vec![t_ty.clone()], u_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Option,
+            "map_or_else",
+            false,
+            vec![option_t.clone(), fn_void_to_u.clone(), fn_t_to_u_map_or_else],
+            u_ty.clone(),
+            "option_map_or_else",
+            vec![u_var_id],
+        );
+
+        // Option<T>.ok_or_else<E>(self, err: fn() -> E) -> Result<T, E>
+        // Transforms the Option<T> into a Result<T, E>, using err() to provide Err value
+        let fn_void_to_e = Type::function(vec![], e_ty_opt.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Option,
+            "ok_or_else",
+            false,
+            vec![option_t.clone(), fn_void_to_e],
+            result_te_opt.clone(),
+            "option_ok_or_else",
+            vec![e_var_id],
+        );
+
+        // Option<T>.or_else(self, f: fn() -> Option<T>) -> Option<T>
+        // Returns self if Some, otherwise calls f and returns result
+        let fn_void_to_option_t = Type::function(vec![], option_t.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "or_else",
+            false,
+            vec![option_t.clone(), fn_void_to_option_t],
+            option_t.clone(),
+            "option_or_else",
+        );
+
+        // Option<T>.unwrap_or_else(self, f: fn() -> T) -> T
+        // Returns the contained value or computes it from f
+        let fn_void_to_t = Type::function(vec![], t_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "unwrap_or_else",
+            false,
+            vec![option_t.clone(), fn_void_to_t],
+            t_ty.clone(),
+            "option_unwrap_or_else",
+        );
+
+        // Option<T>.unwrap_or_default(self) -> T where T: Default
+        // Returns the contained value or the default for T
+        self.register_builtin_method(
+            BuiltinMethodType::Option,
+            "unwrap_or_default",
+            false,
+            vec![option_t.clone()],
+            t_ty.clone(),
+            "option_unwrap_or_default",
         );
 
         // === Vec methods ===
@@ -994,6 +1544,839 @@ impl<'a> TypeContext<'a> {
             "vec_get",
         );
 
+        // Vec<T>.pop(&mut self) -> Option<T>
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "pop",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            option_t.clone(),
+            "vec_pop",
+        );
+
+        // Vec<T>.capacity(&self) -> usize
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "capacity",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            usize_ty.clone(),
+            "vec_capacity",
+        );
+
+        // Vec<T>.clear(&mut self)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "clear",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            Type::unit(),
+            "vec_clear",
+        );
+
+        // Vec<T>.first(&self) -> Option<&T>
+        let option_ref_t_first = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![Type::reference(t_ty.clone(), false)],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "first",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            option_ref_t_first,
+            "vec_first",
+        );
+
+        // Vec<T>.last(&self) -> Option<&T>
+        let option_ref_t_last = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![Type::reference(t_ty.clone(), false)],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "last",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            option_ref_t_last,
+            "vec_last",
+        );
+
+        // Vec<T>.reverse(&mut self)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "reverse",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            Type::unit(),
+            "vec_reverse",
+        );
+
+        // Vec<T>.contains(&self, elem: &T) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "contains",
+            false,
+            vec![Type::reference(vec_t.clone(), false), Type::reference(t_ty.clone(), false)],
+            bool_ty.clone(),
+            "vec_contains",
+        );
+
+        // Vec<T>::with_capacity(capacity: usize) -> Vec<T> (static method)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "with_capacity",
+            true,
+            vec![usize_ty.clone()],
+            vec_t.clone(),
+            "vec_with_capacity",
+        );
+
+        // Vec<T>.insert(&mut self, index: usize, element: T)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "insert",
+            false,
+            vec![Type::reference(vec_t.clone(), true), usize_ty.clone(), t_ty.clone()],
+            Type::unit(),
+            "vec_insert",
+        );
+
+        // Vec<T>.remove(&mut self, index: usize) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "remove",
+            false,
+            vec![Type::reference(vec_t.clone(), true), usize_ty.clone()],
+            t_ty.clone(),
+            "vec_remove",
+        );
+
+        // Vec<T>.swap_remove(&mut self, index: usize) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "swap_remove",
+            false,
+            vec![Type::reference(vec_t.clone(), true), usize_ty.clone()],
+            t_ty.clone(),
+            "vec_swap_remove",
+        );
+
+        // Vec<T>.truncate(&mut self, len: usize)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "truncate",
+            false,
+            vec![Type::reference(vec_t.clone(), true), usize_ty.clone()],
+            Type::unit(),
+            "vec_truncate",
+        );
+
+        // Vec<T>.first_mut(&mut self) -> Option<&mut T>
+        let option_ref_mut_t = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![Type::reference(t_ty.clone(), true)],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "first_mut",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            option_ref_mut_t.clone(),
+            "vec_first_mut",
+        );
+
+        // Vec<T>.last_mut(&mut self) -> Option<&mut T>
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "last_mut",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            option_ref_mut_t.clone(),
+            "vec_last_mut",
+        );
+
+        // Vec<T>.get_mut(&mut self, index: usize) -> Option<&mut T>
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "get_mut",
+            false,
+            vec![Type::reference(vec_t.clone(), true), usize_ty.clone()],
+            option_ref_mut_t,
+            "vec_get_mut",
+        );
+
+        // Vec<T>.reserve(&mut self, additional: usize)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "reserve",
+            false,
+            vec![Type::reference(vec_t.clone(), true), usize_ty.clone()],
+            Type::unit(),
+            "vec_reserve",
+        );
+
+        // Vec<T>.shrink_to_fit(&mut self)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "shrink_to_fit",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            Type::unit(),
+            "vec_shrink_to_fit",
+        );
+
+        // Vec<T>.as_slice(&self) -> &[T]
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "as_slice",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            Type::reference(Type::slice(t_ty.clone()), false),
+            "vec_as_slice",
+        );
+
+        // Vec<T>.as_mut_slice(&mut self) -> &mut [T]
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "as_mut_slice",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            Type::reference(Type::slice(t_ty.clone()), true),
+            "vec_as_mut_slice",
+        );
+
+        // Vec<T>.append(&mut self, other: &mut Vec<T>)
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "append",
+            false,
+            vec![Type::reference(vec_t.clone(), true), Type::reference(vec_t.clone(), true)],
+            Type::unit(),
+            "vec_append",
+        );
+
+        // Vec<T>.extend_from_slice(&mut self, other: &[T])
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "extend_from_slice",
+            false,
+            vec![Type::reference(vec_t.clone(), true), Type::reference(Type::slice(t_ty.clone()), false)],
+            Type::unit(),
+            "vec_extend_from_slice",
+        );
+
+        // Vec<T>.dedup(&mut self) - removes consecutive duplicates
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "dedup",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            Type::unit(),
+            "vec_dedup",
+        );
+
+        // Vec<T>.retain(&mut self, f: F) where F: FnMut(&T) -> bool
+        // Retains only elements for which the predicate returns true
+        let retain_pred_ty = Type::function(vec![Type::reference(t_ty.clone(), false)], Type::bool());
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "retain",
+            false,
+            vec![Type::reference(vec_t.clone(), true), retain_pred_ty],
+            Type::unit(),
+            "vec_retain",
+        );
+
+        // Vec<T>.sort(&mut self) where T: Ord
+        // Sorts the vector in ascending order
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "sort",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            Type::unit(),
+            "vec_sort",
+        );
+
+        // Vec<T>.sort_by(&mut self, compare: F) where F: FnMut(&T, &T) -> Ordering
+        // Sorts using a custom comparator
+        // Note: Ordering is represented as i32 (-1, 0, 1) at runtime
+        let sort_cmp_ty = Type::function(
+            vec![Type::reference(t_ty.clone(), false), Type::reference(t_ty.clone(), false)],
+            Type::i32(),  // Ordering encoded as i32
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "sort_by",
+            false,
+            vec![Type::reference(vec_t.clone(), true), sort_cmp_ty],
+            Type::unit(),
+            "vec_sort_by",
+        );
+
+        // Vec<T>.binary_search(&self, x: &T) -> Result<usize, usize> where T: Ord
+        // Binary search for an element, returns Ok(index) if found or Err(insert_position)
+        let result_def_id = self.result_def_id.expect("result_def_id must be set");
+        let binary_search_result = Type::adt(result_def_id, vec![usize_ty.clone(), usize_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "binary_search",
+            false,
+            vec![Type::reference(vec_t.clone(), false), Type::reference(t_ty.clone(), false)],
+            binary_search_result,
+            "vec_binary_search",
+        );
+
+        // Vec<T>.iter(&self) -> Iter<T>
+        // Returns an iterator over the vector's elements
+        let iter_def_id = self.iter_def_id.expect("iter_def_id must be set");
+        let iter_t = Type::adt(iter_def_id, vec![t_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "iter",
+            false,
+            vec![Type::reference(vec_t.clone(), false)],
+            iter_t.clone(),
+            "vec_iter",
+        );
+
+        // Vec<T>.iter_mut(&mut self) -> Iter<&mut T>
+        // Returns a mutable iterator over the vector's elements
+        let iter_mut_t = Type::adt(iter_def_id, vec![Type::reference(t_ty.clone(), true)]);
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "iter_mut",
+            false,
+            vec![Type::reference(vec_t.clone(), true)],
+            iter_mut_t,
+            "vec_iter_mut",
+        );
+
+        // Vec<T>.into_iter(self) -> Iter<T>
+        // Consumes the vector and returns an iterator that owns the values
+        self.register_builtin_method(
+            BuiltinMethodType::Vec,
+            "into_iter",
+            false,
+            vec![vec_t.clone()],
+            iter_t.clone(),
+            "vec_into_iter",
+        );
+
+        // === Iterator methods ===
+
+        // Iter<T>.next(&mut self) -> Option<T>
+        // Returns the next element or None if the iterator is exhausted
+        let option_def_id = self.option_def_id.expect("option_def_id must be set");
+        let option_t = Type::adt(option_def_id, vec![t_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "next",
+            false,
+            vec![Type::reference(iter_t.clone(), true)],
+            option_t.clone(),
+            "iter_next",
+        );
+
+        // Iter<T>.count(self) -> usize
+        // Consumes the iterator and counts the number of elements
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "count",
+            false,
+            vec![iter_t.clone()],
+            usize_ty.clone(),
+            "iter_count",
+        );
+
+        // Iter<T>.last(self) -> Option<T>
+        // Consumes the iterator and returns the last element
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "last",
+            false,
+            vec![iter_t.clone()],
+            option_t.clone(),
+            "iter_last",
+        );
+
+        // Iter<T>.nth(&mut self, n: usize) -> Option<T>
+        // Returns the nth element of the iterator
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "nth",
+            false,
+            vec![Type::reference(iter_t.clone(), true), usize_ty.clone()],
+            option_t.clone(),
+            "iter_nth",
+        );
+
+        // Iter<T>.take(self, n: usize) -> Iter<T>
+        // Creates an iterator that yields the first n elements
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "take",
+            false,
+            vec![iter_t.clone(), usize_ty.clone()],
+            iter_t.clone(),
+            "iter_take",
+        );
+
+        // Iter<T>.skip(self, n: usize) -> Iter<T>
+        // Creates an iterator that skips the first n elements
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "skip",
+            false,
+            vec![iter_t.clone(), usize_ty.clone()],
+            iter_t.clone(),
+            "iter_skip",
+        );
+
+        // Iter<T>.collect(self) -> Vec<T>
+        // Collects all elements into a vector
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "collect",
+            false,
+            vec![iter_t.clone()],
+            vec_t.clone(),
+            "iter_collect",
+        );
+
+        // Iter<T>.any<F>(self, f: F) -> bool where F: FnMut(T) -> bool
+        // Returns true if any element satisfies the predicate
+        let any_pred_ty = Type::function(vec![t_ty.clone()], bool_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "any",
+            false,
+            vec![iter_t.clone(), any_pred_ty.clone()],
+            bool_ty.clone(),
+            "iter_any",
+        );
+
+        // Iter<T>.all<F>(self, f: F) -> bool where F: FnMut(T) -> bool
+        // Returns true if all elements satisfy the predicate
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "all",
+            false,
+            vec![iter_t.clone(), any_pred_ty.clone()],
+            bool_ty.clone(),
+            "iter_all",
+        );
+
+        // Iter<T>.find<F>(&mut self, f: F) -> Option<T> where F: FnMut(&T) -> bool
+        // Finds the first element matching the predicate
+        let find_pred_ty = Type::function(vec![Type::reference(t_ty.clone(), false)], bool_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "find",
+            false,
+            vec![Type::reference(iter_t.clone(), true), find_pred_ty.clone()],
+            option_t.clone(),
+            "iter_find",
+        );
+
+        // Iter<T>.position<F>(&mut self, f: F) -> Option<usize> where F: FnMut(T) -> bool
+        // Returns the index of the first element matching the predicate
+        let option_usize = Type::adt(option_def_id, vec![usize_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "position",
+            false,
+            vec![Type::reference(iter_t.clone(), true), any_pred_ty.clone()],
+            option_usize,
+            "iter_position",
+        );
+
+        // Iter<T>.sum(self) -> T where T: Add + Default
+        // Sums all elements in the iterator
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "sum",
+            false,
+            vec![iter_t.clone()],
+            t_ty.clone(),
+            "iter_sum",
+        );
+
+        // Iter<T>.product(self) -> T where T: Mul + Default
+        // Multiplies all elements in the iterator
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "product",
+            false,
+            vec![iter_t.clone()],
+            t_ty.clone(),
+            "iter_product",
+        );
+
+        // Iter<T>.max(self) -> Option<T> where T: Ord
+        // Returns the maximum element
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "max",
+            false,
+            vec![iter_t.clone()],
+            option_t.clone(),
+            "iter_max",
+        );
+
+        // Iter<T>.min(self) -> Option<T> where T: Ord
+        // Returns the minimum element
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "min",
+            false,
+            vec![iter_t.clone()],
+            option_t.clone(),
+            "iter_min",
+        );
+
+        // Iter<T>.enumerate(self) -> Iter<(usize, T)>
+        // Returns an iterator that yields (index, element) pairs
+        let tuple_usize_t = Type::tuple(vec![usize_ty.clone(), t_ty.clone()]);
+        let iter_enumerate = Type::adt(iter_def_id, vec![tuple_usize_t]);
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "enumerate",
+            false,
+            vec![iter_t.clone()],
+            iter_enumerate,
+            "iter_enumerate",
+        );
+
+        // Iter<T>.rev(self) -> Iter<T>
+        // Reverses the iterator
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "rev",
+            false,
+            vec![iter_t.clone()],
+            iter_t.clone(),
+            "iter_rev",
+        );
+
+        // Iter<T>.cloned(self) -> Iter<T> where T: Clone
+        // Creates an iterator that clones all elements
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "cloned",
+            false,
+            vec![iter_t.clone()],
+            iter_t.clone(),
+            "iter_cloned",
+        );
+
+        // Iter<T>.copied(self) -> Iter<T> where T: Copy
+        // Creates an iterator that copies all elements
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "copied",
+            false,
+            vec![iter_t.clone()],
+            iter_t.clone(),
+            "iter_copied",
+        );
+
+        // Iter<T>.peekable(self) -> Iter<T>
+        // Creates a peekable iterator
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "peekable",
+            false,
+            vec![iter_t.clone()],
+            iter_t.clone(),
+            "iter_peekable",
+        );
+
+        // Iter<T>.fuse(self) -> Iter<T>
+        // Creates a fused iterator that stops after first None
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "fuse",
+            false,
+            vec![iter_t.clone()],
+            iter_t.clone(),
+            "iter_fuse",
+        );
+
+        // === Closure-based Iterator methods ===
+        // Type variable U for map operations
+        let iter_u_var_id = TyVarId(9010);  // synthetic placeholder for U in Iterator context
+        let iter_u_ty = Type::new(TypeKind::Param(iter_u_var_id));
+        let iter_u = Type::adt(iter_def_id, vec![iter_u_ty.clone()]);
+
+        // Iter<T>.for_each<F>(self, f: F) where F: FnMut(T)
+        // Calls a closure on each element
+        let foreach_fn_ty = Type::function(vec![t_ty.clone()], Type::unit());
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "for_each",
+            false,
+            vec![iter_t.clone(), foreach_fn_ty],
+            Type::unit(),
+            "iter_for_each",
+        );
+
+        // Iter<T>.map<U>(self, f: fn(T) -> U) -> Iter<U>
+        // Applies f to each element, producing an iterator of results
+        let map_fn_ty = Type::function(vec![t_ty.clone()], iter_u_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "map",
+            false,
+            vec![iter_t.clone(), map_fn_ty],
+            iter_u.clone(),
+            "iter_map",
+            vec![iter_u_var_id],
+        );
+
+        // Iter<T>.filter<F>(self, predicate: F) -> Iter<T> where F: FnMut(&T) -> bool
+        // Filters elements based on a predicate
+        let filter_fn_ty = Type::function(vec![Type::reference(t_ty.clone(), false)], bool_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "filter",
+            false,
+            vec![iter_t.clone(), filter_fn_ty.clone()],
+            iter_t.clone(),
+            "iter_filter",
+        );
+
+        // Iter<T>.filter_map<U>(self, f: fn(T) -> Option<U>) -> Iter<U>
+        // Applies f and filters based on Some/None, unwrapping Some values
+        let option_u = Type::adt(option_def_id, vec![iter_u_ty.clone()]);
+        let filter_map_fn_ty = Type::function(vec![t_ty.clone()], option_u.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "filter_map",
+            false,
+            vec![iter_t.clone(), filter_map_fn_ty],
+            iter_u.clone(),
+            "iter_filter_map",
+            vec![iter_u_var_id],
+        );
+
+        // Iter<T>.flat_map<U>(self, f: fn(T) -> Iter<U>) -> Iter<U>
+        // Maps each element to an iterator and flattens
+        let flat_map_fn_ty = Type::function(vec![t_ty.clone()], iter_u.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "flat_map",
+            false,
+            vec![iter_t.clone(), flat_map_fn_ty],
+            iter_u.clone(),
+            "iter_flat_map",
+            vec![iter_u_var_id],
+        );
+
+        // Iter<T>.fold<B>(self, init: B, f: fn(B, T) -> B) -> B
+        // Folds every element into an accumulator
+        let fold_b_var_id = TyVarId(9011);
+        let fold_b_ty = Type::new(TypeKind::Param(fold_b_var_id));
+        let fold_fn_ty = Type::function(vec![fold_b_ty.clone(), t_ty.clone()], fold_b_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "fold",
+            false,
+            vec![iter_t.clone(), fold_b_ty.clone(), fold_fn_ty],
+            fold_b_ty.clone(),
+            "iter_fold",
+            vec![fold_b_var_id],
+        );
+
+        // Iter<T>.reduce(self, f: fn(T, T) -> T) -> Option<T>
+        // Reduces elements to a single one using f
+        let reduce_fn_ty = Type::function(vec![t_ty.clone(), t_ty.clone()], t_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "reduce",
+            false,
+            vec![iter_t.clone(), reduce_fn_ty],
+            option_t.clone(),
+            "iter_reduce",
+        );
+
+        // Iter<T>.inspect<F>(self, f: F) -> Iter<T> where F: FnMut(&T)
+        // Calls f on each element for side effects, returns original iterator
+        let inspect_fn_ty = Type::function(vec![Type::reference(t_ty.clone(), false)], Type::unit());
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "inspect",
+            false,
+            vec![iter_t.clone(), inspect_fn_ty],
+            iter_t.clone(),
+            "iter_inspect",
+        );
+
+        // Iter<T>.take_while<F>(self, predicate: F) -> Iter<T> where F: FnMut(&T) -> bool
+        // Takes elements while predicate returns true
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "take_while",
+            false,
+            vec![iter_t.clone(), filter_fn_ty.clone()],
+            iter_t.clone(),
+            "iter_take_while",
+        );
+
+        // Iter<T>.skip_while<F>(self, predicate: F) -> Iter<T> where F: FnMut(&T) -> bool
+        // Skips elements while predicate returns true
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "skip_while",
+            false,
+            vec![iter_t.clone(), filter_fn_ty.clone()],
+            iter_t.clone(),
+            "iter_skip_while",
+        );
+
+        // Iter<T>.partition<F>(self, f: F) -> (Vec<T>, Vec<T>) where F: FnMut(&T) -> bool
+        // Partitions into two collections based on predicate
+        let partition_result = Type::tuple(vec![vec_t.clone(), vec_t.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "partition",
+            false,
+            vec![iter_t.clone(), filter_fn_ty.clone()],
+            partition_result,
+            "iter_partition",
+        );
+
+        // Iter<T>.zip<U>(self, other: Iter<U>) -> Iter<(T, U)>
+        // Zips two iterators together into pairs
+        let tuple_t_u = Type::tuple(vec![t_ty.clone(), iter_u_ty.clone()]);
+        let iter_tuple_t_u = Type::adt(iter_def_id, vec![tuple_t_u]);
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "zip",
+            false,
+            vec![iter_t.clone(), iter_u.clone()],
+            iter_tuple_t_u,
+            "iter_zip",
+            vec![iter_u_var_id],
+        );
+
+        // Iter<T>.chain(self, other: Iter<T>) -> Iter<T>
+        // Chains two iterators together
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "chain",
+            false,
+            vec![iter_t.clone(), iter_t.clone()],
+            iter_t.clone(),
+            "iter_chain",
+        );
+
+        // Iter<T>.cycle(self) -> Iter<T>
+        // Creates an iterator that cycles forever
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "cycle",
+            false,
+            vec![iter_t.clone()],
+            iter_t.clone(),
+            "iter_cycle",
+        );
+
+        // Iter<T>.step_by(self, step: usize) -> Iter<T>
+        // Creates an iterator that yields every nth element
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "step_by",
+            false,
+            vec![iter_t.clone(), usize_ty.clone()],
+            iter_t.clone(),
+            "iter_step_by",
+        );
+
+        // Iter<T>.flatten(self) -> Iter<U> where T: IntoIterator<Item = U>
+        // Flattens nested iterators
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "flatten",
+            false,
+            vec![iter_t.clone()],
+            iter_u.clone(),
+            "iter_flatten",
+            vec![iter_u_var_id],
+        );
+
+        // Iter<T>.unzip(self) -> (Vec<A>, Vec<B>) where T = (A, B)
+        // Converts an iterator of pairs into a pair of collections
+        let unzip_a_var_id = TyVarId(9012);
+        let unzip_b_var_id = TyVarId(9013);
+        let unzip_a_ty = Type::new(TypeKind::Param(unzip_a_var_id));
+        let unzip_b_ty = Type::new(TypeKind::Param(unzip_b_var_id));
+        let vec_def_id = self.vec_def_id.expect("vec_def_id must be set");
+        let vec_a = Type::adt(vec_def_id, vec![unzip_a_ty.clone()]);
+        let vec_b = Type::adt(vec_def_id, vec![unzip_b_ty.clone()]);
+        let unzip_result = Type::tuple(vec![vec_a, vec_b]);
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "unzip",
+            false,
+            vec![iter_t.clone()],
+            unzip_result,
+            "iter_unzip",
+            vec![unzip_a_var_id, unzip_b_var_id],
+        );
+
+        // Iter<T>.max_by<F>(self, compare: F) -> Option<T> where F: FnMut(&T, &T) -> i32
+        // Returns max element using a comparison function (i32 represents Ordering)
+        let cmp_fn_ty = Type::function(
+            vec![Type::reference(t_ty.clone(), false), Type::reference(t_ty.clone(), false)],
+            Type::i32(),
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "max_by",
+            false,
+            vec![iter_t.clone(), cmp_fn_ty.clone()],
+            option_t.clone(),
+            "iter_max_by",
+        );
+
+        // Iter<T>.min_by<F>(self, compare: F) -> Option<T> where F: FnMut(&T, &T) -> i32
+        // Returns min element using a comparison function
+        self.register_builtin_method(
+            BuiltinMethodType::Iterator,
+            "min_by",
+            false,
+            vec![iter_t.clone(), cmp_fn_ty.clone()],
+            option_t.clone(),
+            "iter_min_by",
+        );
+
+        // Iter<T>.max_by_key<B, F>(self, f: F) -> Option<T> where F: FnMut(&T) -> B, B: Ord
+        // Returns max element by key computed with f
+        let key_fn_ty = Type::function(vec![Type::reference(t_ty.clone(), false)], iter_u_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "max_by_key",
+            false,
+            vec![iter_t.clone(), key_fn_ty.clone()],
+            option_t.clone(),
+            "iter_max_by_key",
+            vec![iter_u_var_id],
+        );
+
+        // Iter<T>.min_by_key<B, F>(self, f: F) -> Option<T> where F: FnMut(&T) -> B, B: Ord
+        // Returns min element by key computed with f
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Iterator,
+            "min_by_key",
+            false,
+            vec![iter_t.clone(), key_fn_ty.clone()],
+            option_t.clone(),
+            "iter_min_by_key",
+            vec![iter_u_var_id],
+        );
+
         // === Box methods ===
 
         let box_def_id = self.box_def_id.expect("BUG: box_def_id not set");
@@ -1029,6 +2412,272 @@ impl<'a> TypeContext<'a> {
             vec![box_t.clone()],  // Takes Box<T> by value
             Type::reference(t_ty.clone(), true),         // Returns &mut T
             "box_as_mut",
+        );
+
+        // Box<T>.into_inner(self) -> T
+        // Consumes the box and returns the inner value
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "into_inner",
+            false,
+            vec![box_t.clone()],  // Takes Box<T> by value (consumes it)
+            t_ty.clone(),         // Returns T
+            "box_into_inner",
+        );
+
+        // Box<T>.into_raw(self) -> *mut T
+        // Consumes the box and returns a raw pointer
+        let raw_ptr_t = Type::new(TypeKind::Ptr { inner: t_ty.clone(), mutable: true });
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "into_raw",
+            false,
+            vec![box_t.clone()],  // Takes Box<T> by value (consumes it)
+            raw_ptr_t.clone(),    // Returns *mut T
+            "box_into_raw",
+        );
+
+        // Box<T>::from_raw(ptr: *mut T) -> Box<T>
+        // Creates a Box from a raw pointer (static method)
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "from_raw",
+            true,                 // Static method
+            vec![raw_ptr_t],      // Takes *mut T
+            box_t.clone(),        // Returns Box<T>
+            "box_from_raw",
+        );
+
+        // Box<T>.leak(self) -> &'static mut T
+        // Leaks the box and returns a mutable reference
+        self.register_builtin_method(
+            BuiltinMethodType::Box,
+            "leak",
+            false,
+            vec![box_t.clone()],                        // Takes Box<T> by value
+            Type::reference(t_ty.clone(), true),        // Returns &mut T (static lifetime implied)
+            "box_leak",
+        );
+
+        // === Slice [T] methods ===
+
+        // [T].len(&self) -> usize
+        let slice_t = Type::slice(t_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "len",
+            false,
+            vec![Type::reference(slice_t.clone(), false)],
+            usize_ty.clone(),
+            "slice_len",
+        );
+
+        // [T].is_empty(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "is_empty",
+            false,
+            vec![Type::reference(slice_t.clone(), false)],
+            bool_ty.clone(),
+            "slice_is_empty",
+        );
+
+        // [T].first(&self) -> Option<&T>
+        let slice_option_ref_t = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![Type::reference(t_ty.clone(), false)],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "first",
+            false,
+            vec![Type::reference(slice_t.clone(), false)],
+            slice_option_ref_t.clone(),
+            "slice_first",
+        );
+
+        // [T].last(&self) -> Option<&T>
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "last",
+            false,
+            vec![Type::reference(slice_t.clone(), false)],
+            slice_option_ref_t.clone(),
+            "slice_last",
+        );
+
+        // [T].get(&self, index: usize) -> Option<&T>
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "get",
+            false,
+            vec![Type::reference(slice_t.clone(), false), usize_ty.clone()],
+            slice_option_ref_t,
+            "slice_get",
+        );
+
+        // [T].contains(&self, elem: &T) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "contains",
+            false,
+            vec![Type::reference(slice_t.clone(), false), Type::reference(t_ty.clone(), false)],
+            bool_ty.clone(),
+            "slice_contains",
+        );
+
+        // [T].get_mut(&mut self, index: usize) -> Option<&mut T>
+        let slice_option_ref_mut_t = Type::adt(
+            self.option_def_id.expect("BUG: option_def_id not set"),
+            vec![Type::reference(t_ty.clone(), true)],
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "get_mut",
+            false,
+            vec![Type::reference(slice_t.clone(), true), usize_ty.clone()],
+            slice_option_ref_mut_t,
+            "slice_get_mut",
+        );
+
+        // [T].starts_with(&self, needle: &[T]) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "starts_with",
+            false,
+            vec![Type::reference(slice_t.clone(), false), Type::reference(slice_t.clone(), false)],
+            bool_ty.clone(),
+            "slice_starts_with",
+        );
+
+        // [T].ends_with(&self, needle: &[T]) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "ends_with",
+            false,
+            vec![Type::reference(slice_t.clone(), false), Type::reference(slice_t.clone(), false)],
+            bool_ty.clone(),
+            "slice_ends_with",
+        );
+
+        // [T].reverse(&mut self)
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "reverse",
+            false,
+            vec![Type::reference(slice_t.clone(), true)],
+            Type::unit(),
+            "slice_reverse",
+        );
+
+        // [T].split_at(&self, mid: usize) -> (&[T], &[T])
+        // Splits slice at index, returns tuple of two slices
+        let slice_ref = Type::reference(slice_t.clone(), false);
+        let split_result = Type::tuple(vec![slice_ref.clone(), slice_ref.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "split_at",
+            false,
+            vec![Type::reference(slice_t.clone(), false), usize_ty.clone()],
+            split_result,
+            "slice_split_at",
+        );
+
+        // [T].split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T])
+        let slice_mut_ref = Type::reference(slice_t.clone(), true);
+        let split_mut_result = Type::tuple(vec![slice_mut_ref.clone(), slice_mut_ref.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "split_at_mut",
+            false,
+            vec![Type::reference(slice_t.clone(), true), usize_ty.clone()],
+            split_mut_result,
+            "slice_split_at_mut",
+        );
+
+        // [T].sort(&mut self) where T: Ord
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "sort",
+            false,
+            vec![Type::reference(slice_t.clone(), true)],
+            Type::unit(),
+            "slice_sort",
+        );
+
+        // [T].sort_by(&mut self, compare: F) where F: FnMut(&T, &T) -> Ordering
+        let slice_sort_cmp_ty = Type::function(
+            vec![Type::reference(t_ty.clone(), false), Type::reference(t_ty.clone(), false)],
+            Type::i32(),  // Ordering encoded as i32
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "sort_by",
+            false,
+            vec![Type::reference(slice_t.clone(), true), slice_sort_cmp_ty],
+            Type::unit(),
+            "slice_sort_by",
+        );
+
+        // [T].binary_search(&self, x: &T) -> Result<usize, usize> where T: Ord
+        let slice_binary_search_result = Type::adt(
+            self.result_def_id.expect("result_def_id must be set"),
+            vec![usize_ty.clone(), usize_ty.clone()]
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "binary_search",
+            false,
+            vec![Type::reference(slice_t.clone(), false), Type::reference(t_ty.clone(), false)],
+            slice_binary_search_result,
+            "slice_binary_search",
+        );
+
+        // [T].copy_from_slice(&mut self, src: &[T]) where T: Copy
+        // Copies elements from src into self
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "copy_from_slice",
+            false,
+            vec![Type::reference(slice_t.clone(), true), Type::reference(slice_t.clone(), false)],
+            Type::unit(),
+            "slice_copy_from_slice",
+        );
+
+        // [T].swap(&mut self, a: usize, b: usize)
+        // Swaps elements at indices a and b
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "swap",
+            false,
+            vec![Type::reference(slice_t.clone(), true), usize_ty.clone(), usize_ty.clone()],
+            Type::unit(),
+            "slice_swap",
+        );
+
+        // [T].iter(&self) -> Iter<&T>
+        // Returns an iterator over references to the slice's elements
+        let iter_def_id_slice = self.iter_def_id.expect("iter_def_id must be set");
+        let iter_ref_t = Type::adt(iter_def_id_slice, vec![Type::reference(t_ty.clone(), false)]);
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "iter",
+            false,
+            vec![Type::reference(slice_t.clone(), false)],
+            iter_ref_t.clone(),
+            "slice_iter",
+        );
+
+        // [T].iter_mut(&mut self) -> Iter<&mut T>
+        // Returns a mutable iterator over the slice's elements
+        let iter_mut_ref_t = Type::adt(iter_def_id_slice, vec![Type::reference(t_ty.clone(), true)]);
+        self.register_builtin_method(
+            BuiltinMethodType::Slice,
+            "iter_mut",
+            false,
+            vec![Type::reference(slice_t.clone(), true)],
+            iter_mut_ref_t,
+            "slice_iter_mut",
         );
 
         // === Result<T, E> methods ===
@@ -1088,9 +2737,207 @@ impl<'a> TypeContext<'a> {
             BuiltinMethodType::Result,
             "try_",
             false,
-            vec![result_te],
+            vec![result_te.clone()],
             t_ty.clone(),
             "result_try",
+        );
+
+        // Result<T, E>.ok(self) -> Option<T>
+        let option_t = Type::adt(option_def_id, vec![t_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "ok",
+            false,
+            vec![result_te.clone()],
+            option_t.clone(),
+            "result_ok",
+        );
+
+        // Result<T, E>.err(self) -> Option<E>
+        let option_e = Type::adt(option_def_id, vec![e_ty.clone()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "err",
+            false,
+            vec![result_te.clone()],
+            option_e,
+            "result_err",
+        );
+
+        // Result<T, E>.expect(self, msg: &str) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "expect",
+            false,
+            vec![result_te.clone(), Type::reference(Type::str(), false)],
+            t_ty.clone(),
+            "result_expect",
+        );
+
+        // Result<T, E>.expect_err(self, msg: &str) -> E
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "expect_err",
+            false,
+            vec![result_te.clone(), Type::reference(Type::str(), false)],
+            e_ty.clone(),
+            "result_expect_err",
+        );
+
+        // Result<T, E>.unwrap_or(self, default: T) -> T
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "unwrap_or",
+            false,
+            vec![result_te.clone(), t_ty.clone()],
+            t_ty.clone(),
+            "result_unwrap_or",
+        );
+
+        // Result<T, E>.and(self, other: Result<U, E>) -> Result<U, E>
+        // Note: U is a fresh type parameter that must be inferred from the argument
+        let u_var_id_res = TyVarId(9004);  // synthetic placeholder for U
+        let u_ty_res = Type::new(TypeKind::Param(u_var_id_res));
+        let result_ue = Type::adt(result_def_id, vec![u_ty_res.clone(), e_ty.clone()]);
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Result,
+            "and",
+            false,
+            vec![result_te.clone(), result_ue.clone()],
+            result_ue.clone(),
+            "result_and",
+            vec![u_var_id_res],  // U is a method-level type parameter
+        );
+
+        // Result<T, E>.or(self, other: Result<T, F>) -> Result<T, F>
+        // Note: F is a fresh type parameter that must be inferred from the argument
+        let f_var_id = TyVarId(9005);  // synthetic placeholder for F
+        let f_ty = Type::new(TypeKind::Param(f_var_id));
+        let result_tf = Type::adt(result_def_id, vec![t_ty.clone(), f_ty.clone()]);
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Result,
+            "or",
+            false,
+            vec![result_te.clone(), result_tf.clone()],
+            result_tf.clone(),
+            "result_or",
+            vec![f_var_id],  // F is a method-level type parameter
+        );
+
+        // Result<T, E>.as_ref(&self) -> Result<&T, &E>
+        let result_ref_t_ref_e = Type::adt(
+            result_def_id,
+            vec![Type::reference(t_ty.clone(), false), Type::reference(e_ty.clone(), false)]
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "as_ref",
+            false,
+            vec![Type::reference(result_te.clone(), false)],
+            result_ref_t_ref_e,
+            "result_as_ref",
+        );
+
+        // Result<T, E>.as_mut(&mut self) -> Result<&mut T, &mut E>
+        let result_ref_mut_t_ref_mut_e = Type::adt(
+            result_def_id,
+            vec![Type::reference(t_ty.clone(), true), Type::reference(e_ty.clone(), true)]
+        );
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "as_mut",
+            false,
+            vec![Type::reference(result_te.clone(), true)],
+            result_ref_mut_t_ref_mut_e,
+            "result_as_mut",
+        );
+
+        // === Result closure-accepting methods ===
+
+        // Type variable U for map operations
+        let u_var_id_res = TyVarId(9006);  // synthetic placeholder for U in Result context
+        let u_ty_res = Type::new(TypeKind::Param(u_var_id_res));
+        let result_ue = Type::adt(result_def_id, vec![u_ty_res.clone(), e_ty.clone()]);
+
+        // Result<T, E>.map<U>(self, f: fn(T) -> U) -> Result<U, E>
+        // Applies f to the Ok value if present
+        let fn_t_to_u_result = Type::function(vec![t_ty.clone()], u_ty_res.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Result,
+            "map",
+            false,
+            vec![result_te.clone(), fn_t_to_u_result],
+            result_ue.clone(),
+            "result_map",
+            vec![u_var_id_res],
+        );
+
+        // Type variable F for map_err operations
+        let f_var_id = TyVarId(9007);  // synthetic placeholder for F
+        let f_ty = Type::new(TypeKind::Param(f_var_id));
+        let result_tf = Type::adt(result_def_id, vec![t_ty.clone(), f_ty.clone()]);
+
+        // Result<T, E>.map_err<F>(self, f: fn(E) -> F) -> Result<T, F>
+        // Applies f to the Err value if present
+        let fn_e_to_f = Type::function(vec![e_ty.clone()], f_ty.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Result,
+            "map_err",
+            false,
+            vec![result_te.clone(), fn_e_to_f],
+            result_tf,
+            "result_map_err",
+            vec![f_var_id],
+        );
+
+        // Result<T, E>.and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E>
+        // Returns Err if self is Err, otherwise calls f with Ok value
+        let fn_t_to_result_ue = Type::function(vec![t_ty.clone()], result_ue.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Result,
+            "and_then",
+            false,
+            vec![result_te.clone(), fn_t_to_result_ue],
+            result_ue.clone(),
+            "result_and_then",
+            vec![u_var_id_res],
+        );
+
+        // Result<T, E>.or_else<F>(self, f: fn(E) -> Result<T, F>) -> Result<T, F>
+        // Returns Ok if self is Ok, otherwise calls f with Err value
+        let result_tf_for_or_else = Type::adt(result_def_id, vec![t_ty.clone(), f_ty.clone()]);
+        let fn_e_to_result_tf = Type::function(vec![e_ty.clone()], result_tf_for_or_else.clone());
+        self.register_builtin_method_with_generics(
+            BuiltinMethodType::Result,
+            "or_else",
+            false,
+            vec![result_te.clone(), fn_e_to_result_tf],
+            result_tf_for_or_else,
+            "result_or_else",
+            vec![f_var_id],
+        );
+
+        // Result<T, E>.unwrap_or_else(self, f: fn(E) -> T) -> T
+        // Returns Ok value or computes it from Err using f
+        let fn_e_to_t = Type::function(vec![e_ty.clone()], t_ty.clone());
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "unwrap_or_else",
+            false,
+            vec![result_te.clone(), fn_e_to_t],
+            t_ty.clone(),
+            "result_unwrap_or_else",
+        );
+
+        // Result<T, E>.unwrap_or_default(self) -> T where T: Default
+        // Returns Ok value or the default for T
+        self.register_builtin_method(
+            BuiltinMethodType::Result,
+            "unwrap_or_default",
+            false,
+            vec![result_te.clone()],
+            t_ty.clone(),
+            "result_unwrap_or_default",
         );
     }
 
@@ -1104,6 +2951,27 @@ impl<'a> TypeContext<'a> {
         output: Type,
         runtime_name: &str,
     ) {
+        self.register_builtin_method_with_generics(
+            type_match,
+            name,
+            is_static,
+            inputs,
+            output,
+            runtime_name,
+            Vec::new(),
+        )
+    }
+
+    fn register_builtin_method_with_generics(
+        &mut self,
+        type_match: super::BuiltinMethodType,
+        name: &str,
+        is_static: bool,
+        inputs: Vec<Type>,
+        output: Type,
+        runtime_name: &str,
+        generics: Vec<TyVarId>,
+    ) {
         // Create a DefId for this method
         let method_name = format!("__builtin_{}_{}",
             match &type_match {
@@ -1115,6 +2983,8 @@ impl<'a> TypeContext<'a> {
                 super::BuiltinMethodType::Vec => "Vec",
                 super::BuiltinMethodType::Box => "Box",
                 super::BuiltinMethodType::Result => "Result",
+                super::BuiltinMethodType::Slice => "Slice",
+                super::BuiltinMethodType::Iterator => "Iterator",
             },
             name
         );
@@ -1132,7 +3002,7 @@ impl<'a> TypeContext<'a> {
             is_const: false,
             is_async: false,
             is_unsafe: false,
-            generics: Vec::new(),
+            generics,
         });
 
         // Track runtime function name

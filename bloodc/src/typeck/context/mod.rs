@@ -121,6 +121,9 @@ pub struct TypeContext<'a> {
     /// Type parameter bounds: maps TyVarId to list of trait DefIds it must implement.
     /// Used for method lookup on generic type parameters.
     pub(crate) type_param_bounds: HashMap<TyVarId, Vec<DefId>>,
+    /// Where clause bounds for functions: maps function DefId to list of predicates.
+    /// Each predicate is (type_subject, list of trait bound DefIds).
+    pub(crate) fn_where_bounds: HashMap<DefId, Vec<WhereClausePredicate>>,
     /// Expected type for `resume(value)` in the current handler operation body.
     /// Set when entering a handler operation scope, used for E0303 error checking.
     pub(crate) current_resume_type: Option<Type>,
@@ -144,6 +147,9 @@ pub struct TypeContext<'a> {
     /// Current impl block's Self type during collection phase.
     /// Set when collecting impl block method signatures so `Self` can be resolved.
     pub(crate) current_impl_self_ty: Option<Type>,
+    /// Current impl block's associated types during collection phase.
+    /// Set when collecting impl block items so `Self::AssocType` can be resolved.
+    pub(crate) current_impl_assoc_types: Vec<ImplAssocTypeInfo>,
     /// Forall parameter environment for resolving type parameter names in forall bodies.
     /// Maps parameter names to their TyVarId when parsing forall<T>. expressions.
     pub(crate) forall_param_env: Vec<(crate::ast::Symbol, TyVarId)>,
@@ -167,6 +173,8 @@ pub struct TypeContext<'a> {
     pub(crate) vec_def_id: Option<DefId>,
     /// DefId for the built-in Box<T> type.
     pub(crate) box_def_id: Option<DefId>,
+    /// DefId for the built-in Iter<T> type (iterator over T).
+    pub(crate) iter_def_id: Option<DefId>,
     /// Builtin methods for primitive and builtin types.
     /// Maps (type discriminant, method name) -> method info.
     pub(crate) builtin_methods: Vec<BuiltinMethodInfo>,
@@ -357,6 +365,10 @@ pub enum BuiltinMethodType {
     StrRef,
     /// Matches `Result<T, E>` type.
     Result,
+    /// Matches `[T]` slice type.
+    Slice,
+    /// Matches `Iter<T>` iterator type.
+    Iterator,
 }
 
 /// Information about a builtin method for primitive/builtin types.
@@ -424,6 +436,15 @@ pub struct TraitAssocConstInfo {
     pub ty: Type,
     /// Whether this has a default value.
     pub has_default: bool,
+}
+
+/// A where clause predicate: `T: TraitA + TraitB`.
+#[derive(Debug, Clone)]
+pub struct WhereClausePredicate {
+    /// The type being constrained.
+    pub subject_ty: Type,
+    /// The list of trait bounds.
+    pub trait_bounds: Vec<DefId>,
 }
 
 /// Information about an FFI bridge block.
@@ -678,6 +699,7 @@ impl<'a> TypeContext<'a> {
             method_self_types: HashMap::new(),
             trait_defs: HashMap::new(),
             type_param_bounds: HashMap::new(),
+            fn_where_bounds: HashMap::new(),
             current_resume_type: None,
             current_resume_result_type: None,
             current_handler_kind: None,
@@ -686,6 +708,7 @@ impl<'a> TypeContext<'a> {
             module_defs: HashMap::new(),
             loaded_modules: HashMap::new(),
             current_impl_self_ty: None,
+            current_impl_assoc_types: Vec::new(),
             forall_param_env: Vec::new(),
             tuple_destructures: HashMap::new(),
             next_loop_id: 0,
@@ -696,6 +719,7 @@ impl<'a> TypeContext<'a> {
             result_def_id: None,
             vec_def_id: None,
             box_def_id: None,
+            iter_def_id: None,
             builtin_methods: Vec::new(),
         };
         ctx.register_builtins();
@@ -863,7 +887,7 @@ impl<'a> TypeContext<'a> {
             }
             TypeKind::Array { element, size } => {
                 let zonked_elem = Self::zonk_type_with_unifier(unifier, element);
-                Type::array(zonked_elem, *size)
+                Type::array_with_const(zonked_elem, size.clone())
             }
             TypeKind::Slice { element } => {
                 let zonked_elem = Self::zonk_type_with_unifier(unifier, element);
@@ -1121,6 +1145,9 @@ impl<'a> TypeContext<'a> {
             }
             hir::ExprKind::SliceLen(inner) => {
                 hir::ExprKind::SliceLen(Box::new(Self::zonk_expr_with_unifier(unifier, *inner)))
+            }
+            hir::ExprKind::VecLen(inner) => {
+                hir::ExprKind::VecLen(Box::new(Self::zonk_expr_with_unifier(unifier, *inner)))
             }
             hir::ExprKind::ArrayToSlice { expr, array_len } => {
                 hir::ExprKind::ArrayToSlice {

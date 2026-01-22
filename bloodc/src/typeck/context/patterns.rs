@@ -250,7 +250,8 @@ impl<'a> TypeContext<'a> {
                 let elem_ty = match ty.kind() {
                     TypeKind::Array { element, size } => {
                         let num_patterns = if rest_pos.is_some() { elements.len() - 1 } else { elements.len() };
-                        if num_patterns as u64 > *size {
+                        let array_size = size.as_u64().unwrap_or(0);
+                        if num_patterns as u64 > array_size {
                             return Err(TypeError::new(
                                 TypeErrorKind::PatternMismatch {
                                     expected: ty.clone(),

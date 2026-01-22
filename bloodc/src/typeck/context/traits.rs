@@ -11,7 +11,6 @@ use super::super::error::{TypeError, TypeErrorKind};
 
 impl<'a> TypeContext<'a> {
     /// Check if a type satisfies all trait bounds required by a type parameter.
-    #[allow(dead_code)]
     pub(crate) fn check_trait_bounds(
         &self,
         ty: &Type,
@@ -38,17 +37,29 @@ impl<'a> TypeContext<'a> {
     /// Check if a type implements a trait.
     ///
     /// Checks explicit impl blocks first, then built-in trait implementations.
+    /// Note: User-defined traits are only satisfied by explicit impl blocks,
+    /// NOT by builtin impls (even if they have the same name as builtin traits).
     pub(crate) fn type_implements_trait(&self, ty: &Type, trait_def_id: DefId) -> bool {
-        // Check explicit impl blocks
+        // Check explicit impl blocks first
         for impl_block in &self.impl_blocks {
             if impl_block.trait_ref == Some(trait_def_id) && impl_block.self_ty == *ty {
                 return true;
             }
         }
 
-        // Check built-in trait implementations
-        if let Some(trait_info) = self.trait_defs.get(&trait_def_id) {
-            return self.type_has_builtin_impl(ty, &trait_info.name);
+        // If the trait is defined in trait_defs, it's a user-defined trait.
+        // User-defined traits can ONLY be satisfied by explicit impl blocks,
+        // NOT by builtin impls. This prevents false positives when a user
+        // defines a trait with the same name as a builtin trait (e.g., Display).
+        if self.trait_defs.contains_key(&trait_def_id) {
+            // User-defined trait - no impl block found, so return false
+            return false;
+        }
+
+        // For builtin traits (not in trait_defs), check builtin implementations
+        // Get the trait name from def_info
+        if let Some(def_info) = self.resolver.def_info.get(&trait_def_id) {
+            return self.type_has_builtin_impl(ty, &def_info.name);
         }
 
         false
@@ -109,6 +120,28 @@ impl<'a> TypeContext<'a> {
             "Sized" => self.type_is_sized(ty),
             "Send" => self.type_is_send(ty),
             "Sync" => self.type_is_sync(ty),
+            "Fn" => self.type_is_fn(ty),
+            "FnMut" => self.type_is_fn_mut(ty),
+            "FnOnce" => self.type_is_fn_once(ty),
+            "Default" => self.type_is_default(ty),
+            // Operator traits
+            "Add" | "Sub" | "Mul" | "Div" | "Rem" => self.type_is_numeric(ty),
+            "Neg" => self.type_is_signed_numeric(ty),
+            "Not" => self.type_is_bool_or_integer(ty),
+            "BitAnd" | "BitOr" | "BitXor" | "Shl" | "Shr" => self.type_is_integer(ty),
+            // Comparison traits
+            "PartialEq" | "Eq" => self.type_is_partial_eq(ty),
+            "PartialOrd" | "Ord" => self.type_is_partial_ord(ty),
+            // Other core traits
+            "Hash" => self.type_is_hashable(ty),
+            "Debug" | "Display" => self.type_is_display(ty),
+            // Drop and conversion traits
+            "Drop" => self.type_is_drop(ty),
+            "From" | "Into" => self.type_is_convertible(ty),
+            "Deref" | "DerefMut" => self.type_is_deref(ty),
+            // Iterator traits
+            "Iterator" => self.type_is_iterator(ty),
+            "IntoIterator" => self.type_is_into_iterator(ty),
             _ => false,
         }
     }
@@ -475,6 +508,375 @@ impl<'a> TypeContext<'a> {
             Some(subst)
         } else {
             None
+        }
+    }
+
+    /// Check if a type implements Fn (callable by shared reference).
+    ///
+    /// Fn types:
+    /// - Function pointers: fn(A, B) -> C
+    /// - Closures that only capture by shared reference
+    ///
+    /// Note: This is a simplified check that doesn't verify the exact signature.
+    /// Signature compatibility is handled through type unification.
+    pub(crate) fn type_is_fn(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Function pointers implement Fn
+            TypeKind::Fn { .. } => true,
+            // Closures implement Fn (simplified - full implementation would check captures)
+            TypeKind::Closure { .. } => true,
+            // References to Fn types are Fn
+            TypeKind::Ref { inner, mutable: false } => self.type_is_fn(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements FnMut (callable by mutable reference).
+    ///
+    /// FnMut types:
+    /// - Everything that implements Fn
+    /// - Closures that capture by mutable reference
+    pub(crate) fn type_is_fn_mut(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Function pointers implement FnMut
+            TypeKind::Fn { .. } => true,
+            // Closures implement FnMut (simplified)
+            TypeKind::Closure { .. } => true,
+            // References to FnMut types
+            TypeKind::Ref { inner, .. } => self.type_is_fn_mut(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements FnOnce (callable by value).
+    ///
+    /// FnOnce types:
+    /// - Everything that implements FnMut
+    /// - Closures that move captured values
+    pub(crate) fn type_is_fn_once(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Function pointers implement FnOnce
+            TypeKind::Fn { .. } => true,
+            // All closures implement FnOnce
+            TypeKind::Closure { .. } => true,
+            // References to FnOnce types
+            TypeKind::Ref { inner, .. } => self.type_is_fn_once(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements Default.
+    ///
+    /// Default types:
+    /// - Numeric primitives (default to 0)
+    /// - bool (defaults to false)
+    /// - char (defaults to '\0')
+    /// - Unit type
+    /// - Option<T> (defaults to None)
+    /// - Vec<T> (defaults to empty vec)
+    /// - String (defaults to empty string)
+    pub(crate) fn type_is_default(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Numeric primitives default to 0
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Int(_)
+                    | hir::PrimitiveTy::Uint(_)
+                    | hir::PrimitiveTy::Float(_)
+                    | hir::PrimitiveTy::Bool
+                    | hir::PrimitiveTy::Char
+                    | hir::PrimitiveTy::Unit
+                    | hir::PrimitiveTy::String
+            ),
+            // Unit type has Default
+            TypeKind::Tuple(elems) if elems.is_empty() => true,
+            // Tuples have Default if all elements do
+            TypeKind::Tuple(elems) => elems.iter().all(|e| self.type_is_default(e)),
+            // Arrays have Default if element does (and size is known)
+            TypeKind::Array { element, .. } => self.type_is_default(element),
+            // Option<T> has Default (None)
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.option_def_id => true,
+            // Vec<T> has Default (empty vec)
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => true,
+            _ => false,
+        }
+    }
+
+    /// Check if a type is a numeric type (integer, unsigned integer, or float).
+    ///
+    /// Numeric types support Add, Sub, Mul, Div, Rem operations.
+    pub(crate) fn type_is_numeric(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Int(_)
+                    | hir::PrimitiveTy::Uint(_)
+                    | hir::PrimitiveTy::Float(_)
+            ),
+            TypeKind::Ref { inner, .. } => self.type_is_numeric(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is a signed numeric type (integer or float).
+    ///
+    /// Signed numeric types support the Neg (unary minus) operation.
+    pub(crate) fn type_is_signed_numeric(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Int(_) | hir::PrimitiveTy::Float(_)
+            ),
+            TypeKind::Ref { inner, .. } => self.type_is_signed_numeric(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is bool or an integer type.
+    ///
+    /// These types support the Not (logical/bitwise negation) operation.
+    pub(crate) fn type_is_bool_or_integer(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Bool
+                    | hir::PrimitiveTy::Int(_)
+                    | hir::PrimitiveTy::Uint(_)
+            ),
+            TypeKind::Ref { inner, .. } => self.type_is_bool_or_integer(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type is an integer type (signed or unsigned).
+    ///
+    /// Integer types support bitwise operations (BitAnd, BitOr, BitXor, Shl, Shr).
+    pub(crate) fn type_is_integer(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Int(_) | hir::PrimitiveTy::Uint(_)
+            ),
+            TypeKind::Ref { inner, .. } => self.type_is_integer(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements PartialEq.
+    ///
+    /// Types that support == and != comparisons.
+    pub(crate) fn type_is_partial_eq(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // All primitives support equality
+            TypeKind::Primitive(_) => true,
+            // References are PartialEq if referent is
+            TypeKind::Ref { inner, .. } => self.type_is_partial_eq(inner),
+            // Tuples are PartialEq if all elements are
+            TypeKind::Tuple(elems) => elems.iter().all(|e| self.type_is_partial_eq(e)),
+            // Arrays are PartialEq if element is
+            TypeKind::Array { element, .. } => self.type_is_partial_eq(element),
+            // Option<T> is PartialEq if T is
+            TypeKind::Adt { def_id, args } if Some(*def_id) == self.option_def_id => {
+                args.first().map(|t| self.type_is_partial_eq(t)).unwrap_or(true)
+            }
+            // Result<T, E> is PartialEq if T and E are
+            TypeKind::Adt { def_id, args } if Some(*def_id) == self.result_def_id => {
+                args.iter().all(|t| self.type_is_partial_eq(t))
+            }
+            // Vec<T> is PartialEq if T is
+            TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
+                args.first().map(|t| self.type_is_partial_eq(t)).unwrap_or(true)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements PartialOrd.
+    ///
+    /// Types that support <, >, <=, >= comparisons.
+    pub(crate) fn type_is_partial_ord(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Numeric and char primitives support ordering
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Int(_)
+                    | hir::PrimitiveTy::Uint(_)
+                    | hir::PrimitiveTy::Float(_)
+                    | hir::PrimitiveTy::Char
+                    | hir::PrimitiveTy::Bool
+            ),
+            // References are PartialOrd if referent is
+            TypeKind::Ref { inner, .. } => self.type_is_partial_ord(inner),
+            // Tuples are PartialOrd if all elements are (lexicographic)
+            TypeKind::Tuple(elems) => elems.iter().all(|e| self.type_is_partial_ord(e)),
+            // Arrays are PartialOrd if element is
+            TypeKind::Array { element, .. } => self.type_is_partial_ord(element),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements Hash.
+    ///
+    /// Types that can be hashed for use in HashMap/HashSet.
+    pub(crate) fn type_is_hashable(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Most primitives are hashable (except floats - NaN issues)
+            TypeKind::Primitive(prim) => matches!(
+                prim,
+                hir::PrimitiveTy::Int(_)
+                    | hir::PrimitiveTy::Uint(_)
+                    | hir::PrimitiveTy::Bool
+                    | hir::PrimitiveTy::Char
+                    | hir::PrimitiveTy::String
+                    | hir::PrimitiveTy::Unit
+            ),
+            // References are hashable if referent is
+            TypeKind::Ref { inner, .. } => self.type_is_hashable(inner),
+            // Tuples are hashable if all elements are
+            TypeKind::Tuple(elems) => elems.iter().all(|e| self.type_is_hashable(e)),
+            // Arrays are hashable if element is
+            TypeKind::Array { element, .. } => self.type_is_hashable(element),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements Debug or Display.
+    ///
+    /// Types that can be formatted for output.
+    pub(crate) fn type_is_display(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // All primitives implement Debug/Display
+            TypeKind::Primitive(_) => true,
+            // References implement Debug/Display if referent does
+            TypeKind::Ref { inner, .. } => self.type_is_display(inner),
+            // Tuples implement Debug if all elements do
+            TypeKind::Tuple(elems) => elems.iter().all(|e| self.type_is_display(e)),
+            // Arrays implement Debug if element does
+            TypeKind::Array { element, .. } => self.type_is_display(element),
+            // Option<T> implements Debug/Display if T does
+            TypeKind::Adt { def_id, args } if Some(*def_id) == self.option_def_id => {
+                args.first().map(|t| self.type_is_display(t)).unwrap_or(true)
+            }
+            // Result<T, E> implements Debug if T and E do
+            TypeKind::Adt { def_id, args } if Some(*def_id) == self.result_def_id => {
+                args.iter().all(|t| self.type_is_display(t))
+            }
+            // Vec<T> implements Debug if T does
+            TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
+                args.first().map(|t| self.type_is_display(t)).unwrap_or(true)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements Iterator.
+    ///
+    /// Iterator types can be iterated with .next(), .map(), .filter(), etc.
+    pub(crate) fn type_is_iterator(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Iter<T> is an iterator
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.iter_def_id => true,
+            // Range types are iterators
+            TypeKind::Range { .. } => true,
+            // References to iterators are iterators
+            TypeKind::Ref { inner, .. } => self.type_is_iterator(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements IntoIterator.
+    ///
+    /// Types that can be converted to an iterator with .into_iter().
+    pub(crate) fn type_is_into_iterator(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Vec<T> can be converted to iterator
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => true,
+            // Iter<T> is already an iterator, so it implements IntoIterator
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.iter_def_id => true,
+            // Option<T> can be converted to iterator (0 or 1 elements)
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.option_def_id => true,
+            // Result<T, E> can be converted to iterator (0 or 1 elements based on Ok/Err)
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.result_def_id => true,
+            // Slices can be iterated
+            TypeKind::Slice { .. } => true,
+            // Arrays can be iterated
+            TypeKind::Array { .. } => true,
+            // Ranges can be iterated
+            TypeKind::Range { .. } => true,
+            // References to IntoIterator types
+            TypeKind::Ref { inner, .. } => self.type_is_into_iterator(inner),
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements Drop.
+    ///
+    /// Types with custom destructors or that need cleanup.
+    pub(crate) fn type_is_drop(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // Vec<T> needs drop to deallocate
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => true,
+            // Box<T> needs drop to deallocate
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.box_def_id => true,
+            // String needs drop to deallocate
+            TypeKind::Primitive(hir::PrimitiveTy::String) => true,
+            // Primitives don't need Drop
+            TypeKind::Primitive(_) => false,
+            // References don't need Drop
+            TypeKind::Ref { .. } => false,
+            // Raw pointers don't need Drop
+            TypeKind::Ptr { .. } => false,
+            // Arrays need Drop if element needs Drop
+            TypeKind::Array { element, .. } => self.type_is_drop(element),
+            // Tuples need Drop if any element needs Drop
+            TypeKind::Tuple(elems) => elems.iter().any(|e| self.type_is_drop(e)),
+            // Closures may need Drop if they capture owned values
+            TypeKind::Closure { .. } => true,
+            // Other ADTs may need Drop (conservative - assume they do)
+            TypeKind::Adt { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Check if a type supports From/Into conversions.
+    ///
+    /// Types that can be converted to other types.
+    pub(crate) fn type_is_convertible(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // All primitives support some conversions
+            TypeKind::Primitive(_) => true,
+            // &str can convert to String
+            TypeKind::Ref { inner, mutable: false } => {
+                matches!(inner.kind(), TypeKind::Primitive(hir::PrimitiveTy::Str))
+            }
+            // Vec<T> supports From<[T; N]> etc.
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => true,
+            // Option<T> supports From<T>
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.option_def_id => true,
+            // Result<T, E> supports From conversions
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.result_def_id => true,
+            // Box<T> supports From<T>
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.box_def_id => true,
+            _ => false,
+        }
+    }
+
+    /// Check if a type implements Deref or DerefMut.
+    ///
+    /// Types that can be dereferenced.
+    pub(crate) fn type_is_deref(&self, ty: &Type) -> bool {
+        match ty.kind() {
+            // References implement Deref
+            TypeKind::Ref { .. } => true,
+            // Raw pointers implement Deref (unsafe)
+            TypeKind::Ptr { .. } => true,
+            // Box<T> implements Deref to T
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.box_def_id => true,
+            // String implements Deref to str
+            TypeKind::Primitive(hir::PrimitiveTy::String) => true,
+            // Vec<T> implements Deref to [T]
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => true,
+            _ => false,
         }
     }
 }

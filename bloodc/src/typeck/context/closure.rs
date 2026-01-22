@@ -470,6 +470,9 @@ impl<'a> TypeContext<'a> {
             hir::ExprKind::SliceLen(inner) => {
                 self.collect_captures(inner, is_move, captures, seen);
             }
+            hir::ExprKind::VecLen(inner) => {
+                self.collect_captures(inner, is_move, captures, seen);
+            }
             hir::ExprKind::ArrayToSlice { expr, .. } => {
                 self.collect_captures(expr, is_move, captures, seen);
             }

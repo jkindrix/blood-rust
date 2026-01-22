@@ -61,10 +61,11 @@ impl<'a> TypeContext<'a> {
                 {
                     // Need to insert array-to-slice coercion
                     let coerced_ty = expected_resolved.clone();
+                    let array_len = size.as_u64().unwrap_or(0);
                     return Ok(hir::Expr::new(
                         hir::ExprKind::ArrayToSlice {
                             expr: Box::new(inferred),
-                            array_len: *size,
+                            array_len,
                         },
                         coerced_ty,
                         expr.span,
@@ -1025,6 +1026,1576 @@ impl<'a> TypeContext<'a> {
         ))
     }
 
+    /// Try to desugar a closure-accepting method call to a match expression.
+    ///
+    /// For example, `opt.map(f)` becomes:
+    /// ```ignore
+    /// match opt {
+    ///     Some(_tmp) => Some(f(_tmp)),
+    ///     None => None
+    /// }
+    /// ```
+    ///
+    /// Returns `Some(expr)` if desugaring was performed, `None` otherwise.
+    fn try_desugar_closure_method(
+        &mut self,
+        receiver_expr: &hir::Expr,
+        method_name: &str,
+        args: &[hir::Expr],
+        span: Span,
+    ) -> Result<Option<hir::Expr>, TypeError> {
+        // Get the underlying receiver type (auto-deref if needed)
+        let receiver_ty = match receiver_expr.ty.kind() {
+            TypeKind::Ref { inner, .. } => inner.clone(),
+            _ => receiver_expr.ty.clone(),
+        };
+
+        // Check if receiver is Option<T>
+        if let TypeKind::Adt { def_id, args: type_args, .. } = receiver_ty.kind() {
+            if Some(*def_id) == self.option_def_id {
+                // Get T from Option<T>
+                let t_ty = type_args.first().cloned().unwrap_or_else(Type::unit);
+
+                match method_name {
+                    "map" if args.len() == 1 => {
+                        return self.desugar_option_map(receiver_expr, &args[0], &t_ty, span).map(Some);
+                    }
+                    "and_then" if args.len() == 1 => {
+                        return self.desugar_option_and_then(receiver_expr, &args[0], &t_ty, span).map(Some);
+                    }
+                    "filter" if args.len() == 1 => {
+                        return self.desugar_option_filter(receiver_expr, &args[0], &t_ty, span).map(Some);
+                    }
+                    "map_or" if args.len() == 2 => {
+                        return self.desugar_option_map_or(receiver_expr, &args[0], &args[1], &t_ty, span).map(Some);
+                    }
+                    "map_or_else" if args.len() == 2 => {
+                        return self.desugar_option_map_or_else(receiver_expr, &args[0], &args[1], &t_ty, span).map(Some);
+                    }
+                    "or_else" if args.len() == 1 => {
+                        return self.desugar_option_or_else(receiver_expr, &args[0], &t_ty, span).map(Some);
+                    }
+                    "unwrap_or_else" if args.len() == 1 => {
+                        return self.desugar_option_unwrap_or_else(receiver_expr, &args[0], &t_ty, span).map(Some);
+                    }
+                    "unwrap_or_default" if args.is_empty() => {
+                        return self.desugar_option_unwrap_or_default(receiver_expr, &t_ty, span).map(Some);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Check if receiver is Result<T, E>
+            if Some(*def_id) == self.result_def_id {
+                let t_ty = type_args.first().cloned().unwrap_or_else(Type::unit);
+                let e_ty = type_args.get(1).cloned().unwrap_or_else(Type::unit);
+
+                match method_name {
+                    "map" if args.len() == 1 => {
+                        return self.desugar_result_map(receiver_expr, &args[0], &t_ty, &e_ty, span).map(Some);
+                    }
+                    "map_err" if args.len() == 1 => {
+                        return self.desugar_result_map_err(receiver_expr, &args[0], &t_ty, &e_ty, span).map(Some);
+                    }
+                    "and_then" if args.len() == 1 => {
+                        return self.desugar_result_and_then(receiver_expr, &args[0], &t_ty, &e_ty, span).map(Some);
+                    }
+                    "or_else" if args.len() == 1 => {
+                        return self.desugar_result_or_else(receiver_expr, &args[0], &t_ty, &e_ty, span).map(Some);
+                    }
+                    "unwrap_or_else" if args.len() == 1 => {
+                        return self.desugar_result_unwrap_or_else(receiver_expr, &args[0], &t_ty, &e_ty, span).map(Some);
+                    }
+                    "unwrap_or_default" if args.is_empty() => {
+                        return self.desugar_result_unwrap_or_default(receiver_expr, &t_ty, &e_ty, span).map(Some);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Desugar Option.map(f): match opt { Some(x) => Some(f(x)), None => None }
+    fn desugar_option_map(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let option_def_id = self.option_def_id.expect("option_def_id must be set");
+
+        // Get U from closure type: fn(T) -> U
+        let u_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        // Result type: Option<U>
+        let result_ty = Type::adt(option_def_id, vec![u_ty.clone()]);
+
+        // Get Some and None variant def_ids
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        // Create a fresh local for the captured value
+        let tmp_local_id = self.resolver.next_local_id();
+
+        // Pattern for Some(x)
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        // Body for Some arm: Some(f(x))
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![local_ref],
+            },
+            u_ty.clone(),
+            span,
+        );
+        let some_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![closure_call],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: some_result,
+        };
+
+        // Pattern and body for None arm
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+        let none_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: none_result,
+        };
+
+        // Build the match expression
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.and_then(f): match opt { Some(x) => f(x), None => None }
+    fn desugar_option_and_then(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let option_def_id = self.option_def_id.expect("option_def_id must be set");
+
+        // Get Option<U> from closure return type
+        let result_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        // Some(x) pattern
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        // Body: f(x) (returns Option<U>)
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![local_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        // None arm returns None of the result type
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        // Get U from Option<U> to create None of correct type
+        let u_ty = match result_ty.kind() {
+            TypeKind::Adt { args, .. } => args.first().cloned().unwrap_or_else(Type::unit),
+            _ => Type::unit(),
+        };
+        let none_result_ty = Type::adt(option_def_id, vec![u_ty]);
+        let none_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            none_result_ty,
+            span,
+        );
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: none_result,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.filter(pred): match opt { Some(x) if pred(&x) => Some(x), _ => None }
+    fn desugar_option_filter(
+        &mut self,
+        receiver: &hir::Expr,
+        predicate: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = receiver.ty.clone();
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        // Some(x) pattern
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        // Guard: pred(&x)
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let local_borrow = hir::Expr::new(
+            hir::ExprKind::Borrow {
+                mutable: false,
+                expr: Box::new(local_ref.clone()),
+            },
+            Type::reference(t_ty.clone(), false),
+            span,
+        );
+        let guard_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(predicate.clone()),
+                args: vec![local_borrow],
+            },
+            Type::bool(),
+            span,
+        );
+
+        // Body: Some(x)
+        let some_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![local_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: Some(guard_call),
+            body: some_result,
+        };
+
+        // Wildcard arm returns None
+        let wildcard_pattern = hir::Pattern {
+            kind: hir::PatternKind::Wildcard,
+            ty: receiver.ty.clone(),
+            span,
+        };
+        let none_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let wildcard_arm = hir::MatchArm {
+            pattern: wildcard_pattern,
+            guard: None,
+            body: none_result,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, wildcard_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.map_or(default, f): match opt { Some(x) => f(x), None => default }
+    fn desugar_option_map_or(
+        &mut self,
+        receiver: &hir::Expr,
+        default: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        // Result type is U (return type of closure)
+        let result_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => default.ty.clone(),
+        };
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![local_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: default.clone(),
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.map_or_else(default_fn, f): match opt { Some(x) => f(x), None => default_fn() }
+    fn desugar_option_map_or_else(
+        &mut self,
+        receiver: &hir::Expr,
+        default_fn: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![local_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+        let default_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(default_fn.clone()),
+                args: vec![],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: default_call,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.or_else(f): match opt { Some(x) => Some(x), None => f() }
+    fn desugar_option_or_else(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = receiver.ty.clone();
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let some_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![local_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: some_result,
+        };
+
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.unwrap_or_else(f): match opt { Some(x) => x, None => f() }
+    fn desugar_option_unwrap_or_else(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = t_ty.clone();
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: local_ref,
+        };
+
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Option.unwrap_or_default(): match opt { Some(x) => x, None => Default::default() }
+    fn desugar_option_unwrap_or_default(
+        &mut self,
+        receiver: &hir::Expr,
+        t_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = t_ty.clone();
+
+        let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        let some_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: some_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+
+        let some_arm = hir::MatchArm {
+            pattern: some_pattern,
+            guard: None,
+            body: local_ref,
+        };
+
+        let none_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: none_def_id,
+                variant_idx: 1,
+                fields: vec![],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        // Generate default value for the type
+        let default_expr = self.generate_default_value(t_ty, span)?;
+
+        let none_arm = hir::MatchArm {
+            pattern: none_pattern,
+            guard: None,
+            body: default_expr,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![some_arm, none_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Helper to get Option's Some and None variant DefIds
+    fn get_option_variant_def_ids(&self) -> Result<(DefId, DefId), TypeError> {
+        let option_def_id = self.option_def_id.expect("option_def_id must be set");
+
+        // Look up the enum info to get variant def IDs
+        if let Some(enum_info) = self.enum_defs.get(&option_def_id) {
+            let some_def_id = enum_info.variants.iter()
+                .find(|v| v.name == "Some")
+                .map(|v| v.def_id)
+                .expect("Option must have Some variant");
+            let none_def_id = enum_info.variants.iter()
+                .find(|v| v.name == "None")
+                .map(|v| v.def_id)
+                .expect("Option must have None variant");
+            Ok((some_def_id, none_def_id))
+        } else {
+            // Fallback: use synthetic def IDs (this shouldn't happen in practice)
+            Ok((DefId::new(option_def_id.index() + 1), DefId::new(option_def_id.index() + 2)))
+        }
+    }
+
+    /// Helper to get Result's Ok and Err variant DefIds
+    fn get_result_variant_def_ids(&self) -> Result<(DefId, DefId), TypeError> {
+        let result_def_id = self.result_def_id.expect("result_def_id must be set");
+
+        if let Some(enum_info) = self.enum_defs.get(&result_def_id) {
+            let ok_def_id = enum_info.variants.iter()
+                .find(|v| v.name == "Ok")
+                .map(|v| v.def_id)
+                .expect("Result must have Ok variant");
+            let err_def_id = enum_info.variants.iter()
+                .find(|v| v.name == "Err")
+                .map(|v| v.def_id)
+                .expect("Result must have Err variant");
+            Ok((ok_def_id, err_def_id))
+        } else {
+            Ok((DefId::new(result_def_id.index() + 1), DefId::new(result_def_id.index() + 2)))
+        }
+    }
+
+    /// Generate a default value for a type
+    fn generate_default_value(&self, ty: &Type, span: Span) -> Result<hir::Expr, TypeError> {
+        match ty.kind() {
+            TypeKind::Primitive(prim) => {
+                let lit = match prim {
+                    hir::PrimitiveTy::Bool => hir::LiteralValue::Bool(false),
+                    hir::PrimitiveTy::Char => hir::LiteralValue::Char('\0'),
+                    hir::PrimitiveTy::Int(_) | hir::PrimitiveTy::Uint(_) => hir::LiteralValue::Int(0),
+                    hir::PrimitiveTy::Float(_) => hir::LiteralValue::Float(0.0),
+                    hir::PrimitiveTy::Unit => return Ok(hir::Expr::new(
+                        hir::ExprKind::Tuple(vec![]),
+                        Type::unit(),
+                        span,
+                    )),
+                    hir::PrimitiveTy::String => hir::LiteralValue::String("".to_string()),
+                    hir::PrimitiveTy::Str => hir::LiteralValue::String("".to_string()),
+                    hir::PrimitiveTy::Never => {
+                        return Err(TypeError::new(
+                            TypeErrorKind::UnsupportedFeature {
+                                feature: "Never type has no default value".to_string(),
+                            },
+                            span,
+                        ));
+                    }
+                };
+                Ok(hir::Expr::new(
+                    hir::ExprKind::Literal(lit),
+                    ty.clone(),
+                    span,
+                ))
+            }
+            TypeKind::Tuple(elems) if elems.is_empty() => {
+                Ok(hir::Expr::new(
+                    hir::ExprKind::Tuple(vec![]),
+                    Type::unit(),
+                    span,
+                ))
+            }
+            TypeKind::Adt { def_id, .. } if Some(*def_id) == self.option_def_id => {
+                // Option defaults to None
+                let (_, none_def_id) = self.get_option_variant_def_ids()?;
+                Ok(hir::Expr::new(
+                    hir::ExprKind::Variant {
+                        def_id: none_def_id,
+                        variant_idx: 1,
+                        fields: vec![],
+                    },
+                    ty.clone(),
+                    span,
+                ))
+            }
+            _ => {
+                // For types without a known default, use Default expression
+                // This will be handled at codegen time
+                Ok(hir::Expr::new(
+                    hir::ExprKind::Default,
+                    ty.clone(),
+                    span,
+                ))
+            }
+        }
+    }
+
+    // Result desugarings (similar pattern to Option)
+
+    /// Desugar Result.map(f): match res { Ok(x) => Ok(f(x)), Err(e) => Err(e) }
+    fn desugar_result_map(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        e_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_def_id = self.result_def_id.expect("result_def_id must be set");
+
+        let u_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        let result_ty = Type::adt(result_def_id, vec![u_ty.clone(), e_ty.clone()]);
+
+        let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
+
+        let tmp_local_id = self.resolver.next_local_id();
+
+        // Ok(x) arm
+        let ok_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: tmp_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let local_ref = hir::Expr::new(
+            hir::ExprKind::Local(tmp_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![local_ref],
+            },
+            u_ty.clone(),
+            span,
+        );
+        let ok_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![closure_call],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let ok_arm = hir::MatchArm {
+            pattern: ok_pattern,
+            guard: None,
+            body: ok_result,
+        };
+
+        // Err(e) arm - propagate error
+        let err_local_id = self.resolver.next_local_id();
+
+        let err_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: err_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: e_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let err_ref = hir::Expr::new(
+            hir::ExprKind::Local(err_local_id),
+            e_ty.clone(),
+            span,
+        );
+        let err_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![err_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let err_arm = hir::MatchArm {
+            pattern: err_pattern,
+            guard: None,
+            body: err_result,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![ok_arm, err_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Result.map_err(f): match res { Ok(x) => Ok(x), Err(e) => Err(f(e)) }
+    fn desugar_result_map_err(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        e_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_def_id = self.result_def_id.expect("result_def_id must be set");
+
+        let f_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        let result_ty = Type::adt(result_def_id, vec![t_ty.clone(), f_ty.clone()]);
+
+        let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
+
+        // Ok(x) arm - just propagate
+        let ok_local_id = self.resolver.next_local_id();
+
+        let ok_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: ok_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let ok_ref = hir::Expr::new(
+            hir::ExprKind::Local(ok_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let ok_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![ok_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let ok_arm = hir::MatchArm {
+            pattern: ok_pattern,
+            guard: None,
+            body: ok_result,
+        };
+
+        // Err(e) arm - apply closure
+        let err_local_id = self.resolver.next_local_id();
+
+        let err_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: err_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: e_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let err_ref = hir::Expr::new(
+            hir::ExprKind::Local(err_local_id),
+            e_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![err_ref],
+            },
+            f_ty.clone(),
+            span,
+        );
+        let err_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![closure_call],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let err_arm = hir::MatchArm {
+            pattern: err_pattern,
+            guard: None,
+            body: err_result,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![ok_arm, err_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Result.and_then(f): match res { Ok(x) => f(x), Err(e) => Err(e) }
+    fn desugar_result_and_then(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        e_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
+
+        // Ok(x) arm - call closure
+        let ok_local_id = self.resolver.next_local_id();
+
+        let ok_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: ok_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let ok_ref = hir::Expr::new(
+            hir::ExprKind::Local(ok_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![ok_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let ok_arm = hir::MatchArm {
+            pattern: ok_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        // Err(e) arm - propagate with correct result type
+        let err_local_id = self.resolver.next_local_id();
+
+        let err_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: err_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: e_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let err_ref = hir::Expr::new(
+            hir::ExprKind::Local(err_local_id),
+            e_ty.clone(),
+            span,
+        );
+        let err_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![err_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let err_arm = hir::MatchArm {
+            pattern: err_pattern,
+            guard: None,
+            body: err_result,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![ok_arm, err_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Result.or_else(f): match res { Ok(x) => Ok(x), Err(e) => f(e) }
+    fn desugar_result_or_else(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        e_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = match closure.ty.kind() {
+            TypeKind::Fn { ret, .. } => ret.clone(),
+            TypeKind::Closure { ret, .. } => ret.clone(),
+            _ => self.unifier.fresh_var(),
+        };
+
+        let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
+
+        // Ok(x) arm - propagate with correct result type
+        let ok_local_id = self.resolver.next_local_id();
+
+        let ok_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: ok_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let ok_ref = hir::Expr::new(
+            hir::ExprKind::Local(ok_local_id),
+            t_ty.clone(),
+            span,
+        );
+        let ok_result = hir::Expr::new(
+            hir::ExprKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![ok_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let ok_arm = hir::MatchArm {
+            pattern: ok_pattern,
+            guard: None,
+            body: ok_result,
+        };
+
+        // Err(e) arm - call closure
+        let err_local_id = self.resolver.next_local_id();
+
+        let err_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: err_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: e_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let err_ref = hir::Expr::new(
+            hir::ExprKind::Local(err_local_id),
+            e_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![err_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let err_arm = hir::MatchArm {
+            pattern: err_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![ok_arm, err_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Result.unwrap_or_else(f): match res { Ok(x) => x, Err(e) => f(e) }
+    fn desugar_result_unwrap_or_else(
+        &mut self,
+        receiver: &hir::Expr,
+        closure: &hir::Expr,
+        t_ty: &Type,
+        e_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = t_ty.clone();
+
+        let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
+
+        // Ok(x) arm - return x
+        let ok_local_id = self.resolver.next_local_id();
+
+        let ok_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: ok_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let ok_ref = hir::Expr::new(
+            hir::ExprKind::Local(ok_local_id),
+            t_ty.clone(),
+            span,
+        );
+
+        let ok_arm = hir::MatchArm {
+            pattern: ok_pattern,
+            guard: None,
+            body: ok_ref,
+        };
+
+        // Err(e) arm - call closure
+        let err_local_id = self.resolver.next_local_id();
+
+        let err_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: err_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: e_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let err_ref = hir::Expr::new(
+            hir::ExprKind::Local(err_local_id),
+            e_ty.clone(),
+            span,
+        );
+        let closure_call = hir::Expr::new(
+            hir::ExprKind::Call {
+                callee: Box::new(closure.clone()),
+                args: vec![err_ref],
+            },
+            result_ty.clone(),
+            span,
+        );
+
+        let err_arm = hir::MatchArm {
+            pattern: err_pattern,
+            guard: None,
+            body: closure_call,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![ok_arm, err_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
+    /// Desugar Result.unwrap_or_default(): match res { Ok(x) => x, Err(_) => Default::default() }
+    fn desugar_result_unwrap_or_default(
+        &mut self,
+        receiver: &hir::Expr,
+        t_ty: &Type,
+        _e_ty: &Type,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let result_ty = t_ty.clone();
+
+        let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
+
+        // Ok(x) arm
+        let ok_local_id = self.resolver.next_local_id();
+
+        let ok_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: ok_def_id,
+                variant_idx: 0,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Binding {
+                        local_id: ok_local_id,
+                        mutable: false,
+                        subpattern: None,
+                    },
+                    ty: t_ty.clone(),
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let ok_ref = hir::Expr::new(
+            hir::ExprKind::Local(ok_local_id),
+            t_ty.clone(),
+            span,
+        );
+
+        let ok_arm = hir::MatchArm {
+            pattern: ok_pattern,
+            guard: None,
+            body: ok_ref,
+        };
+
+        // Err(_) arm - return default
+        let err_pattern = hir::Pattern {
+            kind: hir::PatternKind::Variant {
+                def_id: err_def_id,
+                variant_idx: 1,
+                fields: vec![hir::Pattern {
+                    kind: hir::PatternKind::Wildcard,
+                    ty: Type::unit(), // Wildcard, type doesn't matter
+                    span,
+                }],
+            },
+            ty: receiver.ty.clone(),
+            span,
+        };
+
+        let default_expr = self.generate_default_value(t_ty, span)?;
+
+        let err_arm = hir::MatchArm {
+            pattern: err_pattern,
+            guard: None,
+            body: default_expr,
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Match {
+                scrutinee: Box::new(receiver.clone()),
+                arms: vec![ok_arm, err_arm],
+            },
+            result_ty,
+            span,
+        ))
+    }
+
     /// Infer type of a method call.
     ///
     /// This desugars `receiver.method(args)` into `method(receiver, args)`.
@@ -1045,6 +2616,11 @@ impl<'a> TypeContext<'a> {
             hir_args.push(arg_expr);
         }
 
+        // Try to desugar closure-accepting methods
+        if let Some(desugared) = self.try_desugar_closure_method(&receiver_expr, &method_name, &hir_args, span)? {
+            return Ok(desugared);
+        }
+
         // Special handling for .len() on arrays and slices
         if method_name == "len" && hir_args.is_empty() {
             // Get the underlying type (auto-deref if needed)
@@ -1056,8 +2632,9 @@ impl<'a> TypeContext<'a> {
             match underlying_ty.kind() {
                 // Array: return constant length
                 TypeKind::Array { size, .. } => {
+                    let concrete_size = size.as_u64().unwrap_or(0) as i128;
                     return Ok(hir::Expr::new(
-                        hir::ExprKind::Literal(hir::LiteralValue::Int(*size as i128)),
+                        hir::ExprKind::Literal(hir::LiteralValue::Int(concrete_size)),
                         Type::usize(),
                         span,
                     ));
@@ -1082,8 +2659,15 @@ impl<'a> TypeContext<'a> {
         let mut substitution: HashMap<TyVarId, Type> = HashMap::new();
 
         // Extract concrete type args from receiver to build substitution
+        // Handle both direct ADT types (Vec<i32>) and references to them (&mut Vec<i32>)
         if !impl_generics.is_empty() {
-            if let TypeKind::Adt { args: receiver_args, .. } = receiver_expr.ty.kind() {
+            // Get the underlying type (unwrap references if needed)
+            let underlying_ty = match receiver_expr.ty.kind() {
+                TypeKind::Ref { inner, .. } => inner,
+                _ => &receiver_expr.ty,
+            };
+
+            if let TypeKind::Adt { args: receiver_args, .. } = underlying_ty.kind() {
                 for (tyvar, concrete_ty) in impl_generics.iter().zip(receiver_args.iter()) {
                     substitution.insert(*tyvar, concrete_ty.clone());
                 }
@@ -1096,13 +2680,39 @@ impl<'a> TypeContext<'a> {
         }
 
         // Build the callee type by substituting in the stored signature
-        let callee_ty = if let Some(sig) = self.fn_sigs.get(&method_def_id).cloned() {
+        // Also compute the final return type with method generics substituted
+        let (callee_ty, final_return_ty) = if let Some(sig) = self.fn_sigs.get(&method_def_id).cloned() {
             // Apply substitution to inputs and output
             let subst_inputs: Vec<Type> = sig.inputs.iter()
                 .map(|ty| self.substitute_type_vars(ty, &substitution))
                 .collect();
             let subst_output = self.substitute_type_vars(&sig.output, &substitution);
-            Type::function(subst_inputs, subst_output)
+
+            // Unify substituted parameter types with actual argument types
+            // This infers method-level type parameters from arguments
+            // Skip the first (receiver) parameter, unify remaining with hir_args
+            for (i, arg) in hir_args.iter().enumerate() {
+                // subst_inputs[0] is receiver, subst_inputs[1..] are the rest
+                if let Some(param_ty) = subst_inputs.get(i + 1) {
+                    // Unify arg type with param type to infer type vars
+                    // If unification fails, report a type mismatch error
+                    self.unifier.unify(param_ty, &arg.ty, arg.span).map_err(|_| {
+                        TypeError::new(
+                            TypeErrorKind::Mismatch {
+                                expected: self.unifier.resolve(param_ty),
+                                found: arg.ty.clone(),
+                            },
+                            arg.span,
+                        )
+                    })?;
+                }
+            }
+
+            // Also substitute the return type from resolve_method
+            let subst_return_ty = self.substitute_type_vars(&return_ty, &substitution);
+            // Resolve to replace any unified type vars with their concrete types
+            let resolved_return_ty = self.unifier.resolve(&subst_return_ty);
+            (Type::function(subst_inputs, subst_output), resolved_return_ty)
         } else {
             // Fallback to inferred function type
             let receiver_ty = if needs_auto_ref {
@@ -1112,7 +2722,7 @@ impl<'a> TypeContext<'a> {
             };
             let mut param_types = vec![receiver_ty];
             param_types.extend(hir_args.iter().map(|a| a.ty.clone()));
-            Type::function(param_types, return_ty.clone())
+            (Type::function(param_types, return_ty.clone()), return_ty.clone())
         };
 
         let callee = hir::Expr::new(
@@ -1156,7 +2766,7 @@ impl<'a> TypeContext<'a> {
                 callee: Box::new(callee),
                 args: all_args,
             },
-            return_ty,
+            final_return_ty,
             span,
         ))
     }
@@ -1314,10 +2924,12 @@ impl<'a> TypeContext<'a> {
             TypeKind::Primitive(PrimitiveTy::Str) => Some(BuiltinMethodType::Str),
             TypeKind::Primitive(PrimitiveTy::Char) => Some(BuiltinMethodType::Char),
             TypeKind::Primitive(PrimitiveTy::String) => Some(BuiltinMethodType::String),
+            TypeKind::Slice { .. } => Some(BuiltinMethodType::Slice),
             TypeKind::Ref { inner, .. } => {
                 match inner.kind() {
                     TypeKind::Primitive(PrimitiveTy::Str) => Some(BuiltinMethodType::StrRef),
                     TypeKind::Primitive(PrimitiveTy::String) => Some(BuiltinMethodType::String),
+                    TypeKind::Slice { .. } => Some(BuiltinMethodType::Slice),
                     _ => None,
                 }
             }
@@ -1347,28 +2959,91 @@ impl<'a> TypeContext<'a> {
                     // For generic types (Option<T>, Vec<T>), we need to substitute
                     // the type argument into the return type
                     let return_type = match &type_match {
-                        BuiltinMethodType::Option | BuiltinMethodType::Vec | BuiltinMethodType::Box => {
-                            // Extract the type argument from the ADT
+                        BuiltinMethodType::Option => {
+                            // Extract the type argument from Option<T>
                             if let TypeKind::Adt { args, .. } = ty.kind() {
                                 if !args.is_empty() {
                                     let element_ty = args[0].clone();
                                     // For Option<T>.unwrap() and Option<T>.try_(), return type is T
-                                    if method_name == "unwrap" || method_name == "try_" {
+                                    if method_name == "unwrap" || method_name == "try_" || method_name == "expect" {
                                         element_ty
-                                    } else if method_name == "get" {
-                                        // Vec<T>.get() returns Option<&T>
-                                        // Substitute T with the actual element type
+                                    } else if method_name == "unwrap_or" {
+                                        // Option<T>.unwrap_or(default: T) -> T
+                                        element_ty
+                                    } else if method_name == "or" || method_name == "xor" {
+                                        // Option<T>.or/xor(other: Option<T>) -> Option<T>
+                                        ty.clone()
+                                    } else if method_name == "take" || method_name == "replace" {
+                                        // Option<T>.take/replace() -> Option<T>
+                                        ty.clone()
+                                    } else if method_name == "as_ref" {
+                                        // Option<T>.as_ref() -> Option<&T>
                                         let ref_elem = Type::reference(element_ty, false);
                                         Type::adt(
                                             self.option_def_id.expect("BUG: option_def_id not set"),
                                             vec![ref_elem],
                                         )
+                                    } else if method_name == "as_mut" {
+                                        // Option<T>.as_mut() -> Option<&mut T>
+                                        let ref_mut_elem = Type::reference(element_ty, true);
+                                        Type::adt(
+                                            self.option_def_id.expect("BUG: option_def_id not set"),
+                                            vec![ref_mut_elem],
+                                        )
+                                    } else {
+                                        // Default: return registered type
+                                        sig.output.clone()
+                                    }
+                                } else {
+                                    sig.output.clone()
+                                }
+                            } else {
+                                sig.output.clone()
+                            }
+                        }
+                        BuiltinMethodType::Vec | BuiltinMethodType::Box => {
+                            // Extract the type argument from the ADT
+                            if let TypeKind::Adt { args, .. } = ty.kind() {
+                                if !args.is_empty() {
+                                    let element_ty = args[0].clone();
+                                    if method_name == "get" || method_name == "first" || method_name == "last" {
+                                        // Vec<T>.get/first/last() returns Option<&T>
+                                        let ref_elem = Type::reference(element_ty, false);
+                                        Type::adt(
+                                            self.option_def_id.expect("BUG: option_def_id not set"),
+                                            vec![ref_elem],
+                                        )
+                                    } else if method_name == "get_mut" || method_name == "first_mut" || method_name == "last_mut" {
+                                        // Vec<T>.get_mut/first_mut/last_mut() returns Option<&mut T>
+                                        let ref_mut_elem = Type::reference(element_ty, true);
+                                        Type::adt(
+                                            self.option_def_id.expect("BUG: option_def_id not set"),
+                                            vec![ref_mut_elem],
+                                        )
+                                    } else if method_name == "pop" {
+                                        // Vec<T>.pop() returns Option<T>
+                                        Type::adt(
+                                            self.option_def_id.expect("BUG: option_def_id not set"),
+                                            vec![element_ty],
+                                        )
+                                    } else if method_name == "remove" || method_name == "swap_remove" {
+                                        // Vec<T>.remove/swap_remove() returns T
+                                        element_ty
+                                    } else if method_name == "as_slice" {
+                                        // Vec<T>.as_slice() returns &[T]
+                                        Type::reference(Type::slice(element_ty), false)
+                                    } else if method_name == "as_mut_slice" {
+                                        // Vec<T>.as_mut_slice() returns &mut [T]
+                                        Type::reference(Type::slice(element_ty), true)
                                     } else if method_name == "as_ref" {
                                         // Box<T>.as_ref() returns &T
                                         Type::reference(element_ty, false)
                                     } else if method_name == "as_mut" {
                                         // Box<T>.as_mut() returns &mut T
                                         Type::reference(element_ty, true)
+                                    } else if method_name == "into_inner" {
+                                        // Box<T>.into_inner() returns T
+                                        element_ty
                                     } else {
                                         sig.output.clone()
                                     }
@@ -1381,16 +3056,48 @@ impl<'a> TypeContext<'a> {
                         }
                         BuiltinMethodType::Result => {
                             // Result<T, E> has two type arguments
-                            if let TypeKind::Adt { args, .. } = ty.kind() {
+                            if let TypeKind::Adt { args, def_id } = ty.kind() {
                                 if args.len() >= 2 {
                                     let ok_ty = args[0].clone();
                                     let err_ty = args[1].clone();
-                                    // unwrap() and try_() return T
-                                    if method_name == "unwrap" || method_name == "try_" {
+                                    // unwrap(), try_(), expect() return T
+                                    if method_name == "unwrap" || method_name == "try_" || method_name == "expect" {
                                         ok_ty
-                                    // unwrap_err() returns E
-                                    } else if method_name == "unwrap_err" {
+                                    // unwrap_err(), expect_err() return E
+                                    } else if method_name == "unwrap_err" || method_name == "expect_err" {
                                         err_ty
+                                    // unwrap_or(default: T) -> T
+                                    } else if method_name == "unwrap_or" {
+                                        ok_ty
+                                    // ok() -> Option<T>
+                                    } else if method_name == "ok" {
+                                        Type::adt(
+                                            self.option_def_id.expect("BUG: option_def_id not set"),
+                                            vec![ok_ty],
+                                        )
+                                    // err() -> Option<E>
+                                    } else if method_name == "err" {
+                                        Type::adt(
+                                            self.option_def_id.expect("BUG: option_def_id not set"),
+                                            vec![err_ty],
+                                        )
+                                    // or(other: Result<T, F>) -> Result<T, F>
+                                    // Note: The second Result might have different error type
+                                    // For simplicity, return the receiver's Result type
+                                    } else if method_name == "or" {
+                                        // Result<T, F> where T comes from self, F from other
+                                        // Since we can't easily extract F here, fall back to sig
+                                        ty.clone()
+                                    // as_ref() -> Result<&T, &E>
+                                    } else if method_name == "as_ref" {
+                                        let ref_ok = Type::reference(ok_ty, false);
+                                        let ref_err = Type::reference(err_ty, false);
+                                        Type::adt(*def_id, vec![ref_ok, ref_err])
+                                    // as_mut() -> Result<&mut T, &mut E>
+                                    } else if method_name == "as_mut" {
+                                        let ref_mut_ok = Type::reference(ok_ty, true);
+                                        let ref_mut_err = Type::reference(err_ty, true);
+                                        Type::adt(*def_id, vec![ref_mut_ok, ref_mut_err])
                                     } else {
                                         sig.output.clone()
                                     }
@@ -1401,16 +3108,63 @@ impl<'a> TypeContext<'a> {
                                 sig.output.clone()
                             }
                         }
+                        BuiltinMethodType::Slice => {
+                            // Extract element type from slice
+                            // Type can be [T] directly or &[T]
+                            let element_ty = match ty.kind() {
+                                TypeKind::Slice { element } => element.clone(),
+                                TypeKind::Ref { inner, .. } => {
+                                    if let TypeKind::Slice { element } = inner.kind() {
+                                        element.clone()
+                                    } else {
+                                        return None;
+                                    }
+                                }
+                                _ => return None,
+                            };
+
+                            // first(), last(), get() return Option<&T>
+                            if method_name == "first" || method_name == "last" || method_name == "get" {
+                                let ref_elem = Type::reference(element_ty, false);
+                                Type::adt(
+                                    self.option_def_id.expect("BUG: option_def_id not set"),
+                                    vec![ref_elem],
+                                )
+                            } else if method_name == "get_mut" {
+                                // get_mut() returns Option<&mut T>
+                                let ref_mut_elem = Type::reference(element_ty, true);
+                                Type::adt(
+                                    self.option_def_id.expect("BUG: option_def_id not set"),
+                                    vec![ref_mut_elem],
+                                )
+                            } else {
+                                sig.output.clone()
+                            }
+                        }
                         _ => sig.output.clone(),
                     };
 
                     let first_param = sig.inputs.first().cloned();
+
+                    // For generic builtin types (Option<T>, Vec<T>, Box<T>, Result<T, E>),
+                    // we need to return the impl_generics so that type arguments from the
+                    // receiver type can be substituted into the method signature.
+                    // TyVarId(9000) is used as placeholder for T, TyVarId(9001) for E.
+                    let impl_generics = match &type_match {
+                        BuiltinMethodType::Option
+                        | BuiltinMethodType::Vec
+                        | BuiltinMethodType::Box => vec![TyVarId(9000)],
+                        BuiltinMethodType::Result => vec![TyVarId(9000), TyVarId(9001)],
+                        _ => Vec::new(),
+                    };
+
+                    // Return method generics from signature so they get instantiated with fresh vars
                     return Some((
                         builtin_method.def_id,
                         return_type,
                         first_param,
-                        Vec::new(),
-                        Vec::new(),
+                        impl_generics,
+                        sig.generics.clone(),
                     ));
                 }
             }
@@ -1562,7 +3316,7 @@ impl<'a> TypeContext<'a> {
             }
             TypeKind::Array { element, size } => {
                 let subst_elem = self.substitute_type_vars(element, subst);
-                Type::array(subst_elem, *size)
+                Type::array_with_const(subst_elem, size.clone())
             }
             TypeKind::Slice { element } => {
                 let subst_elem = self.substitute_type_vars(element, subst);
@@ -1675,9 +3429,60 @@ impl<'a> TypeContext<'a> {
 
                     Err(self.error_type_not_found(&name, ty.span))
                 } else if path.segments.len() == 2 {
-                    // Two-segment path: Module::Type or Bridge::Type
-                    let module_name = self.symbol_to_string(path.segments[0].name.node);
-                    let type_name = self.symbol_to_string(path.segments[1].name.node);
+                    // Two-segment path: Self::AssocType, Module::Type or Bridge::Type
+                    let first_segment = self.symbol_to_string(path.segments[0].name.node);
+                    let second_segment = self.symbol_to_string(path.segments[1].name.node);
+
+                    // Handle Self::AssocType (associated type projection)
+                    if first_segment == "Self" {
+                        // First check current_impl_assoc_types (for associated types in the
+                        // impl block currently being collected)
+                        for assoc_ty in &self.current_impl_assoc_types {
+                            if assoc_ty.name == second_segment {
+                                return Ok(assoc_ty.ty.clone());
+                            }
+                        }
+
+                        // Look up the associated type from current impl context
+                        // First, find the current impl block's trait
+                        if let Some(ref self_ty) = self.current_impl_self_ty {
+                            // Find the impl block for this self type that has this associated type
+                            for impl_block in &self.impl_blocks {
+                                if impl_block.self_ty == *self_ty {
+                                    // Check if this impl has the associated type
+                                    for assoc_ty in &impl_block.assoc_types {
+                                        if assoc_ty.name == second_segment {
+                                            return Ok(assoc_ty.ty.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // If not in impl context, try method context
+                        if let Some(fn_id) = self.current_fn {
+                            if let Some(self_ty) = self.method_self_types.get(&fn_id).cloned() {
+                                for impl_block in &self.impl_blocks {
+                                    if impl_block.self_ty == self_ty {
+                                        for assoc_ty in &impl_block.assoc_types {
+                                            if assoc_ty.name == second_segment {
+                                                return Ok(assoc_ty.ty.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return Err(TypeError::new(
+                            TypeErrorKind::TypeNotFound {
+                                name: format!("Self::{}", second_segment),
+                            },
+                            ty.span,
+                        ));
+                    }
+
+                    // Module::Type or Bridge::Type
+                    let module_name = first_segment;
+                    let type_name = second_segment;
 
                     // First try to find the type's DefId in bridge definitions with matching namespace
                     // Store found def_id and whether it's opaque (no type args)
@@ -1853,7 +3658,22 @@ impl<'a> TypeContext<'a> {
             }
             ast::TypeKind::Array { element, size } => {
                 let elem_ty = self.ast_type_to_hir_type(element)?;
-                // Create a lookup function that can resolve const items by name
+
+                // First, check if the size is a const generic parameter
+                if let ast::ExprKind::Path(path) = &size.kind {
+                    if path.segments.len() == 1 {
+                        let symbol = path.segments[0].name.node;
+                        if let Some(name) = self.interner.resolve(symbol) {
+                            // Check if it's a const generic parameter
+                            if let Some(&const_param_id) = self.const_params.get(name) {
+                                // Return array type with const param
+                                return Ok(Type::array_with_const(elem_ty, hir::ConstValue::Param(const_param_id)));
+                            }
+                        }
+                    }
+                }
+
+                // If not a const param, try to evaluate as a const expression
                 let const_values = &self.const_values;
                 let resolver = &self.resolver;
                 let interner = &self.interner;
@@ -3217,24 +5037,77 @@ impl<'a> TypeContext<'a> {
         let resolved_callee_ty = self.unifier.resolve(&callee_expr.ty);
 
         // Handle forall types by instantiating them with fresh type variables
-        let instantiated_ty = match resolved_callee_ty.kind() {
-            TypeKind::Forall { params, body } => {
-                // Create fresh inference variables for each forall parameter
-                let fresh_vars: Vec<Type> = (0..params.len())
-                    .map(|_| self.unifier.fresh_var())
-                    .collect();
+        // Keep track of type param -> fresh var mapping for trait bound checking later
+        let type_param_fresh_vars: Option<Vec<(hir::TyVarId, Type)>> = match resolved_callee_ty.kind() {
+            TypeKind::Forall { params, .. } => {
+                Some(params.iter().cloned()
+                    .map(|p| (p, self.unifier.fresh_var()))
+                    .collect())
+            }
+            _ => None,
+        };
 
-                // Build substitution map
-                let subst: std::collections::HashMap<hir::TyVarId, Type> = params.iter()
-                    .cloned()
-                    .zip(fresh_vars.into_iter())
-                    .collect();
+        let instantiated_ty = match resolved_callee_ty.kind() {
+            TypeKind::Forall { body, .. } => {
+                // Build substitution map from the captured mapping
+                let subst: std::collections::HashMap<hir::TyVarId, Type> =
+                    type_param_fresh_vars.as_ref().unwrap()
+                        .iter()
+                        .map(|(p, v)| (*p, v.clone()))
+                        .collect();
 
                 // Substitute params in the body
                 self.substitute_type_vars(body, &subst)
             }
             _ => resolved_callee_ty.clone(),
         };
+
+        // For generic function calls, create a mapping of type params to fresh vars
+        // to check trait bounds after unification. This handles the case where
+        // instantiate_fn_sig_with_effects was already called (no Forall type).
+        let generic_param_mapping: Option<Vec<(hir::TyVarId, Type)>> = if type_param_fresh_vars.is_none() {
+            if let hir::ExprKind::Def(def_id) = &callee_expr.kind {
+                if let Some(sig) = self.fn_sigs.get(def_id) {
+                    if !sig.generics.is_empty() {
+                        // The callee type has already been instantiated with fresh vars.
+                        // We need to extract those vars by re-instantiating and unifying.
+                        let mapping: Vec<(hir::TyVarId, Type)> = sig.generics.iter()
+                            .map(|&ty_var_id| {
+                                let fresh_var = self.unifier.fresh_var();
+                                (ty_var_id, fresh_var)
+                            })
+                            .collect();
+
+                        // Build substitution and create the expected function type
+                        let subst: std::collections::HashMap<hir::TyVarId, Type> = mapping.iter()
+                            .map(|(p, v)| (*p, v.clone()))
+                            .collect();
+                        let expected_inputs: Vec<Type> = sig.inputs.iter()
+                            .map(|ty| self.substitute_type_vars(ty, &subst))
+                            .collect();
+                        let expected_output = self.substitute_type_vars(&sig.output, &subst);
+                        let expected_fn_ty = Type::function(expected_inputs, expected_output);
+
+                        // Unify with the callee's actual type to bind our fresh vars
+                        // to the same concrete types the callee was instantiated with
+                        let _ = self.unifier.unify(&expected_fn_ty, &resolved_callee_ty, span);
+
+                        Some(mapping)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Combine both sources of type param mappings
+        let effective_param_mapping = type_param_fresh_vars.or(generic_param_mapping);
 
         let (param_types, return_type) = match instantiated_ty.kind() {
             TypeKind::Fn { params, ret, .. } => (params.clone(), ret.clone()),
@@ -3259,12 +5132,57 @@ impl<'a> TypeContext<'a> {
         // Check effect compatibility
         if let hir::ExprKind::Def(callee_def_id) = &callee_expr.kind {
             self.check_effect_compatibility(callee_def_id.clone(), span)?;
+        } else {
+            // For function-typed expressions (e.g., calling a function parameter),
+            // check effect compatibility using the effects from the function type
+            if let TypeKind::Fn { effects, .. } = instantiated_ty.kind() {
+                if !effects.is_empty() {
+                    self.check_effect_compatibility_from_type(effects, span)?;
+                }
+            }
         }
 
         let mut hir_args = Vec::new();
         for (arg, param_ty) in args.iter().zip(param_types.iter()) {
             let arg_expr = self.check_expr(&arg.value, param_ty)?;
             hir_args.push(arg_expr);
+        }
+
+        // Check trait bounds on type parameters after unification
+        // At this point, the fresh type variables have been unified with concrete types
+        if let Some(ref param_mapping) = effective_param_mapping {
+            for (ty_var_id, fresh_var) in param_mapping {
+                // Resolve the fresh variable to its concrete type
+                let resolved_ty = self.unifier.resolve(fresh_var);
+
+                // Look up the bounds for this type parameter
+                if let Some(bounds) = self.type_param_bounds.get(ty_var_id) {
+                    // Check that the resolved type satisfies all bounds
+                    self.check_trait_bounds(&resolved_ty, bounds, span)?;
+                }
+            }
+        }
+
+        // Check where clause bounds from the function definition
+        // This handles bounds like `where T: Trait, U: OtherTrait`
+        if let hir::ExprKind::Def(def_id) = &callee_expr.kind {
+            if let Some(predicates) = self.fn_where_bounds.get(def_id).cloned() {
+                for predicate in &predicates {
+                    // Resolve the subject type using the current substitution
+                    let resolved_subject = if let Some(ref param_mapping) = effective_param_mapping {
+                        // Build substitution from param mapping
+                        let subst: std::collections::HashMap<hir::TyVarId, Type> = param_mapping.iter()
+                            .map(|(p, v)| (*p, self.unifier.resolve(v)))
+                            .collect();
+                        self.substitute_type_vars(&predicate.subject_ty, &subst)
+                    } else {
+                        self.unifier.resolve(&predicate.subject_ty)
+                    };
+
+                    // Check that the resolved subject type satisfies all trait bounds
+                    self.check_trait_bounds(&resolved_subject, &predicate.trait_bounds, span)?;
+                }
+            }
         }
 
         // Check if this is a call to an enum variant constructor
@@ -3835,18 +5753,28 @@ impl<'a> TypeContext<'a> {
         // Check for array types (fixed-size or dynamically-determined)
         match iter_ty.kind() {
             TypeKind::Array { element, size } => {
-                return self.infer_for_array(pattern, iter_expr, element.clone(), *size, body, label, span);
+                let array_size = size.as_u64().unwrap_or(0);
+                return self.infer_for_array(pattern, iter_expr, element.clone(), array_size, body, label, span);
             }
-            TypeKind::Ref { inner, .. } => {
+            TypeKind::Ref { inner, mutable } => {
                 // Handle references to arrays: &[T; N] and &[T]
                 let inner_ty = self.unifier.resolve(inner);
                 match inner_ty.kind() {
                     TypeKind::Array { element, size } => {
-                        return self.infer_for_array(pattern, iter_expr, element.clone(), *size, body, label, span);
+                        let array_size = size.as_u64().unwrap_or(0);
+                        return self.infer_for_array(pattern, iter_expr, element.clone(), array_size, body, label, span);
                     }
                     TypeKind::Slice { element } => {
                         // Slice iteration with runtime length check
                         return self.infer_for_slice(pattern, iter_expr, element.clone(), body, label, span);
+                    }
+                    TypeKind::Adt { def_id, args } => {
+                        // Handle &Vec<T> and &mut Vec<T>
+                        if Some(*def_id) == self.vec_def_id {
+                            if let Some(element_ty) = args.first() {
+                                return self.infer_for_vec(pattern, iter_expr, element_ty.clone(), *mutable, body, label, span);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -3855,6 +5783,15 @@ impl<'a> TypeContext<'a> {
                 // Slice iteration with runtime length check
                 return self.infer_for_slice(pattern, iter_expr, element.clone(), body, label, span);
             }
+            TypeKind::Adt { def_id, args } => {
+                // Handle Vec<T> directly (consuming iteration)
+                if Some(*def_id) == self.vec_def_id {
+                    if let Some(element_ty) = args.first() {
+                        // For owned Vec, we iterate by value (consuming)
+                        return self.infer_for_vec_owned(pattern, iter_expr, element_ty.clone(), body, label, span);
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -3862,7 +5799,7 @@ impl<'a> TypeContext<'a> {
         Err(TypeError::new(
             TypeErrorKind::UnsupportedFeature {
                 feature: format!(
-                    "For loop over type `{}` not supported. Use range expressions (0..n) or arrays.",
+                    "For loop over type `{}` not supported. Use range expressions (0..n), arrays, or Vec.",
                     iter_ty
                 ),
             },
@@ -4060,20 +5997,6 @@ impl<'a> TypeContext<'a> {
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
     ) -> Result<hir::Expr, TypeError> {
-        // Extract variable name, or None for wildcard pattern
-        let var_name = match &pattern.kind {
-            ast::PatternKind::Ident { name, .. } => Some(self.symbol_to_string(name.node)),
-            ast::PatternKind::Wildcard => None,
-            _ => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "For loop currently only supports simple identifier or wildcard patterns".into(),
-                    },
-                    pattern.span,
-                ));
-            }
-        };
-
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -4101,26 +6024,13 @@ impl<'a> TypeContext<'a> {
             span,
         });
 
-        // Register user's loop variable (only if not a wildcard pattern)
-        let var_local_id = if let Some(ref name) = var_name {
-            let local_id = self.resolver.define_local(
-                name.clone(),
-                element_ty.clone(),
-                false,
-                pattern.span,
-            )?;
+        // Use define_pattern to support tuple and struct destructuring
+        // This handles simple identifiers, wildcards, tuples, and struct patterns
+        let var_local_id = self.define_pattern(pattern, element_ty.clone())?;
 
-            self.locals.push(hir::Local {
-                id: local_id,
-                ty: element_ty.clone(),
-                mutable: false,
-                name: Some(name.clone()),
-                span: pattern.span,
-            });
-            Some(local_id)
-        } else {
-            None
-        };
+        // Check if it's a wildcard pattern - we track this for generating the loop body
+        let is_wildcard = matches!(pattern.kind, ast::PatternKind::Wildcard);
+        let var_local_id = if is_wildcard { None } else { Some(var_local_id) };
 
         let body_expr = self.check_block(body, &Type::unit())?;
 
@@ -4279,20 +6189,6 @@ impl<'a> TypeContext<'a> {
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
     ) -> Result<hir::Expr, TypeError> {
-        // Extract variable name, or None for wildcard pattern
-        let var_name = match &pattern.kind {
-            ast::PatternKind::Ident { name, .. } => Some(self.symbol_to_string(name.node)),
-            ast::PatternKind::Wildcard => None,
-            _ => {
-                return Err(TypeError::new(
-                    TypeErrorKind::UnsupportedFeature {
-                        feature: "For loop currently only supports simple identifier or wildcard patterns".into(),
-                    },
-                    pattern.span,
-                ));
-            }
-        };
-
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -4333,26 +6229,13 @@ impl<'a> TypeContext<'a> {
         // For slice iteration, the loop variable is a reference to the element
         let ref_element_ty = Type::reference(element_ty.clone(), false);
 
-        // Register user's loop variable (only if not a wildcard pattern)
-        let var_local_id = if let Some(ref name) = var_name {
-            let local_id = self.resolver.define_local(
-                name.clone(),
-                ref_element_ty.clone(),
-                false,
-                pattern.span,
-            )?;
+        // Use define_pattern to support tuple and struct destructuring
+        // This handles simple identifiers, wildcards, tuples, and struct patterns
+        let var_local_id = self.define_pattern(pattern, ref_element_ty.clone())?;
 
-            self.locals.push(hir::Local {
-                id: local_id,
-                ty: ref_element_ty.clone(),
-                mutable: false,
-                name: Some(name.clone()),
-                span: pattern.span,
-            });
-            Some(local_id)
-        } else {
-            None
-        };
+        // Check if it's a wildcard pattern - we track this for generating the loop body
+        let is_wildcard = matches!(pattern.kind, ast::PatternKind::Wildcard);
+        let var_local_id = if is_wildcard { None } else { Some(var_local_id) };
 
         let body_expr = self.check_block(body, &Type::unit())?;
 
@@ -4509,6 +6392,247 @@ impl<'a> TypeContext<'a> {
                 expr: Some(Box::new(while_loop)),
             },
             Type::unit(),
+            span,
+        ))
+    }
+
+    /// Helper: Infer for loop over a borrowed Vec (&Vec<T> or &mut Vec<T>).
+    ///
+    /// Generates index-based iteration: `for i in 0..vec.len() { elem = &vec[i]; ... }`
+    fn infer_for_vec(
+        &mut self,
+        pattern: &ast::Pattern,
+        vec_expr: hir::Expr,
+        element_ty: Type,
+        mutable: bool,
+        body: &ast::Block,
+        label: Option<&Spanned<ast::Symbol>>,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        let label_str = label.map(|l| self.symbol_to_string(l.node));
+        let _loop_id = self.enter_loop(label_str.as_deref());
+
+        self.resolver.push_scope(ScopeKind::Loop, span);
+
+        let idx_ty = Type::usize();
+
+        // Store the vec reference in a temporary to avoid re-evaluating
+        let vec_local_id = self.resolver.next_local_id();
+        self.locals.push(hir::Local {
+            id: vec_local_id,
+            ty: vec_expr.ty.clone(),
+            mutable: false,
+            name: Some("_vec".to_string()),
+            span,
+        });
+
+        // Create internal loop index
+        let idx_local_id = self.resolver.next_local_id();
+        self.locals.push(hir::Local {
+            id: idx_local_id,
+            ty: idx_ty.clone(),
+            mutable: true,
+            name: Some("_loop_idx".to_string()),
+            span,
+        });
+
+        // Create a local for the length (we'll compute it once before the loop)
+        let len_local_id = self.resolver.next_local_id();
+        self.locals.push(hir::Local {
+            id: len_local_id,
+            ty: Type::usize(),
+            mutable: false,
+            name: Some("_vec_len".to_string()),
+            span,
+        });
+
+        // For Vec iteration, the loop variable is a reference to the element
+        let ref_element_ty = Type::reference(element_ty.clone(), mutable);
+
+        // Use define_pattern to support tuple and struct destructuring
+        // This handles simple identifiers, wildcards, tuples, and struct patterns
+        let var_local_id = self.define_pattern(pattern, ref_element_ty.clone())?;
+
+        // Check if it's a wildcard pattern - we track this for generating the loop body
+        let is_wildcard = matches!(pattern.kind, ast::PatternKind::Wildcard);
+        let var_local_id = if is_wildcard { None } else { Some(var_local_id) };
+
+        let body_expr = self.check_block(body, &Type::unit())?;
+
+        self.resolver.pop_scope();
+
+        self.exit_loop(label_str.as_deref());
+
+        // Build condition: _idx < _vec_len
+        let condition = hir::Expr::new(
+            hir::ExprKind::Binary {
+                op: ast::BinOp::Lt,
+                left: Box::new(hir::Expr::new(
+                    hir::ExprKind::Local(idx_local_id),
+                    idx_ty.clone(),
+                    span,
+                )),
+                right: Box::new(hir::Expr::new(
+                    hir::ExprKind::Local(len_local_id),
+                    Type::usize(),
+                    span,
+                )),
+            },
+            Type::bool(),
+            span,
+        );
+
+        // Build vec access using index: vec[_idx]
+        let vec_ty = vec_expr.ty.clone();
+        let make_vec_access = || {
+            hir::Expr::new(
+                hir::ExprKind::Index {
+                    base: Box::new(hir::Expr::new(
+                        hir::ExprKind::Local(vec_local_id),
+                        vec_ty.clone(),
+                        span,
+                    )),
+                    index: Box::new(hir::Expr::new(
+                        hir::ExprKind::Local(idx_local_id),
+                        idx_ty.clone(),
+                        span,
+                    )),
+                },
+                ref_element_ty.clone(),
+                span,
+            )
+        };
+
+        // Build loop body with element binding and increment
+        let bind_stmt = var_local_id.map(|local_id| hir::Stmt::Let {
+            local_id,
+            init: Some(make_vec_access()),
+        });
+
+        let increment = hir::Expr::new(
+            hir::ExprKind::Assign {
+                target: Box::new(hir::Expr::new(
+                    hir::ExprKind::Local(idx_local_id),
+                    idx_ty.clone(),
+                    span,
+                )),
+                value: Box::new(hir::Expr::new(
+                    hir::ExprKind::Binary {
+                        op: ast::BinOp::Add,
+                        left: Box::new(hir::Expr::new(
+                            hir::ExprKind::Local(idx_local_id),
+                            idx_ty.clone(),
+                            span,
+                        )),
+                        right: Box::new(hir::Expr::new(
+                            hir::ExprKind::Literal(hir::LiteralValue::Int(1)),
+                            idx_ty.clone(),
+                            span,
+                        )),
+                    },
+                    idx_ty.clone(),
+                    span,
+                )),
+            },
+            Type::unit(),
+            span,
+        );
+
+        // Build the loop body: bind; user_body; increment;
+        let mut loop_body_stmts = Vec::new();
+        if let Some(stmt) = bind_stmt {
+            loop_body_stmts.push(stmt);
+        }
+        loop_body_stmts.push(hir::Stmt::Expr(body_expr));
+        loop_body_stmts.push(hir::Stmt::Expr(increment));
+
+        let loop_body = hir::Expr::new(
+            hir::ExprKind::Block {
+                stmts: loop_body_stmts,
+                expr: None,
+            },
+            Type::unit(),
+            span,
+        );
+
+        let while_loop = hir::Expr::new(
+            hir::ExprKind::Loop {
+                body: Box::new(hir::Expr::new(
+                    hir::ExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(loop_body),
+                        else_branch: Some(Box::new(hir::Expr::new(
+                            hir::ExprKind::Break { label: None, value: None },
+                            Type::never(),
+                            span,
+                        ))),
+                    },
+                    Type::unit(),
+                    span,
+                )),
+                label: None,
+            },
+            Type::unit(),
+            span,
+        );
+
+        // Build the outer block with vec, len, and idx initialization
+        let vec_init_stmt = hir::Stmt::Let {
+            local_id: vec_local_id,
+            init: Some(vec_expr),
+        };
+
+        // Get Vec length using VecLen operation
+        let vec_ref_for_len = hir::Expr::new(
+            hir::ExprKind::Local(vec_local_id),
+            vec_ty.clone(),
+            span,
+        );
+        let len_init_stmt = hir::Stmt::Let {
+            local_id: len_local_id,
+            init: Some(hir::Expr::new(
+                hir::ExprKind::VecLen(Box::new(vec_ref_for_len)),
+                Type::usize(),
+                span,
+            )),
+        };
+
+        let idx_init_stmt = hir::Stmt::Let {
+            local_id: idx_local_id,
+            init: Some(hir::Expr::new(
+                hir::ExprKind::Literal(hir::LiteralValue::Int(0)),
+                idx_ty,
+                span,
+            )),
+        };
+
+        Ok(hir::Expr::new(
+            hir::ExprKind::Block {
+                stmts: vec![vec_init_stmt, len_init_stmt, idx_init_stmt],
+                expr: Some(Box::new(while_loop)),
+            },
+            Type::unit(),
+            span,
+        ))
+    }
+
+    /// Helper: Infer for loop over an owned Vec (consuming iteration).
+    ///
+    /// For now, this just errors - consuming iteration requires move semantics.
+    /// Users should use `&vec` or `&mut vec` instead.
+    fn infer_for_vec_owned(
+        &mut self,
+        _pattern: &ast::Pattern,
+        _vec_expr: hir::Expr,
+        _element_ty: Type,
+        _body: &ast::Block,
+        _label: Option<&Spanned<ast::Symbol>>,
+        span: Span,
+    ) -> Result<hir::Expr, TypeError> {
+        Err(TypeError::new(
+            TypeErrorKind::UnsupportedFeature {
+                feature: "Consuming iteration over Vec not supported. Use `&vec` or `&mut vec` instead.".into(),
+            },
             span,
         ))
     }

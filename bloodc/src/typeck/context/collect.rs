@@ -1115,6 +1115,53 @@ impl<'a> TypeContext<'a> {
             }
         }
 
+        // Process where clause for trait bounds enforcement
+        // This is done BEFORE restoring generic params so type parameters are in scope
+        if let Some(ref where_clause) = func.where_clause {
+            let mut predicates = Vec::new();
+            for predicate in &where_clause.predicates {
+                match predicate {
+                    ast::WherePredicate::TypeBound { ty, bounds, span: bound_span } => {
+                        // Convert the subject type (e.g., T in `T: Trait`)
+                        let subject_ty = self.ast_type_to_hir_type(ty)?;
+
+                        // Convert each bound to a trait DefId using resolve_trait_bound
+                        let mut trait_bounds = Vec::new();
+                        for bound in bounds {
+                            if let Some(trait_def_id) = self.resolve_trait_bound(bound) {
+                                trait_bounds.push(trait_def_id);
+                            } else {
+                                // Report error for unknown trait in where clause
+                                let trait_name = match &bound.kind {
+                                    ast::TypeKind::Path(type_path) => {
+                                        self.symbol_to_string(type_path.segments[0].name.node)
+                                    }
+                                    _ => "unknown".to_string(),
+                                };
+                                return Err(TypeError::new(
+                                    TypeErrorKind::TraitNotFound { name: trait_name },
+                                    *bound_span,
+                                ));
+                            }
+                        }
+
+                        if !trait_bounds.is_empty() {
+                            predicates.push(super::WhereClausePredicate {
+                                subject_ty,
+                                trait_bounds,
+                            });
+                        }
+                    }
+                    ast::WherePredicate::Lifetime { .. } => {
+                        // Lifetime bounds are not yet enforced
+                    }
+                }
+            }
+            if !predicates.is_empty() {
+                self.fn_where_bounds.insert(def_id, predicates);
+            }
+        }
+
         // Restore previous generic params scope (after processing signature including effects)
         self.generic_params = saved_generic_params;
         self.const_params = saved_const_params;
@@ -1824,13 +1871,37 @@ impl<'a> TypeContext<'a> {
             None
         };
 
-        // Process impl items (methods, associated types, associated constants)
+        // Process impl items in two passes:
+        // 1. First collect associated types so Self::AssocType can be resolved in methods
+        // 2. Then collect methods and constants
         let mut methods = Vec::new();
         let mut assoc_types = Vec::new();
         let mut assoc_consts = Vec::new();
 
+        // Clear and prepare current_impl_assoc_types for this impl block
+        self.current_impl_assoc_types.clear();
+
+        // First pass: collect associated types
+        for item in &impl_block.items {
+            if let ast::ImplItem::Type(type_decl) = item {
+                let type_name = self.symbol_to_string(type_decl.name.node);
+                let ty = self.ast_type_to_hir_type(&type_decl.ty)?;
+                let assoc_type_info = ImplAssocTypeInfo {
+                    name: type_name,
+                    ty,
+                };
+                // Add to current_impl_assoc_types so Self::AssocType can be resolved
+                self.current_impl_assoc_types.push(assoc_type_info.clone());
+                assoc_types.push(assoc_type_info);
+            }
+        }
+
+        // Second pass: collect methods and constants
         for item in &impl_block.items {
             match item {
+                ast::ImplItem::Type(_) => {
+                    // Already processed in first pass
+                }
                 ast::ImplItem::Function(func) => {
                     let method_name = self.symbol_to_string(func.name.node);
 
@@ -1916,14 +1987,6 @@ impl<'a> TypeContext<'a> {
                         def_id: method_def_id,
                         name: method_name,
                         is_static,
-                    });
-                }
-                ast::ImplItem::Type(type_decl) => {
-                    let type_name = self.symbol_to_string(type_decl.name.node);
-                    let ty = self.ast_type_to_hir_type(&type_decl.ty)?;
-                    assoc_types.push(ImplAssocTypeInfo {
-                        name: type_name,
-                        ty,
                     });
                 }
                 ast::ImplItem::Const(const_decl) => {
