@@ -956,7 +956,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     }
 
     for (&def_id, item) in &hir_crate.items {
-        let hash = hash_hir_item(item, &hir_crate.bodies, &hir_crate.items);
+        let hash = hash_hir_item(item, &hir_crate.bodies, &hir_crate.items, Some(&args.file));
         definition_hashes.insert(def_id, hash);
 
         // Check if we have cached compiled code for this definition (local cache only for stats)
@@ -1247,10 +1247,14 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         for (&def_id, mir_body) in mir_bodies {
             // Get the content hash for this definition
             let def_hash = if let Some(item) = hir_crate.items.get(&def_id) {
-                hash_hir_item(item, &hir_crate.bodies, &hir_crate.items)
+                hash_hir_item(item, &hir_crate.bodies, &hir_crate.items, Some(&args.file))
             } else {
-                // Synthetic definition (closure) - hash based on MIR
+                // Synthetic definition (closure) - hash based on MIR and source file
                 let mut hasher = ContentHasher::new();
+                // Include source file path to prevent cross-file cache collisions
+                if let Some(path_str) = args.file.to_str() {
+                    hasher.update(path_str.as_bytes());
+                }
                 hasher.update(format!("closure_{}", def_id.index()).as_bytes());
                 hasher.finalize()
             };
@@ -1332,7 +1336,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             }
 
             // Hash the handler item
-            let def_hash = hash_hir_item(item, &hir_crate.bodies, &hir_crate.items);
+            let def_hash = hash_hir_item(item, &hir_crate.bodies, &hir_crate.items, Some(&args.file));
 
             // Check cache for this handler (local and remote)
             let obj_path = obj_dir.join(format!("handler_{}.o", def_id.index()));

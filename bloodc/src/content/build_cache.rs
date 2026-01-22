@@ -39,11 +39,12 @@ use crate::hir::DefId;
 
 /// Cache format version. Increment when changing cache structure.
 /// v2: Handler name hashing fix (36e0804) - invalidate old effect handler caches
+/// v3: Include source file path in content hash to prevent cross-file cache collisions
 ///
 /// Note: This version covers cache structure changes. For codegen changes that
 /// affect compiled output, see `CODEGEN_ABI_VERSION` and `CODEGEN_HASH` which
 /// are incorporated into the cache directory path automatically.
-pub const CACHE_VERSION: u32 = 2;
+pub const CACHE_VERSION: u32 = 3;
 
 /// Build cache for content-addressed compilation artifacts.
 #[derive(Debug)]
@@ -468,12 +469,26 @@ impl Default for BuildCache {
 /// The `items` map is used to resolve handler references to their names,
 /// ensuring that functions using different handlers get different hashes
 /// even if the handlers have the same DefId index.
+///
+/// The `source_path` is included in the hash to prevent cache collisions
+/// between different source files that may have items with identical content
+/// but different external dependencies.
 pub fn hash_hir_item(
     item: &hir::Item,
     bodies: &HashMap<hir::BodyId, hir::Body>,
     items: &HashMap<DefId, hir::Item>,
+    source_path: Option<&std::path::Path>,
 ) -> ContentHash {
     let mut hasher = ContentHasher::new();
+
+    // Include source file path to prevent cross-file cache collisions.
+    // Different files may have identically-named items that reference
+    // different external symbols, so we must isolate caches per file.
+    if let Some(path) = source_path {
+        if let Some(path_str) = path.to_str() {
+            hasher.update_str(path_str);
+        }
+    }
 
     // Hash item metadata
     hasher.update_str(&item.name);
