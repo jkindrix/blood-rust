@@ -265,12 +265,16 @@ fn collect_variant_indices(pattern: &Pattern, indices: &mut HashSet<u32>, varian
                 collect_variant_indices(alt, indices, variant_count);
             }
         }
+        // Reference patterns - look through to the inner pattern
+        // This handles matching &Enum with &Enum::Variant patterns
+        PatternKind::Ref { inner, .. } => {
+            collect_variant_indices(inner, indices, variant_count);
+        }
         // Other patterns don't match enum variants
         PatternKind::Literal(_)
         | PatternKind::Struct { .. }
         | PatternKind::Tuple(_)
         | PatternKind::Slice { .. }
-        | PatternKind::Ref { .. }
         | PatternKind::Range { .. } => {}
     }
 }

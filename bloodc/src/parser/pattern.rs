@@ -347,6 +347,79 @@ impl<'src> Parser<'src> {
             }
 
             let field_start = self.current.span;
+
+            // Handle `ref [mut] field` shorthand - expands to `field: ref [mut] field`
+            if self.check(TokenKind::Ref) {
+                self.advance();
+                let mutable = self.try_consume(TokenKind::Mut);
+
+                let name = if self.check_ident() {
+                    self.advance();
+                    self.spanned_symbol()
+                } else {
+                    self.error_expected("identifier after `ref`");
+                    break;
+                };
+
+                // Create pattern: `ref [mut] name`
+                let pattern = Pattern {
+                    kind: PatternKind::Ident {
+                        by_ref: true,
+                        mutable,
+                        name: name.clone(),
+                        subpattern: None,
+                    },
+                    span: field_start.merge(self.previous.span),
+                };
+
+                fields.push(StructPatternField {
+                    name,
+                    pattern: Some(pattern),
+                    span: field_start.merge(self.previous.span),
+                });
+
+                if !self.try_consume(TokenKind::Comma) {
+                    break;
+                }
+                continue;
+            }
+
+            // Handle `mut field` shorthand - expands to `field: mut field`
+            if self.check(TokenKind::Mut) {
+                self.advance();
+
+                let name = if self.check_ident() {
+                    self.advance();
+                    self.spanned_symbol()
+                } else {
+                    self.error_expected("identifier after `mut`");
+                    break;
+                };
+
+                // Create pattern: `mut name`
+                let pattern = Pattern {
+                    kind: PatternKind::Ident {
+                        by_ref: false,
+                        mutable: true,
+                        name: name.clone(),
+                        subpattern: None,
+                    },
+                    span: field_start.merge(self.previous.span),
+                };
+
+                fields.push(StructPatternField {
+                    name,
+                    pattern: Some(pattern),
+                    span: field_start.merge(self.previous.span),
+                });
+
+                if !self.try_consume(TokenKind::Comma) {
+                    break;
+                }
+                continue;
+            }
+
+            // Regular field: `name` or `name: pattern`
             // Allow contextual keywords as field names
             let name = if self.check_ident() {
                 self.advance();

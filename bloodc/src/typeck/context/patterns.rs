@@ -16,18 +16,27 @@ impl<'a> TypeContext<'a> {
     /// Define a pattern, returning the local ID for simple patterns.
     pub(crate) fn define_pattern(&mut self, pattern: &ast::Pattern, ty: Type) -> Result<LocalId, TypeError> {
         match &pattern.kind {
-            ast::PatternKind::Ident { name, mutable, .. } => {
+            ast::PatternKind::Ident { name, mutable, by_ref, .. } => {
                 let name_str = self.symbol_to_string(name.node);
+
+                // If `by_ref` is true (e.g., `ref x` or `ref mut x`), the binding
+                // gets a reference type rather than the matched type directly.
+                let binding_ty = if *by_ref {
+                    Type::reference(ty.clone(), *mutable)
+                } else {
+                    ty.clone()
+                };
+
                 let local_id = self.resolver.define_local(
                     name_str.clone(),
-                    ty.clone(),
+                    binding_ty.clone(),
                     *mutable,
                     pattern.span,
                 )?;
 
                 self.locals.push(hir::Local {
                     id: local_id,
-                    ty,
+                    ty: binding_ty,
                     mutable: *mutable,
                     name: Some(name_str),
                     span: pattern.span,
@@ -357,18 +366,27 @@ impl<'a> TypeContext<'a> {
     pub(crate) fn lower_pattern(&mut self, pattern: &ast::Pattern, expected_ty: &Type) -> Result<hir::Pattern, TypeError> {
         let kind = match &pattern.kind {
             ast::PatternKind::Wildcard => hir::PatternKind::Wildcard,
-            ast::PatternKind::Ident { name, mutable, .. } => {
+            ast::PatternKind::Ident { name, mutable, by_ref, .. } => {
                 let name_str = self.symbol_to_string(name.node);
+
+                // If `by_ref` is true (e.g., `ref x` or `ref mut x`), the binding
+                // gets a reference type rather than the matched type directly.
+                let binding_ty = if *by_ref {
+                    Type::reference(expected_ty.clone(), *mutable)
+                } else {
+                    expected_ty.clone()
+                };
+
                 let local_id = self.resolver.define_local(
                     name_str.clone(),
-                    expected_ty.clone(),
+                    binding_ty.clone(),
                     *mutable,
                     pattern.span,
                 )?;
 
                 self.locals.push(hir::Local {
                     id: local_id,
-                    ty: expected_ty.clone(),
+                    ty: binding_ty,
                     mutable: *mutable,
                     name: Some(name_str),
                     span: pattern.span,
