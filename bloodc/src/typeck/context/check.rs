@@ -852,6 +852,7 @@ impl<'a> TypeContext<'a> {
         }
 
         let mut stmts = Vec::new();
+        let mut diverges = false;
 
         // Third pass: process all statements (now nested items are already handled)
         for stmt in &block.statements {
@@ -887,6 +888,10 @@ impl<'a> TypeContext<'a> {
                 }
                 ast::Statement::Expr { expr, has_semi: _ } => {
                     let hir_expr = self.infer_expr(expr)?;
+                    // Track if this statement diverges (e.g., return, break, continue, panic)
+                    if hir_expr.ty.is_never() {
+                        diverges = true;
+                    }
                     stmts.push(hir::Stmt::Expr(hir_expr));
                 }
                 ast::Statement::Item(_) => {
@@ -898,8 +903,16 @@ impl<'a> TypeContext<'a> {
         // Type-check trailing expression
         let expr = if let Some(expr) = &block.expr {
             self.check_expr(expr, expected)?
+        } else if diverges {
+            // Block diverges due to a diverging statement (return, break, etc.)
+            // The block's type is ! (never), which unifies with any expected type
+            hir::Expr::new(
+                hir::ExprKind::Tuple(Vec::new()),
+                Type::never(),
+                block.span,
+            )
         } else {
-            // No trailing expression - block returns unit
+            // No trailing expression and no divergence - block returns unit
             if !expected.is_unit() && !expected.is_never() {
                 // Check if expected is a type variable
                 if let TypeKind::Infer(_) = expected.kind() {
