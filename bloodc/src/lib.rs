@@ -111,6 +111,9 @@ pub mod syntax_kind;
 pub mod trivia;
 pub mod typeck;
 
+#[cfg(test)]
+mod ui_tests;
+
 // Re-export commonly used types
 pub use diagnostics::{Diagnostic, DiagnosticEmitter, DiagnosticKind, ErrorCode};
 pub use lexer::{Lexer, Token, TokenKind};
