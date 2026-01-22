@@ -612,7 +612,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         hir::TypeKind::Slice { element } | hir::TypeKind::Array { element, .. } => {
                                             self.lower_type(element)
                                         }
-                                        _ => self.context.i8_type().into(),
+                                        _ => {
+                                            return Err(vec![Diagnostic::error(
+                                                format!(
+                                                    "Rest pattern in non-slice/array context: expected slice or array type, found {:?}",
+                                                    slice_pat.ty.kind()
+                                                ),
+                                                slice_pat.span
+                                            )]);
+                                        }
                                     };
                                     let empty_array_ty = elem_llvm_ty.array_type(0);
                                     let empty_alloca = self.builder
@@ -622,8 +630,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 }
                             }
                             _ => {
-                                // Other pattern kinds in rest position - shouldn't happen
-                                // but handle gracefully
+                                return Err(vec![Diagnostic::error(
+                                    format!(
+                                        "Unsupported pattern kind in rest position: {:?}. Only binding patterns and wildcards are allowed.",
+                                        slice_pat.kind
+                                    ),
+                                    slice_pat.span
+                                )]);
                             }
                         }
                     }
