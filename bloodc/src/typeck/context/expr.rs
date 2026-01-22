@@ -3871,7 +3871,8 @@ impl<'a> TypeContext<'a> {
         }
 
         // Now look up the final segment as a type within the last module
-        let type_name = segments.last().unwrap();
+        // SAFETY: segments.len() >= 3 guaranteed by check at line 3817
+        let type_name = segments.last().expect("BUG: segments guaranteed non-empty by guard at function start");
         let module_info = self.module_defs.get(&current_module_def_id).cloned()
             .ok_or_else(|| TypeError::new(
                 TypeErrorKind::TypeNotFound {
@@ -5079,8 +5080,10 @@ impl<'a> TypeContext<'a> {
         let instantiated_ty = match resolved_callee_ty.kind() {
             TypeKind::Forall { body, .. } => {
                 // Build substitution map from the captured mapping
+                // SAFETY: type_param_fresh_vars is Some when resolved_callee_ty is Forall (set at line 5071-5078)
                 let subst: std::collections::HashMap<hir::TyVarId, Type> =
-                    type_param_fresh_vars.as_ref().unwrap()
+                    type_param_fresh_vars.as_ref()
+                        .expect("BUG: type_param_fresh_vars must be Some when callee is Forall type")
                         .iter()
                         .map(|(p, v)| (*p, v.clone()))
                         .collect();

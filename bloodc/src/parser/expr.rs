@@ -902,7 +902,7 @@ impl<'src> Parser<'src> {
             }
 
             // Some keywords can be used as identifiers in expression context
-            TokenKind::Handler | TokenKind::Effect | TokenKind::Deep | TokenKind::Shallow => {
+            TokenKind::Handler | TokenKind::Effect | TokenKind::Deep | TokenKind::Shallow | TokenKind::Op => {
                 // Treat as identifier
                 self.advance();
                 let name = self.spanned_symbol();
@@ -2014,7 +2014,8 @@ impl<'src> Parser<'src> {
                 // Double-colon syntax: Effect::operation
                 // Take all but the last segment as effect path
                 let mut effect_segments = effect_path.segments.clone();
-                let op_segment = effect_segments.pop().unwrap();
+                // SAFETY: condition checks segments.len() >= 2
+                let op_segment = effect_segments.pop().expect("BUG: checked len >= 2 above");
                 let new_effect_path = crate::ast::TypePath {
                     segments: effect_segments,
                     span: effect_path.span,

@@ -2427,7 +2427,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let mut args: Vec<inkwell::values::BasicMetadataValueEnum> =
             Vec::with_capacity(original_param_count as usize);
         for i in 1..=original_param_count {
-            let param = wrapper_fn.get_nth_param(i).unwrap();
+            // SAFETY: wrapper_fn has original_param_count+1 params (env_ptr + original params)
+            // so params 1..=original_param_count are valid indices
+            let param = wrapper_fn.get_nth_param(i)
+                .expect("BUG: wrapper function should have env_ptr + original params");
             args.push(param.into());
         }
 

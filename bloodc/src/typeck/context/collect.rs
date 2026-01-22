@@ -469,8 +469,19 @@ impl<'a> TypeContext<'a> {
             .map(|s| self.symbol_to_string(s.node))
             .collect();
 
+        // Guard: empty path is invalid
+        if current_scope_names.is_empty() {
+            return Err(TypeError::new(
+                TypeErrorKind::ImportError {
+                    message: "empty import path".to_string(),
+                },
+                path.span,
+            ));
+        }
+
         // The last segment is the item we're importing
-        let item_name = current_scope_names.pop().unwrap();
+        // SAFETY: checked non-empty above
+        let item_name = current_scope_names.pop().expect("BUG: checked non-empty above");
 
         if current_scope_names.is_empty() {
             // Simple case: just a name (e.g., `use foo;`)
@@ -2522,9 +2533,11 @@ impl<'a> TypeContext<'a> {
 
                 // Search in order: sibling paths first (for nested modules), then parent paths
                 let module_path = if sibling_path.as_ref().map_or(false, |p| p.exists()) {
-                    sibling_path.unwrap()
+                    // SAFETY: condition checks sibling_path.as_ref() is Some and exists
+                    sibling_path.expect("BUG: just checked sibling_path is Some above")
                 } else if sibling_alt.as_ref().map_or(false, |p| p.exists()) {
-                    sibling_alt.unwrap()
+                    // SAFETY: condition checks sibling_alt.as_ref() is Some and exists
+                    sibling_alt.expect("BUG: just checked sibling_alt is Some above")
                 } else if file_path.exists() {
                     file_path
                 } else if alt_path.exists() {
