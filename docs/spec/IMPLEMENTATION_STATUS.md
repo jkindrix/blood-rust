@@ -1147,4 +1147,125 @@ Added comprehensive 681-line example demonstrating:
 
 ---
 
-*Document updated 2026-01-11 with performance benchmarks, bug fixes, and new examples.*
+## 16. Known Limitations
+
+### 16.1 Type Inference Limitations
+
+#### Option<T> Pattern with Emit<T> Effect Unification
+
+**Status**: Known limitation, workaround available
+
+**Description**: The type system cannot unify `Option<T>` pattern matching with `Emit<T>` effect operations in certain contexts. This affects patterns like converting channels to streams.
+
+**Example** (from Aether library `src/channels.blood`):
+```blood
+// This pattern does not work:
+fn channel_to_stream<T>(rx: Receiver<T>) / {Emit<T>} {
+    loop {
+        match rx.try_recv() {
+            Some(value) => { perform Emit.emit(value); },
+            None => { break; },
+        }
+    }
+}
+```
+
+**Error**: Type parameter unification fails between `Option<T>` pattern and `Emit<T>` effect.
+
+**Workaround**: Use explicit type annotations or restructure code to avoid the pattern.
+
+**Root Cause**: The type inference algorithm doesn't propagate type information bidirectionally through pattern matching and effect contexts simultaneously.
+
+**Future Work**: Extend bidirectional type checking to handle this case. See `typeck/unify.rs` and `typeck/effect.rs`.
+
+---
+
+### 16.2 Codegen Limitations
+
+#### Primitive Types in Effect Operations
+
+**Status**: Known limitation, workaround available
+
+**Description**: Using primitive types (e.g., `i32`, `i64`) directly as effect type parameters in certain patterns can cause LLVM type mismatches.
+
+**Example** (problematic pattern):
+```blood
+effect Emit<T> { op emit(value: T) -> (); }
+
+// This may fail with: "Stored value type does not match pointer operand type"
+fn emit_ints() / {Emit<i32>} {
+    perform Emit.emit(10);  // Direct literal
+}
+```
+
+**Workaround**: Wrap primitives in structs:
+```blood
+struct Value { n: i32 }
+
+fn emit_values() / {Emit<Value>} {
+    perform Emit.emit(Value { n: 10 });  // Works correctly
+}
+```
+
+**Root Cause**: The codegen layer (`codegen/context/effects.rs`) doesn't consistently handle primitive type arguments in all effect operation contexts.
+
+**Note**: This limitation does not affect:
+- Primitive variables with explicit type annotations
+- Struct/enum values through effects
+- Complex expressions that evaluate to primitives
+
+---
+
+## 17. Effect System Validation (Aether Patterns)
+
+### 17.1 Overview
+
+The Blood compiler's effect system has been validated against patterns from the **Aether reactive stream processing library**. This validation discovered and led to fixes for several compiler bugs, establishing a comprehensive regression test suite.
+
+**Test Location**: `bloodc/tests/fixtures/effects/`
+
+### 17.2 Validated Patterns
+
+| Pattern | Test File | Status |
+|---------|-----------|--------|
+| Basic `Emit<T>` effects | `aether_streams.blood` | ✅ Working |
+| Struct values through effects | `aether_structs.blood`, `struct_emit.blood` | ✅ Working |
+| Enum values through effects | `aether_structs.blood` | ✅ Working |
+| Match on enum fields in handlers | `field_match_handler.blood` | ✅ Working |
+| Array element assignment in handlers | `aether_streams.blood` | ✅ Working |
+| Struct field assignment in handlers | `handler_assignment.blood` | ✅ Working |
+| Nested effect handlers (5+ levels) | `aether_streams.blood` | ✅ Working |
+| Stateful accumulation in handlers | `aether_structs.blood` | ✅ Working |
+| Effect-annotated closures | All test files | ✅ Working |
+
+### 17.3 Regression Tests
+
+These tests serve as regression tests for previously fixed bugs:
+
+| Bug Description | Fix Location | Regression Test |
+|-----------------|--------------|-----------------|
+| "Cannot assign to this expression" in handlers | `codegen/context/mod.rs` | `handler_assignment.blood` |
+| "Found IntValue but expected StructValue" | `codegen/context/effects.rs` | `field_match_handler.blood` |
+| "unsupported argument type in perform expression" | `codegen/context/effects.rs` | `struct_emit.blood` |
+| Handler-bound variable type inference | `typeck/context.rs` | `aether_streams.blood` |
+| Build cache contamination between files | `content/hash.rs`, `codegen/mod.rs` | End-to-end tests |
+
+### 17.4 Integration Test Command
+
+```bash
+cargo test -p bloodc --test end_to_end test_effect_ -- --test-threads=1
+```
+
+### 17.5 Test Coverage
+
+- **aether_streams.blood**: 11 test cases (range, map, filter, take, skip, chained operations, edge cases)
+- **aether_structs.blood**: 8 test cases (structs, enums, multi-stage pipelines, statistics)
+- **field_match_handler.blood**: 1 test case (enum field matching)
+- **handler_assignment.blood**: 1 test case (struct field assignment)
+- **struct_emit.blood**: 1 test case (struct emission)
+
+**Total**: 22 test cases covering core effect system functionality.
+
+---
+
+*Document updated 2026-01-22 with known limitations and effect system validation.*

@@ -926,3 +926,88 @@ fn main() -> i32 {
     cleanup_fixture(&file_b);
     cleanup_test_cache(&cache_dir);
 }
+
+// ============================================================================
+// Effect System Tests (Aether Patterns)
+// ============================================================================
+//
+// These tests validate the algebraic effect system using patterns discovered
+// during the development of the Aether reactive stream processing library.
+// They serve as regression tests for previously fixed compiler bugs:
+//
+// 1. Struct values through effect operations
+// 2. Enum values through effects
+// 3. Match on enum fields in handlers
+// 4. Array/struct field assignment in handlers
+// 5. Nested effect handlers (5+ levels)
+// 6. Stateful accumulation in handlers
+// 7. Effect-annotated closures
+
+/// Path to the effect test fixtures directory.
+fn effects_fixtures_dir() -> PathBuf {
+    fixtures_dir().join("effects")
+}
+
+/// Run an effect test fixture and verify it succeeds.
+fn run_effect_test(name: &str) {
+    let cache_dir = create_test_cache(&format!("effect_{}", name));
+    let source = effects_fixtures_dir().join(format!("{}.blood", name));
+
+    assert!(source.exists(), "Effect test fixture not found: {:?}", source);
+
+    let result = compile_with_cache(&source, &cache_dir);
+    assert!(
+        result.success,
+        "Effect test '{}' compilation failed: {}",
+        name, result.stderr
+    );
+
+    let executable = result.executable.expect("No executable produced");
+    let run_result = run_executable(&executable);
+
+    assert_eq!(
+        run_result.exit_code, 0,
+        "Effect test '{}' failed with exit code {} (0 = pass, non-zero = assertion failure)",
+        name, run_result.exit_code
+    );
+
+    // Clean up - but leave the fixture files (they're part of the repo)
+    clear_obj_files(&source);
+    cleanup_test_cache(&cache_dir);
+}
+
+#[test]
+fn test_effect_aether_streams() {
+    // Tests: Basic Emit<T> effects, stream operations, nested handlers
+    // 11 test cases covering range, map, filter, take, skip, chained operations
+    run_effect_test("aether_streams");
+}
+
+#[test]
+fn test_effect_aether_structs() {
+    // Tests: Struct/enum values through effects, match on enum fields,
+    //        struct field assignment in handlers, multi-stage pipelines
+    // 8 test cases covering sensor readings, alerts, statistics
+    run_effect_test("aether_structs");
+}
+
+#[test]
+fn test_effect_field_match_handler() {
+    // Tests: Match on enum field of handler-bound struct
+    // Regression test for: "Found IntValue but expected StructValue"
+    run_effect_test("field_match_handler");
+}
+
+#[test]
+fn test_effect_handler_assignment() {
+    // Tests: Struct field assignment inside handlers
+    // Regression test for: "Cannot assign to this expression"
+    run_effect_test("handler_assignment");
+}
+
+#[test]
+fn test_effect_struct_emit() {
+    // Tests: Passing struct values through effect operations
+    // Regression test for: "unsupported argument type in perform expression"
+    run_effect_test("struct_emit");
+}
