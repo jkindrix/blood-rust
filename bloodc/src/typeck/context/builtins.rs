@@ -772,6 +772,106 @@ impl<'a> TypeContext<'a> {
             "str_replace",
         );
 
+        // str.is_empty(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "is_empty",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_is_empty",
+        );
+
+        // &str.is_empty(&self) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "is_empty",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_is_empty",
+        );
+
+        // str.contains(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "contains",
+            false,
+            vec![Type::reference(Type::str(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_contains",
+        );
+
+        // &str.contains(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "contains",
+            false,
+            vec![Type::reference(Type::str(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_contains",
+        );
+
+        // str.starts_with(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "starts_with",
+            false,
+            vec![Type::reference(Type::str(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_starts_with",
+        );
+
+        // &str.starts_with(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "starts_with",
+            false,
+            vec![Type::reference(Type::str(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_starts_with",
+        );
+
+        // str.ends_with(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "ends_with",
+            false,
+            vec![Type::reference(Type::str(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_ends_with",
+        );
+
+        // &str.ends_with(&self, pattern: &str) -> bool
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "ends_with",
+            false,
+            vec![Type::reference(Type::str(), false), Type::reference(Type::str(), false)],
+            bool_ty.clone(),
+            "str_ends_with",
+        );
+
+        // str.trim(&self) -> &str
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "trim",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            Type::reference(Type::str(), false),
+            "str_trim",
+        );
+
+        // &str.trim(&self) -> &str
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "trim",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            Type::reference(Type::str(), false),
+            "str_trim",
+        );
+
         // === char methods ===
 
         // char.is_whitespace(self) -> bool
