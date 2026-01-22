@@ -152,6 +152,26 @@ fn test_slice_get(s: &[i32], i: usize) -> Option<&i32> {
     s.get(i)
 }
 
+fn test_slice_contains(s: &[i32], val: &i32) -> bool {
+    s.contains(val)
+}
+
+fn test_slice_get_mut(s: &mut [i32], i: usize) -> Option<&mut i32> {
+    s.get_mut(i)
+}
+
+fn test_slice_starts_with(s: &[i32], needle: &[i32]) -> bool {
+    s.starts_with(needle)
+}
+
+fn test_slice_ends_with(s: &[i32], needle: &[i32]) -> bool {
+    s.ends_with(needle)
+}
+
+fn test_slice_reverse(s: &mut [i32]) {
+    s.reverse();
+}
+
 // === Box methods ===
 fn test_box_new(val: i32) -> Box<i32> {
     Box::new(val)
