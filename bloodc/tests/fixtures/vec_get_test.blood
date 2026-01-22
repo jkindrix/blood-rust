@@ -7,6 +7,7 @@ fn main() {
     v.push(30);
 
     // Test get with valid index
-    let maybe = v.get(1);
+    let idx: usize = 1;
+    let maybe = v.get(idx);
     println!("Got element from Vec");
 }
