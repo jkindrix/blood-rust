@@ -281,6 +281,30 @@ impl TypeError {
                 "unreachable pattern".to_string(),
             ),
 
+            // Linearity errors (E08xx)
+            TypeErrorKind::UnusedLinearValue { name, ty } => (
+                "E0801",
+                format!("linear value `{name}: {ty}` was never consumed. Linear types must be used exactly once."),
+            ),
+            TypeErrorKind::MultipleLinearUse { name, ty, .. } => (
+                "E0802",
+                format!("linear value `{name}: {ty}` used more than once. Linear types must be used exactly once."),
+            ),
+            TypeErrorKind::MultipleAffineUse { name, ty, .. } => (
+                "E0803",
+                format!("affine value `{name}: {ty}` used more than once. Affine types may be used at most once."),
+            ),
+            TypeErrorKind::LinearConsumedInLoop { name, ty } => (
+                "E0804",
+                format!("linear value `{name}: {ty}` consumed inside loop. Linear values defined outside loops cannot be consumed inside."),
+            ),
+            TypeErrorKind::InconsistentLinearBranches { name, ty, consumed_count, branch_count } => (
+                "E0805",
+                format!(
+                    "linear value `{name}: {ty}` consumed in {consumed_count} of {branch_count} branches. Linear values must be consumed in all branches or none."
+                ),
+            ),
+
             // FFI errors (E05xx)
             TypeErrorKind::FfiUnsafeType { ty, reason, context } => (
                 "E0501",
@@ -567,6 +591,44 @@ pub enum TypeErrorKind {
     },
     /// Unreachable pattern (dead code).
     UnreachablePattern,
+
+    // Linearity errors (E08xx)
+    /// Linear value was never consumed.
+    /// Linear types must be used exactly once.
+    UnusedLinearValue {
+        name: String,
+        ty: Type,
+    },
+    /// Linear value was used more than once.
+    /// Linear types must be used exactly once.
+    MultipleLinearUse {
+        name: String,
+        ty: Type,
+        first_use: Span,
+        second_use: Span,
+    },
+    /// Affine value was used more than once.
+    /// Affine types may be used at most once.
+    MultipleAffineUse {
+        name: String,
+        ty: Type,
+        first_use: Span,
+        second_use: Span,
+    },
+    /// Linear value defined outside loop was consumed inside loop.
+    /// Loops may execute zero or many times, violating linear semantics.
+    LinearConsumedInLoop {
+        name: String,
+        ty: Type,
+    },
+    /// Linear value consumed in some branches but not all.
+    /// Linear values must be consumed consistently across all control flow paths.
+    InconsistentLinearBranches {
+        name: String,
+        ty: Type,
+        consumed_count: usize,
+        branch_count: usize,
+    },
 
     // FFI errors (E05xx)
     /// Type is not FFI-safe.

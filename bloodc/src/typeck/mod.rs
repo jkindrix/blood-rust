@@ -35,6 +35,7 @@ pub mod exhaustiveness;
 pub mod ffi;
 pub mod infer;
 pub mod lifetime;
+pub mod linearity;
 pub mod lint;
 pub mod methods;
 pub mod resolve;
@@ -49,6 +50,7 @@ pub use error::{TypeError, TypeErrorKind};
 pub use ffi::{FfiValidator, FfiSafety};
 pub use infer::TypeInference;
 pub use lifetime::{LifetimeInference, LifetimeConstraint, LifetimeOrigin, LifetimeSolution};
+pub use linearity::LinearityChecker;
 pub use lint::{PointerLintContext, PointerLintConfig, HandlerLintContext, HandlerLintConfig};
 pub use methods::{MethodFamily, MethodRegistry};
 pub use resolve::{Resolver, Scope, ScopeKind};
@@ -84,5 +86,16 @@ pub fn check_program(
     // Phase 3: Build HIR
     let hir_crate = ctx.into_hir();
 
+    // Phase 4: Check linearity (linear/affine type usage)
+    let linearity_errors = linearity::check_crate_linearity(&hir_crate);
+    if !linearity_errors.is_empty() {
+        return Err(linearity_errors.into_iter()
+            .map(|e| e.to_diagnostic())
+            .collect());
+    }
+
     Ok(hir_crate)
 }
+
+#[cfg(test)]
+mod tests;
