@@ -628,6 +628,7 @@ impl<'src> Parser<'src> {
                     };
 
                     // Check for macro call (e.g., format!(...))
+                    // or struct literal (e.g., types::TypeKind::WithFields { ... })
                     let mut expr = if self.check(TokenKind::Not) {
                         if self.check_next(TokenKind::LParen)
                             || self.check_next(TokenKind::LBracket)
@@ -640,6 +641,10 @@ impl<'src> Parser<'src> {
                                 span: maybe_name,
                             }
                         }
+                    } else if self.check(TokenKind::LBrace) {
+                        // Struct literal with module-qualified path: Path { field: value, ... }
+                        // e.g., types::TypeKind::WithFields { inner: 42, flag: true }
+                        self.parse_struct_literal(Some(self.path_to_type_path(&path)))
                     } else {
                         Expr {
                             kind: ExprKind::Path(path),
