@@ -109,6 +109,14 @@ impl<'a> TypeContext<'a> {
                     let name = def_info.name.clone();
                     let kind = def_info.kind;
 
+                    // Skip enum variants - they should not be injected as top-level bindings.
+                    // Variants must be accessed via their enum name (e.g., ExprKind::Local),
+                    // not directly by name. Injecting them would incorrectly shadow structs
+                    // or other items with the same name.
+                    if kind == DefKind::Variant {
+                        continue;
+                    }
+
                     // Add binding to current scope (module bindings scope)
                     // Use insert to ensure module items shadow any parent module items
                     // with the same name (e.g., type alias Diagnostic in parent shadowed
