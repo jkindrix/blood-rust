@@ -99,10 +99,12 @@ impl<'a> TypeContext<'a> {
                     let kind = def_info.kind;
 
                     // Add binding to root scope (current scope when checking top-level bodies)
+                    // Use insert to ensure module items shadow any parent module items
+                    // with the same name (e.g., type alias Diagnostic in parent shadowed
+                    // by struct Diagnostic in child module)
                     self.resolver.current_scope_mut()
                         .bindings
-                        .entry(name.clone())
-                        .or_insert_with(|| Binding::Def(*item_def_id));
+                        .insert(name.clone(), Binding::Def(*item_def_id));
 
                     // Also add type bindings for type-defining items
                     // This allows types like Point to be visible in function bodies
@@ -110,8 +112,7 @@ impl<'a> TypeContext<'a> {
                         DefKind::Struct | DefKind::Enum | DefKind::TypeAlias => {
                             self.resolver.current_scope_mut()
                                 .type_bindings
-                                .entry(name)
-                                .or_insert(*item_def_id);
+                                .insert(name, *item_def_id);
                         }
                         _ => {}
                     }
@@ -911,7 +912,7 @@ impl<'a> TypeContext<'a> {
     /// 1. The effect is handled by an enclosing with...handle block
     /// 2. The calling function also declares the same effect
     /// 3. The calling function has a row variable (effect row polymorphism)
-    pub(crate) fn check_effect_compatibility(&self, callee_def_id: DefId, span: Span) -> Result<(), TypeError> {
+    pub(crate) fn check_effect_compatibility(&mut self, callee_def_id: DefId, span: Span) -> Result<(), TypeError> {
         // Get the callee's declared effects
         let callee_effects = match self.fn_effects.get(&callee_def_id) {
             Some(effects) => effects,
@@ -929,12 +930,21 @@ impl<'a> TypeContext<'a> {
             .is_some();
 
         // For each effect the callee uses, check if it's handled
-        for effect_ref in callee_effects {
+        'effect_loop: for effect_ref in callee_effects {
             let effect_id = effect_ref.def_id;
 
             // Check if handled by an enclosing handler
-            if self.handled_effects.iter().any(|(id, _)| *id == effect_id) {
-                continue;
+            // Also unify type arguments to propagate concrete types
+            for (handled_id, handled_type_args) in self.handled_effects.iter() {
+                if *handled_id == effect_id {
+                    // Unify type arguments to propagate concrete types from callee to handler
+                    for (callee_arg, handled_arg) in effect_ref.type_args.iter().zip(handled_type_args.iter()) {
+                        // Unify without failing - if unification fails, the effect still matches
+                        // but with different type args (which might be a type error elsewhere)
+                        let _ = self.unifier.unify(callee_arg, handled_arg, span);
+                    }
+                    continue 'effect_loop;
+                }
             }
 
             // Check if the caller also declares this effect
@@ -947,6 +957,69 @@ impl<'a> TypeContext<'a> {
 
                 // If the caller has a row variable, effects can flow through
                 // This enables effect row polymorphism: `fn foo() / e` can call any effectful function
+                if caller_is_polymorphic {
+                    continue;
+                }
+            }
+
+            // Effect is not handled - report error
+            let effect_name = self.effect_defs.get(&effect_id)
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| format!("effect#{}", effect_id.index()));
+
+            return Err(TypeError::new(
+                TypeErrorKind::UnhandledEffect { effect: effect_name },
+                span,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Check effect compatibility for a call to a function-typed expression.
+    ///
+    /// This is used when calling function-typed variables like `stream()` where
+    /// the effects come from the function type rather than a function definition.
+    pub(crate) fn check_effect_compatibility_from_type(
+        &mut self,
+        callee_effects: &[hir::FnEffect],
+        span: Span,
+    ) -> Result<(), TypeError> {
+        if callee_effects.is_empty() {
+            return Ok(());
+        }
+
+        // Check if the caller has a row variable - if so, any unhandled effects
+        // from the callee can be absorbed by the caller's row variable
+        let caller_is_polymorphic = self.current_fn
+            .and_then(|id| self.fn_effect_row_var.get(&id))
+            .is_some();
+
+        // For each effect the callee uses, check if it's handled
+        'effect_loop: for effect_ref in callee_effects {
+            let effect_id = effect_ref.def_id;
+
+            // Check if handled by an enclosing handler
+            // Also unify type arguments to propagate concrete types
+            for (handled_id, handled_type_args) in self.handled_effects.iter() {
+                if *handled_id == effect_id {
+                    // Unify type arguments to propagate concrete types from callee to handler
+                    for (callee_arg, handled_arg) in effect_ref.type_args.iter().zip(handled_type_args.iter()) {
+                        let _ = self.unifier.unify(callee_arg, handled_arg, span);
+                    }
+                    continue 'effect_loop;
+                }
+            }
+
+            // Check if the caller also declares this effect
+            if let Some(caller_def_id) = self.current_fn {
+                if let Some(caller_effects) = self.fn_effects.get(&caller_def_id) {
+                    if caller_effects.iter().any(|er| er.def_id == effect_id) {
+                        continue;
+                    }
+                }
+
+                // If the caller has a row variable, effects can flow through
                 if caller_is_polymorphic {
                     continue;
                 }
