@@ -22,7 +22,7 @@ use crate::mir::types::{
     Operand, Constant, ConstantKind, Place,
 };
 use crate::mir::EscapeResults;
-use crate::ice_err;
+use crate::{ice, ice_err};
 
 use super::rvalue::MirRvalueCodegen;
 use super::place::MirPlaceCodegen;
@@ -532,7 +532,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                         // Add element size argument for methods that need it
                         if needs_elem_size && !args.is_empty() {
-                            // Determine element size from the type
+                            // Determine element size from the type.
+                            //
+                            // NOTE ON FALLBACK VALUES: Throughout this match, we use `8` as a fallback
+                            // size when type information cannot be extracted (e.g., when a generic type
+                            // doesn't have type arguments). This is pointer-sized (64-bit) and is a
+                            // conservative default that:
+                            // - Will work correctly for pointer-sized types
+                            // - May allocate extra space for smaller types (safe but wasteful)
+                            // - Could underallocate for types larger than 8 bytes (potential bug)
+                            //
+                            // These fallbacks should only trigger on malformed types or ICE conditions.
+                            // In normal compilation, type information should always be available.
+                            // The catch-all arm logs an ICE if an unhandled builtin is encountered.
                             let elem_size: u64 = match builtin_name.as_str() {
                                 "box_new" => {
                                     // For box_new, the first (and only) arg is the value to box
@@ -778,7 +790,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         8
                                     }
                                 },
-                                _ => 8,
+                                other => {
+                                    // This is a defensive fallback - all builtins in needs_elem_size should be
+                                    // explicitly handled above. If we reach this branch, it indicates a new
+                                    // builtin was added to needs_elem_size but not handled in the match.
+                                    // Using pointer-size (8 bytes) as conservative default, but log an ICE.
+                                    ice!(
+                                        "Unhandled builtin in element size calculation. Add explicit handling in terminator.rs.";
+                                        "builtin" => other,
+                                        "default_size" => 8
+                                    );
+                                    8
+                                },
                             };
 
                             let size_val = self.context.i64_type().const_int(elem_size, false);
@@ -1189,7 +1212,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                                 ptr_type.into(),
                                             ], false).into()
                                         }
-                                        _ => self.context.i64_type().into(),
+                                        other => {
+                                            // Defensive fallback - all builtins in the output buffer check
+                                            // should be explicitly handled above. Using i64 as conservative
+                                            // default, but log an ICE to catch missing cases.
+                                            ice!(
+                                                "Unhandled builtin in output buffer type calculation. Add explicit handling in terminator.rs.";
+                                                "builtin" => other,
+                                                "default_type" => "i64"
+                                            );
+                                            self.context.i64_type().into()
+                                        },
                                     }
                                 } else {
                                     self.context.i64_type().into()
