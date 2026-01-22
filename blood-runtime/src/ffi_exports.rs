@@ -221,11 +221,13 @@ pub unsafe extern "C" fn blood_str_concat(a: BloodStr, b: BloodStr) -> BloodStr 
 }
 
 /// Representation of Option<char> for FFI.
-/// tag: 0 = None, 1 = Some
-/// value: the char as u32 (valid only if tag == 1)
+///
+/// Uses a tagged union representation where `tag` discriminates between None and Some.
 #[repr(C)]
 pub struct BloodOptionChar {
+    /// Discriminant tag: 0 = None, 1 = Some.
     pub tag: i32,
+    /// The character value as i32 (valid UTF-32 codepoint when tag == 1).
     pub value: i32,
 }
 
@@ -369,6 +371,545 @@ pub unsafe extern "C" fn str_len_chars(s: *const BloodStr) -> i64 {
 pub unsafe extern "C" fn string_len_chars(s: *const BloodStr) -> i64 {
     // String has same ptr/len layout at the beginning as BloodStr
     str_len_chars(s)
+}
+
+/// Check if a String contains a substring.
+///
+/// # Arguments
+/// * `s` - The string to search in
+/// * `pattern` - The substring to search for
+///
+/// # Returns
+/// 1 if the pattern is found, 0 otherwise
+///
+/// # Safety
+/// Both pointers must point to valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_contains(s: *const BloodStr, pattern: *const BloodStr) -> i32 {
+    if s.is_null() || pattern.is_null() {
+        return 0;
+    }
+    let s = &*s;
+    let pattern = &*pattern;
+
+    if s.ptr.is_null() || s.len == 0 {
+        // Empty string only contains empty pattern
+        return if pattern.ptr.is_null() || pattern.len == 0 { 1 } else { 0 };
+    }
+    if pattern.ptr.is_null() || pattern.len == 0 {
+        return 1; // Empty pattern is in every string
+    }
+
+    let s_slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let p_slice = std::slice::from_raw_parts(pattern.ptr, pattern.len as usize);
+
+    // Simple substring search
+    if p_slice.len() > s_slice.len() {
+        return 0;
+    }
+    for i in 0..=(s_slice.len() - p_slice.len()) {
+        if &s_slice[i..i+p_slice.len()] == p_slice {
+            return 1;
+        }
+    }
+    0
+}
+
+/// Check if a String starts with a prefix.
+///
+/// # Arguments
+/// * `s` - The string to check
+/// * `prefix` - The prefix to look for
+///
+/// # Returns
+/// 1 if the string starts with the prefix, 0 otherwise
+///
+/// # Safety
+/// Both pointers must point to valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_starts_with(s: *const BloodStr, prefix: *const BloodStr) -> i32 {
+    if s.is_null() || prefix.is_null() {
+        return 0;
+    }
+    let s = &*s;
+    let prefix = &*prefix;
+
+    if prefix.ptr.is_null() || prefix.len == 0 {
+        return 1; // Empty prefix matches everything
+    }
+    if s.ptr.is_null() || s.len == 0 {
+        return 0; // Non-empty prefix can't match empty string
+    }
+    if prefix.len > s.len {
+        return 0;
+    }
+
+    let s_slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let p_slice = std::slice::from_raw_parts(prefix.ptr, prefix.len as usize);
+
+    if s_slice.starts_with(p_slice) { 1 } else { 0 }
+}
+
+/// Check if a String ends with a suffix.
+///
+/// # Arguments
+/// * `s` - The string to check
+/// * `suffix` - The suffix to look for
+///
+/// # Returns
+/// 1 if the string ends with the suffix, 0 otherwise
+///
+/// # Safety
+/// Both pointers must point to valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_ends_with(s: *const BloodStr, suffix: *const BloodStr) -> i32 {
+    if s.is_null() || suffix.is_null() {
+        return 0;
+    }
+    let s = &*s;
+    let suffix = &*suffix;
+
+    if suffix.ptr.is_null() || suffix.len == 0 {
+        return 1; // Empty suffix matches everything
+    }
+    if s.ptr.is_null() || s.len == 0 {
+        return 0; // Non-empty suffix can't match empty string
+    }
+    if suffix.len > s.len {
+        return 0;
+    }
+
+    let s_slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let p_slice = std::slice::from_raw_parts(suffix.ptr, suffix.len as usize);
+
+    if s_slice.ends_with(p_slice) { 1 } else { 0 }
+}
+
+/// Find the first occurrence of a substring in a String.
+///
+/// # Arguments
+/// * `s` - The string to search in
+/// * `pattern` - The substring to search for
+/// * `out` - Output buffer for Option<usize> result { tag: i32, payload: i64 }
+///
+/// # Safety
+/// All pointers must be valid. `out` must have space for the Option struct.
+#[no_mangle]
+pub unsafe extern "C" fn string_find(s: *const BloodStr, pattern: *const BloodStr, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    // Option<usize> layout: { tag: i32, payload: i64 }
+    // tag=0 is None, tag=1 is Some
+    let out_tag = out as *mut i32;
+    let out_payload = out.add(8) as *mut i64;
+
+    if s.is_null() || pattern.is_null() {
+        *out_tag = 0; // None
+        return;
+    }
+    let s = &*s;
+    let pattern = &*pattern;
+
+    if s.ptr.is_null() || s.len == 0 {
+        if pattern.ptr.is_null() || pattern.len == 0 {
+            *out_tag = 1; // Some(0)
+            *out_payload = 0;
+        } else {
+            *out_tag = 0; // None
+        }
+        return;
+    }
+
+    if pattern.ptr.is_null() || pattern.len == 0 {
+        *out_tag = 1; // Some(0) - empty pattern found at start
+        *out_payload = 0;
+        return;
+    }
+
+    let s_slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let p_slice = std::slice::from_raw_parts(pattern.ptr, pattern.len as usize);
+
+    if p_slice.len() > s_slice.len() {
+        *out_tag = 0; // None
+        return;
+    }
+
+    for i in 0..=(s_slice.len() - p_slice.len()) {
+        if &s_slice[i..i+p_slice.len()] == p_slice {
+            *out_tag = 1; // Some(i)
+            *out_payload = i as i64;
+            return;
+        }
+    }
+    *out_tag = 0; // None
+}
+
+/// Find the last occurrence of a substring in a String.
+///
+/// # Arguments
+/// * `s` - The string to search in
+/// * `pattern` - The substring to search for
+/// * `out` - Output buffer for Option<usize> result { tag: i32, payload: i64 }
+///
+/// # Safety
+/// All pointers must be valid. `out` must have space for the Option struct.
+#[no_mangle]
+pub unsafe extern "C" fn string_rfind(s: *const BloodStr, pattern: *const BloodStr, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    // Option<usize> layout: { tag: i32, payload: i64 }
+    let out_tag = out as *mut i32;
+    let out_payload = out.add(8) as *mut i64;
+
+    if s.is_null() || pattern.is_null() {
+        *out_tag = 0; // None
+        return;
+    }
+    let s = &*s;
+    let pattern = &*pattern;
+
+    if s.ptr.is_null() || s.len == 0 {
+        if pattern.ptr.is_null() || pattern.len == 0 {
+            *out_tag = 1; // Some(0)
+            *out_payload = 0;
+        } else {
+            *out_tag = 0; // None
+        }
+        return;
+    }
+
+    if pattern.ptr.is_null() || pattern.len == 0 {
+        *out_tag = 1; // Some(len) - empty pattern found at end
+        *out_payload = s.len as i64;
+        return;
+    }
+
+    let s_slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let p_slice = std::slice::from_raw_parts(pattern.ptr, pattern.len as usize);
+
+    if p_slice.len() > s_slice.len() {
+        *out_tag = 0; // None
+        return;
+    }
+
+    // Search from end
+    for i in (0..=(s_slice.len() - p_slice.len())).rev() {
+        if &s_slice[i..i+p_slice.len()] == p_slice {
+            *out_tag = 1; // Some(i)
+            *out_payload = i as i64;
+            return;
+        }
+    }
+    *out_tag = 0; // None
+}
+
+/// Trim whitespace from both ends of a String.
+///
+/// Returns a new BloodStr pointing to the trimmed portion (no allocation).
+///
+/// # Arguments
+/// * `s` - The string to trim
+///
+/// # Returns
+/// BloodStr pointing to trimmed portion
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_trim(s: *const BloodStr) -> BloodStr {
+    if s.is_null() {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() || s.len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+
+    // Find start (skip leading whitespace)
+    let mut start = 0;
+    while start < slice.len() && is_ascii_whitespace(slice[start]) {
+        start += 1;
+    }
+
+    // Find end (skip trailing whitespace)
+    let mut end = slice.len();
+    while end > start && is_ascii_whitespace(slice[end - 1]) {
+        end -= 1;
+    }
+
+    BloodStr {
+        ptr: s.ptr.add(start),
+        len: (end - start) as u64,
+    }
+}
+
+/// Trim whitespace from the start of a String.
+///
+/// # Arguments
+/// * `s` - The string to trim
+///
+/// # Returns
+/// BloodStr pointing to trimmed portion
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_trim_start(s: *const BloodStr) -> BloodStr {
+    if s.is_null() {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() || s.len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+
+    // Find start (skip leading whitespace)
+    let mut start = 0;
+    while start < slice.len() && is_ascii_whitespace(slice[start]) {
+        start += 1;
+    }
+
+    BloodStr {
+        ptr: s.ptr.add(start),
+        len: (s.len as usize - start) as u64,
+    }
+}
+
+/// Trim whitespace from the end of a String.
+///
+/// # Arguments
+/// * `s` - The string to trim
+///
+/// # Returns
+/// BloodStr pointing to trimmed portion
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_trim_end(s: *const BloodStr) -> BloodStr {
+    if s.is_null() {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() || s.len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+
+    // Find end (skip trailing whitespace)
+    let mut end = slice.len();
+    while end > 0 && is_ascii_whitespace(slice[end - 1]) {
+        end -= 1;
+    }
+
+    BloodStr {
+        ptr: s.ptr,
+        len: end as u64,
+    }
+}
+
+/// Convert string to uppercase.
+///
+/// # Arguments
+/// * `s` - Pointer to the source BloodStr
+///
+/// # Returns
+/// A new BloodVec containing the uppercase string.
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_to_uppercase(s: *const BloodStr) -> BloodVec {
+    if s.is_null() {
+        return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() || s.len == 0 {
+        return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let str_slice = std::str::from_utf8_unchecked(slice);
+    let upper = str_slice.to_uppercase();
+    let bytes = upper.into_bytes();
+
+    let len = bytes.len() as i64;
+    let capacity = len;
+    let ptr = if len > 0 {
+        let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
+        let ptr = std::alloc::alloc(layout);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
+        ptr
+    } else {
+        std::ptr::null_mut()
+    };
+
+    BloodVec { ptr, len, capacity }
+}
+
+/// Convert string to lowercase.
+///
+/// # Arguments
+/// * `s` - Pointer to the source BloodStr
+///
+/// # Returns
+/// A new BloodVec containing the lowercase string.
+///
+/// # Safety
+/// The pointer must point to a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_to_lowercase(s: *const BloodStr) -> BloodVec {
+    if s.is_null() {
+        return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 };
+    }
+    let s = &*s;
+    if s.ptr.is_null() || s.len == 0 {
+        return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    let str_slice = std::str::from_utf8_unchecked(slice);
+    let lower = str_slice.to_lowercase();
+    let bytes = lower.into_bytes();
+
+    let len = bytes.len() as i64;
+    let capacity = len;
+    let ptr = if len > 0 {
+        let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
+        let ptr = std::alloc::alloc(layout);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
+        ptr
+    } else {
+        std::ptr::null_mut()
+    };
+
+    BloodVec { ptr, len, capacity }
+}
+
+/// Replace all occurrences of a pattern in a string.
+///
+/// # Arguments
+/// * `s` - Pointer to the source BloodStr
+/// * `from` - Pointer to the pattern to replace
+/// * `to` - Pointer to the replacement string
+///
+/// # Returns
+/// A new BloodVec containing the string with replacements.
+///
+/// # Safety
+/// All pointers must point to valid BloodStr structs.
+#[no_mangle]
+pub unsafe extern "C" fn string_replace(
+    s: *const BloodStr,
+    from: *const BloodStr,
+    to: *const BloodStr,
+) -> BloodVec {
+    if s.is_null() {
+        return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 };
+    }
+    let s_ref = &*s;
+    if s_ref.ptr.is_null() || s_ref.len == 0 {
+        return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 };
+    }
+
+    let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len as usize);
+    let str_slice = std::str::from_utf8_unchecked(slice);
+
+    // Get the from pattern
+    let from_str = if from.is_null() {
+        ""
+    } else {
+        let from_ref = &*from;
+        if from_ref.ptr.is_null() || from_ref.len == 0 {
+            ""
+        } else {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(from_ref.ptr, from_ref.len as usize)
+            )
+        }
+    };
+
+    // Get the to replacement
+    let to_str = if to.is_null() {
+        ""
+    } else {
+        let to_ref = &*to;
+        if to_ref.ptr.is_null() || to_ref.len == 0 {
+            ""
+        } else {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(to_ref.ptr, to_ref.len as usize)
+            )
+        }
+    };
+
+    // If from is empty, return the original string
+    if from_str.is_empty() {
+        let len = s_ref.len as i64;
+        let capacity = len;
+        let ptr = if len > 0 {
+            let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
+            let ptr = std::alloc::alloc(layout);
+            std::ptr::copy_nonoverlapping(s_ref.ptr, ptr, len as usize);
+            ptr
+        } else {
+            std::ptr::null_mut()
+        };
+        return BloodVec { ptr, len, capacity };
+    }
+
+    let result = str_slice.replace(from_str, to_str);
+    let bytes = result.into_bytes();
+
+    let len = bytes.len() as i64;
+    let capacity = len;
+    let ptr = if len > 0 {
+        let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
+        let ptr = std::alloc::alloc(layout);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
+        ptr
+    } else {
+        std::ptr::null_mut()
+    };
+
+    BloodVec { ptr, len, capacity }
+}
+
+/// Convert str to uppercase (alias for string_to_uppercase).
+#[no_mangle]
+pub unsafe extern "C" fn str_to_uppercase(s: *const BloodStr) -> BloodVec {
+    string_to_uppercase(s)
+}
+
+/// Convert str to lowercase (alias for string_to_lowercase).
+#[no_mangle]
+pub unsafe extern "C" fn str_to_lowercase(s: *const BloodStr) -> BloodVec {
+    string_to_lowercase(s)
+}
+
+/// Replace all occurrences in str (alias for string_replace).
+#[no_mangle]
+pub unsafe extern "C" fn str_replace(
+    s: *const BloodStr,
+    from: *const BloodStr,
+    to: *const BloodStr,
+) -> BloodVec {
+    string_replace(s, from, to)
+}
+
+/// Helper function to check if a byte is ASCII whitespace.
+#[inline]
+fn is_ascii_whitespace(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C)
 }
 
 // ============================================================================
@@ -3074,6 +3615,533 @@ pub unsafe extern "C" fn vec_free(vec: *mut BloodVec, elem_size: i64) {
     }
 }
 
+/// Get a pointer to the first element of a Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer to write the Option struct (tag + payload pointer)
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `out` must be valid for the Option<&T> struct size.
+#[no_mangle]
+pub unsafe extern "C" fn vec_first(vec: *const BloodVec, _elem_size: i64, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    if vec.is_null() || (*vec).len == 0 {
+        // None
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    // Some - write tag and pointer to first element
+    *(out as *mut i32) = 1;
+    let ptr_offset = 8usize; // Pointer alignment
+    *(out.add(ptr_offset) as *mut *const u8) = (*vec).ptr;
+}
+
+/// Get a pointer to the last element of a Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer to write the Option struct (tag + payload pointer)
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `out` must be valid for the Option<&T> struct size.
+#[no_mangle]
+pub unsafe extern "C" fn vec_last(vec: *const BloodVec, elem_size: i64, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    if vec.is_null() || (*vec).len == 0 {
+        // None
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    // Some - write tag and pointer to last element
+    *(out as *mut i32) = 1;
+    let ptr_offset = 8usize; // Pointer alignment
+    let last_idx = (*vec).len - 1;
+    let last_ptr = (*vec).ptr.add((last_idx * elem_size) as usize);
+    *(out.add(ptr_offset) as *mut *const u8) = last_ptr;
+}
+
+/// Insert an element at the given index, shifting elements after it.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `index` - Index to insert at
+/// * `elem` - Pointer to the element to insert
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `elem` must be valid for `elem_size` bytes.
+/// `index` must be <= len.
+#[no_mangle]
+pub unsafe extern "C" fn vec_insert(vec: *mut BloodVec, index: i64, elem: *const u8, elem_size: i64) {
+    if vec.is_null() || elem.is_null() || elem_size <= 0 || index < 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    if index > v.len {
+        return; // Index out of bounds
+    }
+
+    // Ensure capacity
+    if v.len >= v.capacity {
+        vec_reserve(vec, 1, elem_size);
+    }
+
+    let idx = index as usize;
+    let len = v.len as usize;
+    let es = elem_size as usize;
+
+    // Shift elements after index
+    if idx < len {
+        let src = v.ptr.add(idx * es);
+        let dst = v.ptr.add((idx + 1) * es);
+        std::ptr::copy(src, dst, (len - idx) * es);
+    }
+
+    // Insert the new element
+    let dest = v.ptr.add(idx * es);
+    std::ptr::copy_nonoverlapping(elem, dest, es);
+    v.len += 1;
+}
+
+/// Remove and return the element at the given index, shifting elements after it.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `index` - Index to remove from
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the removed element
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `out` must be valid for `elem_size` bytes.
+/// `index` must be < len.
+#[no_mangle]
+pub unsafe extern "C" fn vec_remove(vec: *mut BloodVec, index: i64, elem_size: i64, out: *mut u8) {
+    if vec.is_null() || elem_size <= 0 || index < 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    if index >= v.len {
+        return; // Index out of bounds
+    }
+
+    let idx = index as usize;
+    let len = v.len as usize;
+    let es = elem_size as usize;
+
+    // Copy element to output
+    let src = v.ptr.add(idx * es);
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(src, out, es);
+    }
+
+    // Shift elements after index
+    if idx + 1 < len {
+        let next = v.ptr.add((idx + 1) * es);
+        std::ptr::copy(next, src, (len - idx - 1) * es);
+    }
+
+    v.len -= 1;
+}
+
+/// Remove and return the element at the given index by swapping with the last element.
+/// This is O(1) but doesn't preserve order.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `index` - Index to remove from
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the removed element
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `out` must be valid for `elem_size` bytes.
+/// `index` must be < len.
+#[no_mangle]
+pub unsafe extern "C" fn vec_swap_remove(vec: *mut BloodVec, index: i64, elem_size: i64, out: *mut u8) {
+    if vec.is_null() || elem_size <= 0 || index < 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    if index >= v.len {
+        return; // Index out of bounds
+    }
+
+    let idx = index as usize;
+    let es = elem_size as usize;
+
+    // Copy element to output
+    let elem_ptr = v.ptr.add(idx * es);
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(elem_ptr, out, es);
+    }
+
+    // If not the last element, swap with last
+    if index < v.len - 1 {
+        let last_ptr = v.ptr.add((v.len as usize - 1) * es);
+        std::ptr::copy_nonoverlapping(last_ptr, elem_ptr, es);
+    }
+
+    v.len -= 1;
+}
+
+/// Truncate the Vec to the given length.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `new_len` - New length (must be <= current length)
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_truncate(vec: *mut BloodVec, new_len: i64) {
+    if vec.is_null() || new_len < 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    if new_len < v.len {
+        v.len = new_len;
+    }
+}
+
+/// Get a mutable pointer to the first element of a Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer to write the Option struct
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_first_mut(vec: *mut BloodVec, _elem_size: i64, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    if vec.is_null() || (*vec).len == 0 {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    *(out as *mut i32) = 1; // Some
+    let ptr_offset = 8usize;
+    *(out.add(ptr_offset) as *mut *mut u8) = (*vec).ptr;
+}
+
+/// Get a mutable pointer to the last element of a Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer to write the Option struct
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_last_mut(vec: *mut BloodVec, elem_size: i64, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    if vec.is_null() || (*vec).len == 0 {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    *(out as *mut i32) = 1; // Some
+    let ptr_offset = 8usize;
+    let last_idx = (*vec).len - 1;
+    let last_ptr = (*vec).ptr.add((last_idx * elem_size) as usize);
+    *(out.add(ptr_offset) as *mut *mut u8) = last_ptr;
+}
+
+/// Get a mutable pointer to an element at a specific index.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `index` - Index to get
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer to write the Option struct
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_get_mut(vec: *mut BloodVec, index: i64, elem_size: i64, out: *mut u8) {
+    if out.is_null() {
+        return;
+    }
+
+    if vec.is_null() || index < 0 || index >= (*vec).len {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    *(out as *mut i32) = 1; // Some
+    let ptr_offset = 8usize;
+    let elem_ptr = (*vec).ptr.add((index * elem_size) as usize);
+    *(out.add(ptr_offset) as *mut *mut u8) = elem_ptr;
+}
+
+/// Reserve additional capacity in a Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `additional` - Additional capacity to reserve
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_reserve(vec: *mut BloodVec, additional: i64, elem_size: i64) {
+    if vec.is_null() || additional <= 0 || elem_size <= 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    let required = v.len + additional;
+
+    if required <= v.capacity {
+        return; // Already have enough capacity
+    }
+
+    // Calculate new capacity (at least double, or required)
+    let new_capacity = std::cmp::max(v.capacity * 2, required);
+
+    let new_layout = std::alloc::Layout::from_size_align(
+        (new_capacity * elem_size) as usize,
+        8,
+    ).unwrap();
+
+    let new_ptr = if v.ptr.is_null() || v.capacity == 0 {
+        std::alloc::alloc(new_layout)
+    } else {
+        let old_layout = std::alloc::Layout::from_size_align(
+            (v.capacity * elem_size) as usize,
+            8,
+        ).unwrap();
+        std::alloc::realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize)
+    };
+
+    v.ptr = new_ptr;
+    v.capacity = new_capacity;
+}
+
+/// Shrink the Vec's capacity to fit its length.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_shrink_to_fit(vec: *mut BloodVec, elem_size: i64) {
+    if vec.is_null() || elem_size <= 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    if v.len == v.capacity || v.len == 0 {
+        return; // Already optimal
+    }
+
+    let new_capacity = v.len;
+    let old_layout = std::alloc::Layout::from_size_align(
+        (v.capacity * elem_size) as usize,
+        8,
+    ).unwrap();
+
+    let new_ptr = std::alloc::realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize);
+    v.ptr = new_ptr;
+    v.capacity = new_capacity;
+}
+
+/// Get a slice view of the Vec's contents.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `out` - Output buffer for the slice fat pointer (ptr, len)
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `out` must be valid for a slice fat pointer (16 bytes).
+#[no_mangle]
+pub unsafe extern "C" fn vec_as_slice(vec: *const BloodVec, out: *mut u8) {
+    if vec.is_null() || out.is_null() {
+        if !out.is_null() {
+            *(out as *mut *const u8) = std::ptr::null();
+            *(out.add(8) as *mut i64) = 0;
+        }
+        return;
+    }
+
+    // Write slice fat pointer: { ptr, len }
+    *(out as *mut *const u8) = (*vec).ptr;
+    *(out.add(8) as *mut i64) = (*vec).len;
+}
+
+/// Get a mutable slice view of the Vec's contents.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `out` - Output buffer for the slice fat pointer (ptr, len)
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `out` must be valid for a slice fat pointer (16 bytes).
+#[no_mangle]
+pub unsafe extern "C" fn vec_as_mut_slice(vec: *mut BloodVec, out: *mut u8) {
+    if vec.is_null() || out.is_null() {
+        if !out.is_null() {
+            *(out as *mut *mut u8) = std::ptr::null_mut();
+            *(out.add(8) as *mut i64) = 0;
+        }
+        return;
+    }
+
+    // Write slice fat pointer: { ptr, len }
+    *(out as *mut *mut u8) = (*vec).ptr;
+    *(out.add(8) as *mut i64) = (*vec).len;
+}
+
+/// Append another Vec's contents to this Vec, leaving the other Vec empty.
+///
+/// # Arguments
+/// * `vec` - Pointer to the destination Vec struct
+/// * `other` - Pointer to the source Vec struct
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// Both `vec` and `other` must be valid pointers to BloodVec structs.
+#[no_mangle]
+pub unsafe extern "C" fn vec_append(vec: *mut BloodVec, other: *mut BloodVec, elem_size: i64) {
+    if vec.is_null() || other.is_null() || elem_size <= 0 {
+        return;
+    }
+
+    let src = &mut *other;
+    if src.len == 0 {
+        return; // Nothing to append
+    }
+
+    // Reserve capacity
+    vec_reserve(vec, src.len, elem_size);
+
+    let dst = &mut *vec;
+    let es = elem_size as usize;
+
+    // Copy elements
+    let dst_end = dst.ptr.add((dst.len as usize) * es);
+    std::ptr::copy_nonoverlapping(src.ptr, dst_end, (src.len as usize) * es);
+
+    dst.len += src.len;
+    src.len = 0;
+}
+
+/// Extend a Vec from a slice.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `slice` - Pointer to the slice fat pointer
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// `slice` must be a valid pointer to a slice fat pointer.
+#[no_mangle]
+pub unsafe extern "C" fn vec_extend_from_slice(vec: *mut BloodVec, slice: *const u8, elem_size: i64) {
+    if vec.is_null() || slice.is_null() || elem_size <= 0 {
+        return;
+    }
+
+    // Read slice fat pointer
+    let slice_ptr = *(slice as *const *const u8);
+    let slice_len = *(slice.add(8) as *const i64);
+
+    if slice_len <= 0 || slice_ptr.is_null() {
+        return;
+    }
+
+    // Reserve capacity
+    vec_reserve(vec, slice_len, elem_size);
+
+    let v = &mut *vec;
+    let es = elem_size as usize;
+
+    // Copy elements
+    let dst = v.ptr.add((v.len as usize) * es);
+    std::ptr::copy_nonoverlapping(slice_ptr, dst, (slice_len as usize) * es);
+
+    v.len += slice_len;
+}
+
+/// Remove consecutive duplicate elements from a Vec.
+///
+/// # Arguments
+/// * `vec` - Pointer to the Vec struct
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec struct.
+#[no_mangle]
+pub unsafe extern "C" fn vec_dedup(vec: *mut BloodVec, elem_size: i64) {
+    if vec.is_null() || elem_size <= 0 {
+        return;
+    }
+
+    let v = &mut *vec;
+    if v.len <= 1 {
+        return; // Nothing to deduplicate
+    }
+
+    let es = elem_size as usize;
+    let mut write_idx: usize = 1;
+
+    for read_idx in 1..(v.len as usize) {
+        let prev = v.ptr.add((write_idx - 1) * es);
+        let curr = v.ptr.add(read_idx * es);
+
+        // Compare bytes
+        let mut equal = true;
+        for j in 0..es {
+            if *prev.add(j) != *curr.add(j) {
+                equal = false;
+                break;
+            }
+        }
+
+        if !equal {
+            // Keep this element
+            if write_idx != read_idx {
+                let dst = v.ptr.add(write_idx * es);
+                std::ptr::copy_nonoverlapping(curr, dst, es);
+            }
+            write_idx += 1;
+        }
+    }
+
+    v.len = write_idx as i64;
+}
+
 // ============================================================================
 // Box<T> Runtime Functions
 // ============================================================================
@@ -3151,6 +4219,481 @@ pub unsafe extern "C" fn box_free(boxed: *mut u8, size: i64) {
 
     let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
     std::alloc::dealloc(boxed, layout);
+}
+
+/// Extract the inner value from a Box and deallocate it.
+///
+/// This is equivalent to Rust's `*box` or `Box::into_inner()`.
+/// The value is copied to the output buffer and the box is freed.
+///
+/// # Arguments
+/// * `boxed` - Pointer to the boxed value
+/// * `size` - Size of the value in bytes
+/// * `out` - Output buffer for the extracted value
+///
+/// # Safety
+/// `boxed` must be a pointer returned by `box_new`.
+/// `out` must be valid for at least `size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn box_into_inner(boxed: *mut u8, size: i64, out: *mut u8) {
+    if boxed.is_null() || size <= 0 {
+        return;
+    }
+
+    // Copy the value to output buffer
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(boxed, out, size as usize);
+    }
+
+    // Deallocate the box
+    let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
+    std::alloc::dealloc(boxed, layout);
+}
+
+/// Convert a Box into a raw pointer without deallocating.
+///
+/// This is equivalent to Rust's `Box::into_raw()`.
+/// The caller is responsible for eventually deallocating the memory.
+///
+/// # Arguments
+/// * `boxed` - Pointer to the boxed value
+///
+/// # Returns
+/// The same pointer (ownership transferred to caller)
+///
+/// # Safety
+/// `boxed` must be a pointer returned by `box_new`.
+#[no_mangle]
+pub unsafe extern "C" fn box_into_raw(boxed: *mut u8) -> *mut u8 {
+    // Just return the pointer - ownership is transferred to caller
+    boxed
+}
+
+/// Create a Box from a raw pointer.
+///
+/// This is equivalent to Rust's `Box::from_raw()`.
+/// Takes ownership of the pointer - it must have been allocated with box_new.
+///
+/// # Arguments
+/// * `ptr` - Raw pointer previously obtained from box_into_raw
+///
+/// # Returns
+/// The pointer as a Box
+///
+/// # Safety
+/// `ptr` must be a pointer that was previously returned by `box_into_raw`.
+#[no_mangle]
+pub unsafe extern "C" fn box_from_raw(ptr: *mut u8) -> *mut u8 {
+    // Just return the pointer - we're taking ownership back
+    ptr
+}
+
+/// Leak a Box and return a reference to the value.
+///
+/// This is equivalent to Rust's `Box::leak()`.
+/// The memory is intentionally leaked and will never be freed.
+///
+/// # Arguments
+/// * `boxed` - Pointer to the boxed value
+///
+/// # Returns
+/// The same pointer as a reference (memory leaked)
+///
+/// # Safety
+/// `boxed` must be a pointer returned by `box_new`.
+#[no_mangle]
+pub unsafe extern "C" fn box_leak(boxed: *mut u8) -> *mut u8 {
+    // Just return the pointer - memory is intentionally leaked
+    boxed
+}
+
+// ============================================================================
+// Slice [T] Runtime Functions
+// ============================================================================
+//
+// Slices are represented as fat pointers: { ptr: *const T, len: usize }
+// The ptr field is at offset 0 (8 bytes on 64-bit).
+// The len field is at offset 8 (8 bytes).
+
+/// Get the length of a slice.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+///
+/// # Returns
+/// The length of the slice.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a slice fat pointer.
+#[no_mangle]
+pub unsafe extern "C" fn slice_len(slice: *const u8) -> i64 {
+    if slice.is_null() {
+        return 0;
+    }
+    // len is at offset 8 in the fat pointer
+    let len_ptr = slice.add(8) as *const i64;
+    *len_ptr
+}
+
+/// Check if a slice is empty.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+///
+/// # Returns
+/// 1 if empty, 0 if not empty.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a slice fat pointer.
+#[no_mangle]
+pub unsafe extern "C" fn slice_is_empty(slice: *const u8) -> i32 {
+    if slice.is_null() {
+        return 1;
+    }
+    let len = slice_len(slice);
+    if len == 0 { 1 } else { 0 }
+}
+
+/// Get the first element of a slice as Option<&T>.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the Option<&T> result
+///
+/// # Returns
+/// Writes Option<&T> to `out` where tag=0 is None, tag=1 is Some.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a slice fat pointer.
+/// `out` must be valid for writing an Option<&T>.
+#[no_mangle]
+pub unsafe extern "C" fn slice_first(slice: *const u8, _elem_size: i64, out: *mut u8) {
+    if slice.is_null() || out.is_null() {
+        if !out.is_null() {
+            *(out as *mut i32) = 0; // None
+        }
+        return;
+    }
+
+    let len = slice_len(slice);
+    if len == 0 {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    // Get the data pointer from the fat pointer (offset 0)
+    let data_ptr = *(slice as *const *const u8);
+
+    // Write Some with pointer to first element
+    *(out as *mut i32) = 1; // Some tag
+    let ptr_offset = 8usize; // Pointer alignment
+    *(out.add(ptr_offset) as *mut *const u8) = data_ptr;
+}
+
+/// Get the last element of a slice as Option<&T>.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the Option<&T> result
+///
+/// # Returns
+/// Writes Option<&T> to `out` where tag=0 is None, tag=1 is Some.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a slice fat pointer.
+/// `out` must be valid for writing an Option<&T>.
+#[no_mangle]
+pub unsafe extern "C" fn slice_last(slice: *const u8, elem_size: i64, out: *mut u8) {
+    if slice.is_null() || out.is_null() {
+        if !out.is_null() {
+            *(out as *mut i32) = 0; // None
+        }
+        return;
+    }
+
+    let len = slice_len(slice);
+    if len == 0 {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    // Get the data pointer from the fat pointer (offset 0)
+    let data_ptr = *(slice as *const *const u8);
+    let last_idx = len - 1;
+    let last_ptr = data_ptr.add((last_idx * elem_size) as usize);
+
+    // Write Some with pointer to last element
+    *(out as *mut i32) = 1; // Some tag
+    let ptr_offset = 8usize; // Pointer alignment
+    *(out.add(ptr_offset) as *mut *const u8) = last_ptr;
+}
+
+/// Get an element at an index from a slice as Option<&T>.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `index` - Index of the element to get
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the Option<&T> result
+///
+/// # Returns
+/// Writes Option<&T> to `out` where tag=0 is None, tag=1 is Some.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a slice fat pointer.
+/// `out` must be valid for writing an Option<&T>.
+#[no_mangle]
+pub unsafe extern "C" fn slice_get(slice: *const u8, index: i64, elem_size: i64, out: *mut u8) {
+    if slice.is_null() || out.is_null() || index < 0 {
+        if !out.is_null() {
+            *(out as *mut i32) = 0; // None
+        }
+        return;
+    }
+
+    let len = slice_len(slice);
+    if index >= len {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    // Get the data pointer from the fat pointer (offset 0)
+    let data_ptr = *(slice as *const *const u8);
+    let elem_ptr = data_ptr.add((index * elem_size) as usize);
+
+    // Write Some with pointer to element
+    *(out as *mut i32) = 1; // Some tag
+    let ptr_offset = 8usize; // Pointer alignment
+    *(out.add(ptr_offset) as *mut *const u8) = elem_ptr;
+}
+
+/// Check if a slice contains a specific element.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `elem` - Pointer to the element to search for
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Returns
+/// 1 if found, 0 if not found.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a slice fat pointer.
+/// `elem` must be a valid pointer to an element of size `elem_size`.
+#[no_mangle]
+pub unsafe extern "C" fn slice_contains(slice: *const u8, elem: *const u8, elem_size: i64) -> i32 {
+    if slice.is_null() || elem.is_null() || elem_size <= 0 {
+        return 0;
+    }
+
+    let len = slice_len(slice);
+    if len == 0 {
+        return 0;
+    }
+
+    // Get the data pointer from the fat pointer (offset 0)
+    let data_ptr = *(slice as *const *const u8);
+
+    // Linear search through slice
+    for i in 0..len {
+        let current = data_ptr.add((i * elem_size) as usize);
+        // Compare bytes
+        let mut equal = true;
+        for j in 0..elem_size as usize {
+            if *current.add(j) != *elem.add(j) {
+                equal = false;
+                break;
+            }
+        }
+        if equal {
+            return 1;
+        }
+    }
+
+    0
+}
+
+/// Get a mutable reference to an element at an index from a slice as Option<&mut T>.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `index` - Index of the element to get
+/// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer for the Option<&mut T> result
+///
+/// # Returns
+/// Writes Option<&mut T> to `out` where tag=0 is None, tag=1 is Some.
+///
+/// # Safety
+/// `slice` must be a valid pointer to a mutable slice fat pointer.
+/// `out` must be valid for writing an Option<&mut T>.
+#[no_mangle]
+pub unsafe extern "C" fn slice_get_mut(slice: *mut u8, index: i64, elem_size: i64, out: *mut u8) {
+    if slice.is_null() || out.is_null() || index < 0 {
+        if !out.is_null() {
+            *(out as *mut i32) = 0; // None
+        }
+        return;
+    }
+
+    let len = slice_len(slice);
+    if index >= len {
+        *(out as *mut i32) = 0; // None
+        return;
+    }
+
+    // Get the data pointer from the fat pointer (offset 0)
+    let data_ptr = *(slice as *const *mut u8);
+    let elem_ptr = data_ptr.add((index * elem_size) as usize);
+
+    // Write Some with pointer to element
+    *(out as *mut i32) = 1; // Some tag
+    let ptr_offset = 8usize; // Pointer alignment
+    *(out.add(ptr_offset) as *mut *mut u8) = elem_ptr;
+}
+
+/// Check if a slice starts with a given needle slice.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `needle` - Pointer to the needle slice fat pointer
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Returns
+/// 1 if slice starts with needle, 0 otherwise.
+///
+/// # Safety
+/// Both `slice` and `needle` must be valid pointers to slice fat pointers.
+#[no_mangle]
+pub unsafe extern "C" fn slice_starts_with(slice: *const u8, needle: *const u8, elem_size: i64) -> i32 {
+    if slice.is_null() || needle.is_null() || elem_size <= 0 {
+        return if needle.is_null() || slice_len(needle) == 0 { 1 } else { 0 };
+    }
+
+    let slice_len_val = slice_len(slice);
+    let needle_len = slice_len(needle);
+
+    if needle_len == 0 {
+        return 1; // Empty needle always matches
+    }
+
+    if needle_len > slice_len_val {
+        return 0; // Needle longer than slice
+    }
+
+    // Get data pointers
+    let slice_ptr = *(slice as *const *const u8);
+    let needle_ptr = *(needle as *const *const u8);
+
+    // Compare each element
+    for i in 0..needle_len {
+        let slice_elem = slice_ptr.add((i * elem_size) as usize);
+        let needle_elem = needle_ptr.add((i * elem_size) as usize);
+
+        // Compare bytes
+        for j in 0..elem_size as usize {
+            if *slice_elem.add(j) != *needle_elem.add(j) {
+                return 0;
+            }
+        }
+    }
+
+    1
+}
+
+/// Check if a slice ends with a given needle slice.
+///
+/// # Arguments
+/// * `slice` - Pointer to the slice fat pointer
+/// * `needle` - Pointer to the needle slice fat pointer
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Returns
+/// 1 if slice ends with needle, 0 otherwise.
+///
+/// # Safety
+/// Both `slice` and `needle` must be valid pointers to slice fat pointers.
+#[no_mangle]
+pub unsafe extern "C" fn slice_ends_with(slice: *const u8, needle: *const u8, elem_size: i64) -> i32 {
+    if slice.is_null() || needle.is_null() || elem_size <= 0 {
+        return if needle.is_null() || slice_len(needle) == 0 { 1 } else { 0 };
+    }
+
+    let slice_len_val = slice_len(slice);
+    let needle_len = slice_len(needle);
+
+    if needle_len == 0 {
+        return 1; // Empty needle always matches
+    }
+
+    if needle_len > slice_len_val {
+        return 0; // Needle longer than slice
+    }
+
+    // Get data pointers
+    let slice_ptr = *(slice as *const *const u8);
+    let needle_ptr = *(needle as *const *const u8);
+
+    // Start offset in slice
+    let start = slice_len_val - needle_len;
+
+    // Compare each element
+    for i in 0..needle_len {
+        let slice_elem = slice_ptr.add(((start + i) * elem_size) as usize);
+        let needle_elem = needle_ptr.add((i * elem_size) as usize);
+
+        // Compare bytes
+        for j in 0..elem_size as usize {
+            if *slice_elem.add(j) != *needle_elem.add(j) {
+                return 0;
+            }
+        }
+    }
+
+    1
+}
+
+/// Reverse a slice in place.
+///
+/// # Arguments
+/// * `slice` - Pointer to the mutable slice fat pointer
+/// * `elem_size` - Size of each element in bytes
+///
+/// # Safety
+/// `slice` must be a valid pointer to a mutable slice fat pointer.
+#[no_mangle]
+pub unsafe extern "C" fn slice_reverse(slice: *mut u8, elem_size: i64) {
+    if slice.is_null() || elem_size <= 0 {
+        return;
+    }
+
+    let len = slice_len(slice);
+    if len <= 1 {
+        return; // Nothing to reverse
+    }
+
+    // Get the data pointer from the fat pointer (offset 0)
+    let data_ptr = *(slice as *const *mut u8);
+
+    // Allocate temp buffer for swapping
+    let elem_size_usize = elem_size as usize;
+    let mut temp = vec![0u8; elem_size_usize];
+
+    // Swap elements from both ends
+    let half = len / 2;
+    for i in 0..half {
+        let left = data_ptr.add((i * elem_size) as usize);
+        let right = data_ptr.add(((len - 1 - i) * elem_size) as usize);
+
+        // Copy left to temp
+        std::ptr::copy_nonoverlapping(left, temp.as_mut_ptr(), elem_size_usize);
+        // Copy right to left
+        std::ptr::copy_nonoverlapping(right, left, elem_size_usize);
+        // Copy temp to right
+        std::ptr::copy_nonoverlapping(temp.as_ptr(), right, elem_size_usize);
+    }
 }
 
 // ============================================================================
@@ -3273,6 +4816,460 @@ pub unsafe extern "C" fn option_try(opt: *const u8, payload_size: i64, out: *mut
     }
 
     1 // Some
+}
+
+/// Unwrap an Option with a custom panic message.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+/// * `payload_size` - Size of the payload in bytes
+/// * `msg` - Panic message (pointer to string data)
+/// * `msg_len` - Length of the message
+/// * `out` - Output buffer for the unwrapped value
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+/// `msg` must be valid for `msg_len` bytes.
+/// `out` must be valid for at least `payload_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn option_expect(
+    opt: *const u8,
+    payload_size: i64,
+    msg: *const u8,
+    msg_len: i64,
+    out: *mut u8,
+) {
+    if opt.is_null() {
+        let message = if !msg.is_null() && msg_len > 0 {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+        } else {
+            "called `Option::expect()` on a `None` value"
+        };
+        panic!("{}", message);
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        let message = if !msg.is_null() && msg_len > 0 {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+        } else {
+            "called `Option::expect()` on a `None` value"
+        };
+        panic!("{}", message);
+    }
+
+    let payload_offset = if payload_size > 4 { 8 } else { 4 };
+    let payload_ptr = opt.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+    }
+}
+
+/// Unwrap an Option or return a default value.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+/// * `payload_size` - Size of the payload in bytes
+/// * `default_val` - Pointer to the default value
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+/// `default_val` must be valid for `payload_size` bytes.
+/// `out` must be valid for at least `payload_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn option_unwrap_or(
+    opt: *const u8,
+    payload_size: i64,
+    default_val: *const u8,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if opt.is_null() {
+        // Use default
+        if !default_val.is_null() {
+            std::ptr::copy_nonoverlapping(default_val, out, payload_size as usize);
+        }
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 1 {
+        // Some - copy the value
+        let payload_offset = if payload_size > 4 { 8 } else { 4 };
+        let payload_ptr = opt.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+    } else {
+        // None - use default
+        if !default_val.is_null() {
+            std::ptr::copy_nonoverlapping(default_val, out, payload_size as usize);
+        }
+    }
+}
+
+/// Convert Option<T> to Result<T, E>, with an error value.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option struct
+/// * `payload_size` - Size of T in bytes
+/// * `err_val` - Pointer to the error value E
+/// * `err_size` - Size of E in bytes
+/// * `out` - Output buffer for the Result struct
+///
+/// # Safety
+/// `opt` must be a valid pointer to an Option<T> struct.
+/// `err_val` must be valid for `err_size` bytes.
+/// `out` must be valid for the Result<T, E> struct size.
+#[no_mangle]
+pub unsafe extern "C" fn option_ok_or(
+    opt: *const u8,
+    payload_size: i64,
+    err_val: *const u8,
+    err_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    let max_payload = std::cmp::max(payload_size, err_size);
+    let payload_offset = if max_payload > 4 { 8 } else { 4 };
+
+    if opt.is_null() {
+        // None -> Err(err_val)
+        *(out as *mut i32) = 1; // Err tag
+        if !err_val.is_null() {
+            let dst_payload = out.add(payload_offset as usize);
+            std::ptr::copy_nonoverlapping(err_val, dst_payload, err_size as usize);
+        }
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 1 {
+        // Some(val) -> Ok(val)
+        *(out as *mut i32) = 0; // Ok tag
+        let src_offset = if payload_size > 4 { 8 } else { 4 };
+        let src_payload = opt.add(src_offset as usize);
+        let dst_payload = out.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, payload_size as usize);
+    } else {
+        // None -> Err(err_val)
+        *(out as *mut i32) = 1; // Err tag
+        if !err_val.is_null() {
+            let dst_payload = out.add(payload_offset as usize);
+            std::ptr::copy_nonoverlapping(err_val, dst_payload, err_size as usize);
+        }
+    }
+}
+
+/// Option<T>.and(self, other: Option<U>) -> Option<U>
+/// Returns None if self is None, otherwise returns other.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `other` - Pointer to the Option<U> struct
+/// * `other_size` - Size of Option<U> in bytes
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_and(
+    opt: *const u8,
+    other: *const u8,
+    other_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if opt.is_null() {
+        // None -> None
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        // None -> None
+        *(out as *mut i32) = 0;
+    } else {
+        // Some(_) -> return other
+        if !other.is_null() {
+            std::ptr::copy_nonoverlapping(other, out, other_size as usize);
+        } else {
+            *(out as *mut i32) = 0; // treat null other as None
+        }
+    }
+}
+
+/// Option<T>.or(self, other: Option<T>) -> Option<T>
+/// Returns self if it contains a value, otherwise returns other.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `other` - Pointer to the Option<T> struct
+/// * `option_size` - Size of Option<T> in bytes
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_or(
+    opt: *const u8,
+    other: *const u8,
+    option_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if opt.is_null() {
+        // None -> return other
+        if !other.is_null() {
+            std::ptr::copy_nonoverlapping(other, out, option_size as usize);
+        } else {
+            *(out as *mut i32) = 0;
+        }
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 1 {
+        // Some(_) -> return self
+        std::ptr::copy_nonoverlapping(opt, out, option_size as usize);
+    } else {
+        // None -> return other
+        if !other.is_null() {
+            std::ptr::copy_nonoverlapping(other, out, option_size as usize);
+        } else {
+            *(out as *mut i32) = 0;
+        }
+    }
+}
+
+/// Option<T>.xor(self, other: Option<T>) -> Option<T>
+/// Returns Some if exactly one of self and other is Some.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `other` - Pointer to the Option<T> struct
+/// * `option_size` - Size of Option<T> in bytes
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_xor(
+    opt: *const u8,
+    other: *const u8,
+    option_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    let self_is_some = if opt.is_null() {
+        false
+    } else {
+        *(opt as *const i32) == 1
+    };
+
+    let other_is_some = if other.is_null() {
+        false
+    } else {
+        *(other as *const i32) == 1
+    };
+
+    match (self_is_some, other_is_some) {
+        (true, false) => {
+            // Return self
+            std::ptr::copy_nonoverlapping(opt, out, option_size as usize);
+        }
+        (false, true) => {
+            // Return other
+            std::ptr::copy_nonoverlapping(other, out, option_size as usize);
+        }
+        _ => {
+            // Both Some or both None -> None
+            *(out as *mut i32) = 0;
+        }
+    }
+}
+
+/// Option<T>.as_ref(&self) -> Option<&T>
+/// Converts &Option<T> to Option<&T>.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `payload_size` - Size of T in bytes
+/// * `out` - Output buffer for Option<&T> (tag + pointer)
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_as_ref(
+    opt: *const u8,
+    payload_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if opt.is_null() {
+        // None
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        // None
+        *(out as *mut i32) = 0;
+    } else {
+        // Some(val) -> Some(&val)
+        *(out as *mut i32) = 1;
+        let payload_offset = if payload_size > 4 { 8 } else { 4 };
+        let payload_ptr = opt.add(payload_offset as usize);
+        // Store pointer to payload at offset 8 (pointer is 8 bytes aligned)
+        *(out.add(8) as *mut *const u8) = payload_ptr;
+    }
+}
+
+/// Option<T>.as_mut(&mut self) -> Option<&mut T>
+/// Converts &mut Option<T> to Option<&mut T>.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `payload_size` - Size of T in bytes
+/// * `out` - Output buffer for Option<&mut T> (tag + pointer)
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_as_mut(
+    opt: *mut u8,
+    payload_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if opt.is_null() {
+        // None
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        // None
+        *(out as *mut i32) = 0;
+    } else {
+        // Some(val) -> Some(&mut val)
+        *(out as *mut i32) = 1;
+        let payload_offset = if payload_size > 4 { 8 } else { 4 };
+        let payload_ptr = opt.add(payload_offset as usize);
+        // Store pointer to payload at offset 8
+        *(out.add(8) as *mut *mut u8) = payload_ptr;
+    }
+}
+
+/// Option<T>.take(&mut self) -> Option<T>
+/// Takes the value out of the option, leaving None in its place.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `payload_size` - Size of T in bytes
+/// * `out` - Output buffer for Option<T>
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_take(
+    opt: *mut u8,
+    payload_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if opt.is_null() {
+        // None
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    let tag = *(opt as *const i32);
+
+    if tag == 0 {
+        // None
+        *(out as *mut i32) = 0;
+    } else {
+        // Some(val) -> copy to out, set self to None
+        let payload_offset = if payload_size > 4 { 8 } else { 4 };
+        let total_size = payload_offset + payload_size;
+
+        // Copy entire Option to out
+        std::ptr::copy_nonoverlapping(opt as *const u8, out, total_size as usize);
+
+        // Set self to None
+        *(opt as *mut i32) = 0;
+    }
+}
+
+/// Option<T>.replace(&mut self, value: T) -> Option<T>
+/// Replaces the value with the given one, returning the old value.
+///
+/// # Arguments
+/// * `opt` - Pointer to the Option<T> struct
+/// * `value` - Pointer to the new value
+/// * `payload_size` - Size of T in bytes
+/// * `out` - Output buffer for Option<T> (old value)
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn option_replace(
+    opt: *mut u8,
+    value: *const u8,
+    payload_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() || opt.is_null() {
+        return;
+    }
+
+    let payload_offset = if payload_size > 4 { 8 } else { 4 };
+    let total_size = payload_offset + payload_size;
+
+    // Copy current Option to out
+    std::ptr::copy_nonoverlapping(opt as *const u8, out, total_size as usize);
+
+    // Set opt to Some(value)
+    *(opt as *mut i32) = 1;
+    if !value.is_null() {
+        let dst_payload = opt.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(value, dst_payload, payload_size as usize);
+    }
 }
 
 // ============================================================================
@@ -3424,6 +5421,410 @@ pub unsafe extern "C" fn result_try(res: *const u8, ok_size: i64, out: *mut u8) 
     }
 
     0 // Ok
+}
+
+/// Convert Result<T, E> to Option<T>, discarding the error.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `ok_size` - Size of the Ok payload in bytes
+/// * `out` - Output buffer for the Option struct
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `out` must be valid for the Option<T> struct size.
+#[no_mangle]
+pub unsafe extern "C" fn result_ok(res: *const u8, ok_size: i64, out: *mut u8) {
+    if res.is_null() || out.is_null() {
+        // Write None to output
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 0 {
+        // Ok(value) -> Some(value)
+        *(out as *mut i32) = 1; // Some tag
+        let payload_offset = if ok_size > 4 { 8 } else { 4 };
+        let src_payload = res.add(payload_offset as usize);
+        let dst_payload = out.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, ok_size as usize);
+    } else {
+        // Err(_) -> None
+        *(out as *mut i32) = 0;
+    }
+}
+
+/// Convert Result<T, E> to Option<E>, discarding the ok value.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `err_size` - Size of the Err payload in bytes
+/// * `out` - Output buffer for the Option struct
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `out` must be valid for the Option<E> struct size.
+#[no_mangle]
+pub unsafe extern "C" fn result_err(res: *const u8, err_size: i64, out: *mut u8) {
+    if res.is_null() || out.is_null() {
+        // Write None to output
+        *(out as *mut i32) = 0;
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 1 {
+        // Err(value) -> Some(value)
+        *(out as *mut i32) = 1; // Some tag
+        let payload_offset = if err_size > 4 { 8 } else { 4 };
+        let src_payload = res.add(payload_offset as usize);
+        let dst_payload = out.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, err_size as usize);
+    } else {
+        // Ok(_) -> None
+        *(out as *mut i32) = 0;
+    }
+}
+
+/// Unwrap a Result with a custom panic message.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `ok_size` - Size of the Ok payload in bytes
+/// * `msg` - Panic message (pointer to string data)
+/// * `msg_len` - Length of the message
+/// * `out` - Output buffer for the unwrapped value
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `msg` must be valid for `msg_len` bytes.
+/// `out` must be valid for at least `ok_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn result_expect(
+    res: *const u8,
+    ok_size: i64,
+    msg: *const u8,
+    msg_len: i64,
+    out: *mut u8,
+) {
+    if res.is_null() {
+        let message = if !msg.is_null() && msg_len > 0 {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+        } else {
+            "called `Result::expect()` on an `Err` value"
+        };
+        panic!("{}", message);
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag != 0 {
+        let message = if !msg.is_null() && msg_len > 0 {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+        } else {
+            "called `Result::expect()` on an `Err` value"
+        };
+        panic!("{}", message);
+    }
+
+    let payload_offset = if ok_size > 4 { 8 } else { 4 };
+    let payload_ptr = res.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+    }
+}
+
+/// Unwrap a Result error with a custom panic message.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `err_size` - Size of the Err payload in bytes
+/// * `msg` - Panic message (pointer to string data)
+/// * `msg_len` - Length of the message
+/// * `out` - Output buffer for the unwrapped error
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `msg` must be valid for `msg_len` bytes.
+/// `out` must be valid for at least `err_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn result_expect_err(
+    res: *const u8,
+    err_size: i64,
+    msg: *const u8,
+    msg_len: i64,
+    out: *mut u8,
+) {
+    if res.is_null() {
+        let message = if !msg.is_null() && msg_len > 0 {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+        } else {
+            "called `Result::expect_err()` on an `Ok` value"
+        };
+        panic!("{}", message);
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag != 1 {
+        let message = if !msg.is_null() && msg_len > 0 {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+        } else {
+            "called `Result::expect_err()` on an `Ok` value"
+        };
+        panic!("{}", message);
+    }
+
+    let payload_offset = if err_size > 4 { 8 } else { 4 };
+    let payload_ptr = res.add(payload_offset as usize);
+
+    if !out.is_null() {
+        std::ptr::copy_nonoverlapping(payload_ptr, out, err_size as usize);
+    }
+}
+
+/// Unwrap a Result or return a default value.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result struct
+/// * `ok_size` - Size of the Ok payload in bytes
+/// * `default_val` - Pointer to the default value
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// `res` must be a valid pointer to a Result<T, E> struct.
+/// `default_val` must be valid for `ok_size` bytes.
+/// `out` must be valid for at least `ok_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn result_unwrap_or(
+    res: *const u8,
+    ok_size: i64,
+    default_val: *const u8,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if res.is_null() {
+        // Use default
+        if !default_val.is_null() {
+            std::ptr::copy_nonoverlapping(default_val, out, ok_size as usize);
+        }
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 0 {
+        // Ok - copy the value
+        let payload_offset = if ok_size > 4 { 8 } else { 4 };
+        let payload_ptr = res.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+    } else {
+        // Err - use default
+        if !default_val.is_null() {
+            std::ptr::copy_nonoverlapping(default_val, out, ok_size as usize);
+        }
+    }
+}
+
+/// Result<T, E>.and(self, other: Result<U, E>) -> Result<U, E>
+/// Returns other if self is Ok, otherwise returns the Err value of self.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result<T, E> struct
+/// * `other` - Pointer to the Result<U, E> struct
+/// * `other_size` - Size of Result<U, E> in bytes
+/// * `err_size` - Size of E in bytes
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn result_and(
+    res: *const u8,
+    other: *const u8,
+    other_size: i64,
+    err_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if res.is_null() {
+        // Treat null as Err
+        *(out as *mut i32) = 1;
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 0 {
+        // Ok -> return other
+        if !other.is_null() {
+            std::ptr::copy_nonoverlapping(other, out, other_size as usize);
+        } else {
+            *(out as *mut i32) = 1; // treat null other as Err
+        }
+    } else {
+        // Err -> return Err from self
+        *(out as *mut i32) = 1;
+        let payload_offset = if err_size > 4 { 8 } else { 4 };
+        let src_payload = res.add(payload_offset as usize);
+        let dst_payload = out.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, err_size as usize);
+    }
+}
+
+/// Result<T, E>.or(self, other: Result<T, F>) -> Result<T, F>
+/// Returns self if it is Ok, otherwise returns other.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result<T, E> struct
+/// * `other` - Pointer to the Result<T, F> struct
+/// * `ok_size` - Size of T in bytes
+/// * `other_size` - Size of Result<T, F> in bytes
+/// * `out` - Output buffer for the result
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn result_or(
+    res: *const u8,
+    other: *const u8,
+    ok_size: i64,
+    other_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if res.is_null() {
+        // Treat null as Err -> return other
+        if !other.is_null() {
+            std::ptr::copy_nonoverlapping(other, out, other_size as usize);
+        } else {
+            *(out as *mut i32) = 1;
+        }
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 0 {
+        // Ok -> return self (as Result<T, F>)
+        *(out as *mut i32) = 0;
+        let payload_offset = if ok_size > 4 { 8 } else { 4 };
+        let src_payload = res.add(payload_offset as usize);
+        let dst_payload = out.add(payload_offset as usize);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, ok_size as usize);
+    } else {
+        // Err -> return other
+        if !other.is_null() {
+            std::ptr::copy_nonoverlapping(other, out, other_size as usize);
+        } else {
+            *(out as *mut i32) = 1;
+        }
+    }
+}
+
+/// Result<T, E>.as_ref(&self) -> Result<&T, &E>
+/// Converts &Result<T, E> to Result<&T, &E>.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result<T, E> struct
+/// * `ok_size` - Size of T in bytes
+/// * `err_size` - Size of E in bytes
+/// * `out` - Output buffer for Result<&T, &E> (tag + pointer)
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn result_as_ref(
+    res: *const u8,
+    ok_size: i64,
+    err_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if res.is_null() {
+        // Treat as Err with null pointer
+        *(out as *mut i32) = 1;
+        *(out.add(8) as *mut *const u8) = std::ptr::null();
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 0 {
+        // Ok(val) -> Ok(&val)
+        *(out as *mut i32) = 0;
+        let payload_offset = if ok_size > 4 { 8 } else { 4 };
+        let payload_ptr = res.add(payload_offset as usize);
+        *(out.add(8) as *mut *const u8) = payload_ptr;
+    } else {
+        // Err(e) -> Err(&e)
+        *(out as *mut i32) = 1;
+        let payload_offset = if err_size > 4 { 8 } else { 4 };
+        let payload_ptr = res.add(payload_offset as usize);
+        *(out.add(8) as *mut *const u8) = payload_ptr;
+    }
+}
+
+/// Result<T, E>.as_mut(&mut self) -> Result<&mut T, &mut E>
+/// Converts &mut Result<T, E> to Result<&mut T, &mut E>.
+///
+/// # Arguments
+/// * `res` - Pointer to the Result<T, E> struct
+/// * `ok_size` - Size of T in bytes
+/// * `err_size` - Size of E in bytes
+/// * `out` - Output buffer for Result<&mut T, &mut E> (tag + pointer)
+///
+/// # Safety
+/// All pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn result_as_mut(
+    res: *mut u8,
+    ok_size: i64,
+    err_size: i64,
+    out: *mut u8,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    if res.is_null() {
+        // Treat as Err with null pointer
+        *(out as *mut i32) = 1;
+        *(out.add(8) as *mut *mut u8) = std::ptr::null_mut();
+        return;
+    }
+
+    let tag = *(res as *const i32);
+
+    if tag == 0 {
+        // Ok(val) -> Ok(&mut val)
+        *(out as *mut i32) = 0;
+        let payload_offset = if ok_size > 4 { 8 } else { 4 };
+        let payload_ptr = res.add(payload_offset as usize);
+        *(out.add(8) as *mut *mut u8) = payload_ptr;
+    } else {
+        // Err(e) -> Err(&mut e)
+        *(out as *mut i32) = 1;
+        let payload_offset = if err_size > 4 { 8 } else { 4 };
+        let payload_ptr = res.add(payload_offset as usize);
+        *(out.add(8) as *mut *mut u8) = payload_ptr;
+    }
 }
 
 // ============================================================================
