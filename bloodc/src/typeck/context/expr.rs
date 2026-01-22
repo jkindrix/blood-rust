@@ -5002,6 +5002,24 @@ impl<'a> TypeContext<'a> {
                 match operand_expr.ty.kind() {
                     TypeKind::Ref { inner, .. } => inner.clone(),
                     TypeKind::Ptr { inner, .. } => inner.clone(),
+                    // Box<T> can be dereferenced to T
+                    TypeKind::Adt { def_id, args, .. } => {
+                        if let Some(info) = self.resolver.def_info.get(def_id) {
+                            if info.name == "Box" && args.len() == 1 {
+                                args[0].clone()
+                            } else {
+                                return Err(TypeError::new(
+                                    TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
+                                    span,
+                                ));
+                            }
+                        } else {
+                            return Err(TypeError::new(
+                                TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
+                                span,
+                            ));
+                        }
+                    }
                     _ => {
                         return Err(TypeError::new(
                             TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
