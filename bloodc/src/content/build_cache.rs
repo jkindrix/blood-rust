@@ -492,7 +492,7 @@ fn hash_item_kind(
     match kind {
         hir::ItemKind::Fn(fn_def) => {
             hasher.update_u8(0x01);
-            hash_fn_sig(&fn_def.sig, hasher);
+            hash_fn_sig(&fn_def.sig, items, hasher);
             hash_generics(&fn_def.generics, hasher);
             if let Some(body_id) = fn_def.body_id {
                 if let Some(body) = bodies.get(&body_id) {
@@ -503,7 +503,7 @@ fn hash_item_kind(
         hir::ItemKind::Struct(struct_def) => {
             hasher.update_u8(0x02);
             hash_generics(&struct_def.generics, hasher);
-            hash_struct_kind(&struct_def.kind, hasher);
+            hash_struct_kind(&struct_def.kind, items, hasher);
         }
         hir::ItemKind::Enum(enum_def) => {
             hasher.update_u8(0x03);
@@ -511,48 +511,53 @@ fn hash_item_kind(
             hasher.update_u32(enum_def.variants.len() as u32);
             for variant in &enum_def.variants {
                 hasher.update_str(&variant.name);
-                hash_struct_kind(&variant.fields, hasher);
+                hash_struct_kind(&variant.fields, items, hasher);
             }
         }
         hir::ItemKind::TypeAlias { generics, ty } => {
             hasher.update_u8(0x04);
             hash_generics(generics, hasher);
-            hash_type(ty, hasher);
+            hash_type(ty, items, hasher);
         }
         hir::ItemKind::Const { ty, body_id } => {
             hasher.update_u8(0x05);
-            hash_type(ty, hasher);
+            hash_type(ty, items, hasher);
             if let Some(body) = bodies.get(body_id) {
                 hash_body(body, items, hasher);
             }
         }
         hir::ItemKind::Static { ty, mutable, body_id } => {
             hasher.update_u8(0x06);
-            hash_type(ty, hasher);
+            hash_type(ty, items, hasher);
             hasher.update_u8(if *mutable { 1 } else { 0 });
             if let Some(body) = bodies.get(body_id) {
                 hash_body(body, items, hasher);
             }
         }
-        hir::ItemKind::Trait { generics, items } => {
+        hir::ItemKind::Trait { generics, items: trait_items } => {
             hasher.update_u8(0x07);
             hash_generics(generics, hasher);
-            hasher.update_u32(items.len() as u32);
-            for item in items {
+            hasher.update_u32(trait_items.len() as u32);
+            for item in trait_items {
                 hasher.update_str(&item.name);
             }
         }
-        hir::ItemKind::Impl { generics, trait_ref, self_ty, items } => {
+        hir::ItemKind::Impl { generics, trait_ref, self_ty, items: impl_items } => {
             hasher.update_u8(0x08);
             hash_generics(generics, hasher);
             if let Some(tr) = trait_ref {
                 hasher.update_u8(1);
-                hasher.update_u32(tr.def_id.index);
+                // Hash trait name instead of index
+                if let Some(item) = items.get(&tr.def_id) {
+                    hasher.update_str(&item.name);
+                } else {
+                    hasher.update_u32(tr.def_id.index);
+                }
             } else {
                 hasher.update_u8(0);
             }
-            hash_type(self_ty, hasher);
-            hasher.update_u32(items.len() as u32);
+            hash_type(self_ty, items, hasher);
+            hasher.update_u32(impl_items.len() as u32);
         }
         hir::ItemKind::Effect { generics, operations } => {
             hasher.update_u8(0x09);
@@ -561,9 +566,9 @@ fn hash_item_kind(
             for op in operations {
                 hasher.update_str(&op.name);
                 for input in &op.inputs {
-                    hash_type(input, hasher);
+                    hash_type(input, items, hasher);
                 }
-                hash_type(&op.output, hasher);
+                hash_type(&op.output, items, hasher);
             }
         }
         hir::ItemKind::Handler { generics, kind, effect, state, operations, return_clause } => {
@@ -574,14 +579,14 @@ fn hash_item_kind(
                 hir::HandlerKind::Deep => 0,
                 hir::HandlerKind::Shallow => 1,
             });
-            hash_type(effect, hasher);
+            hash_type(effect, items, hasher);
             hasher.update_u32(state.len() as u32);
             hasher.update_u32(operations.len() as u32);
             hasher.update_u8(if return_clause.is_some() { 1 } else { 0 });
         }
         hir::ItemKind::ExternFn(extern_fn) => {
             hasher.update_u8(0x0B);
-            hash_fn_sig(&extern_fn.sig, hasher);
+            hash_fn_sig(&extern_fn.sig, items, hasher);
             hasher.update_str(&extern_fn.abi);
             if let Some(ref link_name) = extern_fn.link_name {
                 hasher.update_u8(1);
@@ -601,7 +606,7 @@ fn hash_item_kind(
             hasher.update_u32(bridge.extern_fns.len() as u32);
             for func in &bridge.extern_fns {
                 hasher.update_str(&func.name);
-                hash_fn_sig(&func.sig, hasher);
+                hash_fn_sig(&func.sig, items, hasher);
             }
             hasher.update_u32(bridge.opaque_types.len() as u32);
             hasher.update_u32(bridge.type_aliases.len() as u32);
@@ -615,7 +620,12 @@ fn hash_item_kind(
             hasher.update_u8(0x0D);
             hasher.update_u32(module_def.items.len() as u32);
             for item_def_id in &module_def.items {
-                hasher.update_u32(item_def_id.index);
+                // Hash module item names instead of indices
+                if let Some(item) = items.get(item_def_id) {
+                    hasher.update_str(&item.name);
+                } else {
+                    hasher.update_u32(item_def_id.index);
+                }
             }
             hasher.update_u8(if module_def.is_external { 1 } else { 0 });
         }
@@ -623,12 +633,12 @@ fn hash_item_kind(
 }
 
 /// Hash a function signature.
-fn hash_fn_sig(sig: &hir::FnSig, hasher: &mut ContentHasher) {
+fn hash_fn_sig(sig: &hir::FnSig, items: &HashMap<DefId, hir::Item>, hasher: &mut ContentHasher) {
     hasher.update_u32(sig.inputs.len() as u32);
     for input in &sig.inputs {
-        hash_type(input, hasher);
+        hash_type(input, items, hasher);
     }
-    hash_type(&sig.output, hasher);
+    hash_type(&sig.output, items, hasher);
     hasher.update_u8(if sig.is_const { 1 } else { 0 });
     hasher.update_u8(if sig.is_async { 1 } else { 0 });
     hasher.update_u8(if sig.is_unsafe { 1 } else { 0 });
@@ -643,7 +653,7 @@ fn hash_generics(generics: &hir::Generics, hasher: &mut ContentHasher) {
 }
 
 /// Hash a struct kind.
-fn hash_struct_kind(kind: &hir::StructKind, hasher: &mut ContentHasher) {
+fn hash_struct_kind(kind: &hir::StructKind, items: &HashMap<DefId, hir::Item>, hasher: &mut ContentHasher) {
     match kind {
         hir::StructKind::Record(fields) => {
             hasher.update_u8(0);
@@ -652,14 +662,14 @@ fn hash_struct_kind(kind: &hir::StructKind, hasher: &mut ContentHasher) {
                 if let Some(name) = &field.name {
                     hasher.update_str(name);
                 }
-                hash_type(&field.ty, hasher);
+                hash_type(&field.ty, items, hasher);
             }
         }
         hir::StructKind::Tuple(fields) => {
             hasher.update_u8(1);
             hasher.update_u32(fields.len() as u32);
             for field in fields {
-                hash_type(&field.ty, hasher);
+                hash_type(&field.ty, items, hasher);
             }
         }
         hir::StructKind::Unit => {
@@ -669,7 +679,10 @@ fn hash_struct_kind(kind: &hir::StructKind, hasher: &mut ContentHasher) {
 }
 
 /// Hash a type.
-fn hash_type(ty: &hir::Type, hasher: &mut ContentHasher) {
+///
+/// Uses item names instead of DefId indices to prevent cache contamination
+/// when different files have types at the same DefId index.
+fn hash_type(ty: &hir::Type, items: &HashMap<DefId, hir::Item>, hasher: &mut ContentHasher) {
     match ty.kind() {
         hir::TypeKind::Primitive(p) => {
             hasher.update_u8(0x01);
@@ -677,54 +690,86 @@ fn hash_type(ty: &hir::Type, hasher: &mut ContentHasher) {
         }
         hir::TypeKind::Adt { def_id, args } => {
             hasher.update_u8(0x02);
-            hasher.update_u32(def_id.index);
+            // Hash type name instead of index to prevent cache contamination
+            if let Some(item) = items.get(def_id) {
+                hasher.update_str(&item.name);
+            } else {
+                // Fallback to index for types not in items map (shouldn't happen normally)
+                hasher.update_u32(def_id.index);
+            }
             hasher.update_u32(args.len() as u32);
             for arg in args {
-                hash_type(arg, hasher);
+                hash_type(arg, items, hasher);
             }
         }
         hir::TypeKind::Tuple(elems) => {
             hasher.update_u8(0x03);
             hasher.update_u32(elems.len() as u32);
             for elem in elems {
-                hash_type(elem, hasher);
+                hash_type(elem, items, hasher);
             }
         }
         hir::TypeKind::Array { element, size } => {
             hasher.update_u8(0x04);
-            hash_type(element, hasher);
-            hasher.update_u64(*size);
+            hash_type(element, items, hasher);
+            // Hash the const value - use u64 representation for concrete values
+            match size {
+                hir::ConstValue::Int(v) => {
+                    hasher.update_u8(0x00);
+                    hasher.update_u64(*v as u64);
+                }
+                hir::ConstValue::Uint(v) => {
+                    hasher.update_u8(0x01);
+                    hasher.update_u64(*v as u64);
+                }
+                hir::ConstValue::Bool(v) => {
+                    hasher.update_u8(0x02);
+                    hasher.update_u8(if *v { 1 } else { 0 });
+                }
+                hir::ConstValue::Param(id) => {
+                    hasher.update_u8(0x03);
+                    hasher.update_u32(id.0);
+                }
+                hir::ConstValue::Error => {
+                    hasher.update_u8(0xFF);
+                }
+            }
         }
         hir::TypeKind::Slice { element } => {
             hasher.update_u8(0x05);
-            hash_type(element, hasher);
+            hash_type(element, items, hasher);
         }
         hir::TypeKind::Ref { inner, mutable } => {
             hasher.update_u8(0x06);
             hasher.update_u8(if *mutable { 1 } else { 0 });
-            hash_type(inner, hasher);
+            hash_type(inner, items, hasher);
         }
         hir::TypeKind::Ptr { inner, mutable } => {
             hasher.update_u8(0x16);
             hasher.update_u8(if *mutable { 1 } else { 0 });
-            hash_type(inner, hasher);
+            hash_type(inner, items, hasher);
         }
         hir::TypeKind::Fn { params, ret, .. } => {
             hasher.update_u8(0x07);
             hasher.update_u32(params.len() as u32);
             for param in params {
-                hash_type(param, hasher);
+                hash_type(param, items, hasher);
             }
-            hash_type(ret, hasher);
+            hash_type(ret, items, hasher);
         }
         hir::TypeKind::Closure { def_id, params, ret } => {
             hasher.update_u8(0x17); // Distinct from Fn
-            hasher.update_u32(def_id.index);
+            // Hash closure name if available
+            if let Some(item) = items.get(def_id) {
+                hasher.update_str(&item.name);
+            } else {
+                hasher.update_u32(def_id.index);
+            }
             hasher.update_u32(params.len() as u32);
             for param in params {
-                hash_type(param, hasher);
+                hash_type(param, items, hasher);
             }
-            hash_type(ret, hasher);
+            hash_type(ret, items, hasher);
         }
         hir::TypeKind::Infer(id) => {
             hasher.update_u8(0x08);
@@ -743,14 +788,23 @@ fn hash_type(ty: &hir::Type, hasher: &mut ContentHasher) {
         hir::TypeKind::Range { element, inclusive } => {
             hasher.update_u8(0x0A); // Range type
             hasher.update_u8(if *inclusive { 1 } else { 0 });
-            hash_type(element, hasher);
+            hash_type(element, items, hasher);
         }
         hir::TypeKind::DynTrait { trait_id, auto_traits } => {
             hasher.update_u8(0x0B); // DynTrait type
-            hasher.update_u32(trait_id.index);
+            // Hash trait name instead of index
+            if let Some(item) = items.get(trait_id) {
+                hasher.update_str(&item.name);
+            } else {
+                hasher.update_u32(trait_id.index);
+            }
             hasher.update_u32(auto_traits.len() as u32);
             for auto_trait in auto_traits {
-                hasher.update_u32(auto_trait.index);
+                if let Some(item) = items.get(auto_trait) {
+                    hasher.update_str(&item.name);
+                } else {
+                    hasher.update_u32(auto_trait.index);
+                }
             }
         }
         hir::TypeKind::Record { fields, row_var } => {
@@ -760,7 +814,7 @@ fn hash_type(ty: &hir::Type, hasher: &mut ContentHasher) {
                 // Hash field name (Symbol) - use its raw u32 representation
                 let sym_raw: u32 = unsafe { std::mem::transmute(field.name) };
                 hasher.update_u32(sym_raw);
-                hash_type(&field.ty, hasher);
+                hash_type(&field.ty, items, hasher);
             }
             // Hash row variable if present
             hasher.update_u8(if row_var.is_some() { 1 } else { 0 });
@@ -774,7 +828,7 @@ fn hash_type(ty: &hir::Type, hasher: &mut ContentHasher) {
             for param in params {
                 hasher.update_u32(param.0);
             }
-            hash_type(body, hasher);
+            hash_type(body, items, hasher);
         }
         hir::TypeKind::Ownership { qualifier, inner } => {
             hasher.update_u8(0x0E); // Ownership type
@@ -783,7 +837,7 @@ fn hash_type(ty: &hir::Type, hasher: &mut ContentHasher) {
                 hir::ty::OwnershipQualifier::Linear => 0,
                 hir::ty::OwnershipQualifier::Affine => 1,
             });
-            hash_type(inner, hasher);
+            hash_type(inner, items, hasher);
         }
     }
 }
@@ -837,7 +891,7 @@ fn hash_body(body: &hir::Body, items: &HashMap<DefId, hir::Item>, hasher: &mut C
         if let Some(name) = &local.name {
             hasher.update_str(name);
         }
-        hash_type(&local.ty, hasher);
+        hash_type(&local.ty, items, hasher);
         hasher.update_u8(if local.mutable { 1 } else { 0 });
     }
 
@@ -936,7 +990,7 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
             hash_expr(scrutinee, items, hasher);
             hasher.update_u32(arms.len() as u32);
             for arm in arms {
-                hash_pattern(&arm.pattern, hasher);
+                hash_pattern(&arm.pattern, items, hasher);
                 if let Some(guard) = &arm.guard {
                     hasher.update_u8(1);
                     hash_expr(guard, items, hasher);
@@ -1038,7 +1092,7 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
         hir::ExprKind::Cast { expr, target_ty } => {
             hasher.update_u8(0x18);
             hash_expr(expr, items, hasher);
-            hash_type(target_ty, hasher);
+            hash_type(target_ty, items, hasher);
         }
         hir::ExprKind::Closure { body_id, captures } => {
             hasher.update_u8(0x19);
@@ -1061,7 +1115,7 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
         }
         hir::ExprKind::Let { pattern, init } => {
             hasher.update_u8(0x1D);
-            hash_pattern(pattern, hasher);
+            hash_pattern(pattern, items, hasher);
             hash_expr(init, items, hasher);
         }
         hir::ExprKind::Unsafe(inner) => {
@@ -1201,6 +1255,10 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
             hasher.update_u8(0x2B);
             hash_expr(inner, items, hasher);
         }
+        hir::ExprKind::VecLen(inner) => {
+            hasher.update_u8(0x2D);
+            hash_expr(inner, items, hasher);
+        }
         hir::ExprKind::ArrayToSlice { expr, array_len } => {
             hasher.update_u8(0x2C);
             hash_expr(expr, items, hasher);
@@ -1277,7 +1335,9 @@ fn hash_stmt(stmt: &hir::Stmt, items: &HashMap<DefId, hir::Item>, hasher: &mut C
 }
 
 /// Hash a pattern.
-fn hash_pattern(pattern: &hir::Pattern, hasher: &mut ContentHasher) {
+///
+/// Uses item names instead of DefId indices to prevent cache contamination.
+fn hash_pattern(pattern: &hir::Pattern, items: &HashMap<DefId, hir::Item>, hasher: &mut ContentHasher) {
     match &pattern.kind {
         hir::PatternKind::Wildcard => {
             hasher.update_u8(0x01);
@@ -1288,7 +1348,7 @@ fn hash_pattern(pattern: &hir::Pattern, hasher: &mut ContentHasher) {
             hasher.update_u8(if *mutable { 1 } else { 0 });
             if let Some(sub) = subpattern {
                 hasher.update_u8(1);
-                hash_pattern(sub, hasher);
+                hash_pattern(sub, items, hasher);
             } else {
                 hasher.update_u8(0);
             }
@@ -1301,67 +1361,77 @@ fn hash_pattern(pattern: &hir::Pattern, hasher: &mut ContentHasher) {
             hasher.update_u8(0x04);
             hasher.update_u32(pats.len() as u32);
             for pat in pats {
-                hash_pattern(pat, hasher);
+                hash_pattern(pat, items, hasher);
             }
         }
         hir::PatternKind::Struct { def_id, fields } => {
             hasher.update_u8(0x05);
-            hasher.update_u32(def_id.index);
+            // Hash struct name instead of index
+            if let Some(item) = items.get(def_id) {
+                hasher.update_str(&item.name);
+            } else {
+                hasher.update_u32(def_id.index);
+            }
             hasher.update_u32(fields.len() as u32);
             for field in fields {
                 hasher.update_u32(field.field_idx);
-                hash_pattern(&field.pattern, hasher);
+                hash_pattern(&field.pattern, items, hasher);
             }
         }
         hir::PatternKind::Variant { def_id, variant_idx, fields } => {
             hasher.update_u8(0x06);
-            hasher.update_u32(def_id.index);
+            // Hash enum name instead of index
+            if let Some(item) = items.get(def_id) {
+                hasher.update_str(&item.name);
+            } else {
+                hasher.update_u32(def_id.index);
+            }
             hasher.update_u32(*variant_idx);
             hasher.update_u32(fields.len() as u32);
             for field in fields {
-                hash_pattern(field, hasher);
+                hash_pattern(field, items, hasher);
             }
         }
         hir::PatternKind::Or(pats) => {
             hasher.update_u8(0x07);
             hasher.update_u32(pats.len() as u32);
             for pat in pats {
-                hash_pattern(pat, hasher);
+                hash_pattern(pat, items, hasher);
             }
         }
         hir::PatternKind::Slice { prefix, slice, suffix } => {
             hasher.update_u8(0x08);
             hasher.update_u32(prefix.len() as u32);
             for pat in prefix {
-                hash_pattern(pat, hasher);
+                hash_pattern(pat, items, hasher);
             }
             if let Some(s) = slice {
                 hasher.update_u8(1);
-                hash_pattern(s, hasher);
+                hash_pattern(s, items, hasher);
             } else {
                 hasher.update_u8(0);
             }
             hasher.update_u32(suffix.len() as u32);
             for pat in suffix {
-                hash_pattern(pat, hasher);
+                hash_pattern(pat, items, hasher);
             }
         }
         hir::PatternKind::Ref { mutable, inner } => {
             hasher.update_u8(0x09);
             hasher.update_u8(if *mutable { 1 } else { 0 });
-            hash_pattern(inner, hasher);
+            hash_pattern(inner, items, hasher);
         }
         hir::PatternKind::Range { start, end, inclusive } => {
             hasher.update_u8(0x0A);
             if let Some(s) = start {
                 hasher.update_u8(1);
-                hash_pattern(s, hasher);
+                hash_pattern(s, items, hasher);
             } else {
                 hasher.update_u8(0);
             }
             if let Some(e) = end {
                 hasher.update_u8(1);
-                hash_pattern(e, hasher);
+                hash_pattern(e, items, hasher);
             } else {
                 hasher.update_u8(0);
             }
@@ -1804,6 +1874,9 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
             extract_expr_deps(inner, deps);
         }
         hir::ExprKind::SliceLen(inner) => {
+            extract_expr_deps(inner, deps);
+        }
+        hir::ExprKind::VecLen(inner) => {
             extract_expr_deps(inner, deps);
         }
         hir::ExprKind::ArrayToSlice { expr, .. } => {
