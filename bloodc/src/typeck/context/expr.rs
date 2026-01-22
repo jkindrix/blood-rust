@@ -2660,6 +2660,7 @@ impl<'a> TypeContext<'a> {
 
         // Extract concrete type args from receiver to build substitution
         // Handle both direct ADT types (Vec<i32>) and references to them (&mut Vec<i32>)
+        // Also handle slice types ([T])
         if !impl_generics.is_empty() {
             // Get the underlying type (unwrap references if needed)
             let underlying_ty = match receiver_expr.ty.kind() {
@@ -2667,10 +2668,19 @@ impl<'a> TypeContext<'a> {
                 _ => &receiver_expr.ty,
             };
 
-            if let TypeKind::Adt { args: receiver_args, .. } = underlying_ty.kind() {
-                for (tyvar, concrete_ty) in impl_generics.iter().zip(receiver_args.iter()) {
-                    substitution.insert(*tyvar, concrete_ty.clone());
+            match underlying_ty.kind() {
+                TypeKind::Adt { args: receiver_args, .. } => {
+                    for (tyvar, concrete_ty) in impl_generics.iter().zip(receiver_args.iter()) {
+                        substitution.insert(*tyvar, concrete_ty.clone());
+                    }
                 }
+                TypeKind::Slice { element } => {
+                    // For slice types, the element type is the single type argument
+                    if let Some(&tyvar) = impl_generics.first() {
+                        substitution.insert(tyvar, (*element).clone());
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -3146,14 +3156,15 @@ impl<'a> TypeContext<'a> {
 
                     let first_param = sig.inputs.first().cloned();
 
-                    // For generic builtin types (Option<T>, Vec<T>, Box<T>, Result<T, E>),
+                    // For generic builtin types (Option<T>, Vec<T>, Box<T>, Result<T, E>, [T]),
                     // we need to return the impl_generics so that type arguments from the
                     // receiver type can be substituted into the method signature.
                     // TyVarId(9000) is used as placeholder for T, TyVarId(9001) for E.
                     let impl_generics = match &type_match {
                         BuiltinMethodType::Option
                         | BuiltinMethodType::Vec
-                        | BuiltinMethodType::Box => vec![TyVarId(9000)],
+                        | BuiltinMethodType::Box
+                        | BuiltinMethodType::Slice => vec![TyVarId(9000)],
                         BuiltinMethodType::Result => vec![TyVarId(9000), TyVarId(9001)],
                         _ => Vec::new(),
                     };
