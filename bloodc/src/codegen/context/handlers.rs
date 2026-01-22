@@ -987,7 +987,44 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .build_ptr_to_int(pv, i64_type, "ret_ptr_int")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
                     }
-                    _ => i64_type.const_zero(),
+                    BasicValueEnum::FloatValue(fv) => {
+                        // Convert float to i64 via bitcast for ABI compatibility
+                        // Check if this is a 64-bit float by comparing types
+                        let f64_type = self.context.f64_type();
+                        if fv.get_type() == f64_type {
+                            self.builder
+                                .build_bit_cast(fv, i64_type, "ret_float_cast")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                                .into_int_value()
+                        } else {
+                            // Extend f32 to f64, then bitcast to i64
+                            let extended = self.builder
+                                .build_float_ext(fv, f64_type, "ret_float_ext")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                            self.builder
+                                .build_bit_cast(extended, i64_type, "ret_float_cast")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                                .into_int_value()
+                        }
+                    }
+                    BasicValueEnum::ArrayValue(_) => {
+                        return Err(vec![Diagnostic::error(
+                            "Handler cannot return array type directly - use a pointer or wrapper struct".to_string(),
+                            span
+                        )]);
+                    }
+                    BasicValueEnum::StructValue(_) => {
+                        return Err(vec![Diagnostic::error(
+                            "Handler cannot return struct type directly - use a pointer or wrapper".to_string(),
+                            span
+                        )]);
+                    }
+                    BasicValueEnum::VectorValue(_) => {
+                        return Err(vec![Diagnostic::error(
+                            "Handler cannot return vector type directly - use a pointer or wrapper".to_string(),
+                            span
+                        )]);
+                    }
                 };
                 self.builder.build_return(Some(&ret_i64))
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
