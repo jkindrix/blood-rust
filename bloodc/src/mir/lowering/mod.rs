@@ -234,11 +234,456 @@ pub(super) struct LoopContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::Parser;
+    use crate::typeck::check_program;
 
     #[test]
     fn test_mir_lowering_new() {
         let hir = HirCrate::new();
         let lowering = MirLowering::new(&hir);
         assert!(lowering.bodies.is_empty());
+    }
+
+    /// Helper to parse, type-check, and lower to MIR.
+    fn source_to_mir(source: &str) -> Result<(HirCrate, HashMap<DefId, MirBody>), Vec<Diagnostic>> {
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().map_err(|e| {
+            e.into_iter().map(|err| {
+                Diagnostic::error(err.message, crate::span::Span::default())
+            }).collect::<Vec<_>>()
+        })?;
+
+        let interner = parser.take_interner();
+        let hir = check_program(&program, source, interner)?;
+
+        let mut lowering = MirLowering::new(&hir);
+        let (bodies, _inline_handlers) = lowering.lower_crate()?;
+
+        Ok((hir, bodies))
+    }
+
+    /// Helper to assert MIR lowering succeeds.
+    fn assert_lowers(source: &str) {
+        match source_to_mir(source) {
+            Ok(_) => {}
+            Err(errors) => {
+                panic!(
+                    "Expected MIR lowering to succeed, but got {} error(s):\n{}",
+                    errors.len(),
+                    errors.iter()
+                        .map(|e| format!("  - {}", e.message))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+        }
+    }
+
+    /// Helper to get MIR body for main function.
+    fn get_main_mir(source: &str) -> MirBody {
+        let (hir, bodies) = source_to_mir(source).expect("source_to_mir failed");
+        // Find main function
+        for (def_id, item) in &hir.items {
+            if matches!(item.kind, hir::ItemKind::Fn(_)) && item.name == "main" {
+                return bodies.get(def_id).cloned().expect("main body not found");
+            }
+        }
+        panic!("main function not found in HIR");
+    }
+
+    // ============================================================
+    // BASIC LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_empty_function() {
+        assert_lowers("fn main() {}");
+    }
+
+    #[test]
+    fn test_lower_return_literal() {
+        assert_lowers("fn main() -> i32 { 42 }");
+    }
+
+    #[test]
+    fn test_lower_let_binding() {
+        assert_lowers("fn main() { let x = 42; }");
+    }
+
+    #[test]
+    fn test_lower_arithmetic() {
+        assert_lowers("fn main() -> i32 { 1 + 2 * 3 - 4 / 2 }");
+    }
+
+    #[test]
+    fn test_lower_comparison() {
+        assert_lowers("fn main() -> bool { 1 < 2 }");
+    }
+
+    #[test]
+    fn test_lower_logical() {
+        assert_lowers("fn main() -> bool { true && false || !true }");
+    }
+
+    // ============================================================
+    // CONTROL FLOW LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_if_expression() {
+        assert_lowers("fn main() -> i32 { if true { 1 } else { 2 } }");
+    }
+
+    #[test]
+    fn test_lower_if_no_else() {
+        assert_lowers("fn main() { if true { let x = 1; } }");
+    }
+
+    #[test]
+    fn test_lower_nested_if() {
+        assert_lowers(r#"
+            fn main() -> i32 {
+                if true {
+                    if false { 1 } else { 2 }
+                } else {
+                    3
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_while_loop() {
+        assert_lowers(r#"
+            fn main() {
+                let mut x = 0;
+                while x < 10 {
+                    x = x + 1;
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_loop() {
+        assert_lowers(r#"
+            fn main() -> i32 {
+                let mut x = 0;
+                loop {
+                    x = x + 1;
+                    if x >= 10 { break x; }
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_loop_break() {
+        assert_lowers(r#"
+            fn main() {
+                loop { break; }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_loop_continue() {
+        assert_lowers(r#"
+            fn main() {
+                let mut x = 0;
+                loop {
+                    x = x + 1;
+                    if x < 5 { continue; }
+                    if x >= 10 { break; }
+                }
+            }
+        "#);
+    }
+
+    // ============================================================
+    // MATCH EXPRESSION LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_match_literal() {
+        assert_lowers(r#"
+            fn main() -> i32 {
+                let x = 1;
+                match x {
+                    0 => 0,
+                    1 => 1,
+                    _ => 2,
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_match_binding() {
+        assert_lowers(r#"
+            fn main() -> i32 {
+                let x = 42;
+                match x {
+                    n => n + 1,
+                }
+            }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_match_tuple() {
+        assert_lowers(r#"
+            fn main() -> i32 {
+                let t = (1, 2);
+                match t {
+                    (a, b) => a + b,
+                }
+            }
+        "#);
+    }
+
+    // ============================================================
+    // FUNCTION CALL LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_function_call() {
+        assert_lowers(r#"
+            fn add(a: i32, b: i32) -> i32 { a + b }
+            fn main() -> i32 { add(1, 2) }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_recursive_function() {
+        assert_lowers(r#"
+            fn factorial(n: i32) -> i32 {
+                if n <= 1 { 1 } else { n * factorial(n - 1) }
+            }
+            fn main() -> i32 { factorial(5) }
+        "#);
+    }
+
+    // ============================================================
+    // STRUCT LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_struct_construction() {
+        assert_lowers(r#"
+            struct Point { x: i32, y: i32 }
+            fn main() { let p = Point { x: 10, y: 20 }; }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_struct_field_access() {
+        assert_lowers(r#"
+            struct Point { x: i32, y: i32 }
+            fn main() -> i32 {
+                let p = Point { x: 10, y: 20 };
+                p.x + p.y
+            }
+        "#);
+    }
+
+    // ============================================================
+    // ENUM LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_enum_unit_variant() {
+        assert_lowers(r#"
+            enum Color { Red, Green, Blue }
+            fn main() { let c = Color::Red; }
+        "#);
+    }
+
+    #[test]
+    fn test_lower_enum_tuple_variant() {
+        assert_lowers(r#"
+            enum MyOption { Some(i32), None }
+            fn main() { let x = MyOption::Some(42); }
+        "#);
+    }
+
+    // ============================================================
+    // TUPLE LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_tuple_construction() {
+        assert_lowers("fn main() { let t = (1, 2, 3); }");
+    }
+
+    #[test]
+    fn test_lower_tuple_index() {
+        assert_lowers("fn main() -> i32 { let t = (1, 2, 3); t.0 + t.1 }");
+    }
+
+    // ============================================================
+    // ARRAY LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_array_literal() {
+        assert_lowers("fn main() { let arr = [1, 2, 3]; }");
+    }
+
+    #[test]
+    fn test_lower_array_repeat() {
+        assert_lowers("fn main() { let arr = [0; 10]; }");
+    }
+
+    #[test]
+    fn test_lower_array_index() {
+        assert_lowers("fn main() -> i32 { let arr = [1, 2, 3]; arr[0] }");
+    }
+
+    // ============================================================
+    // REFERENCE LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_reference() {
+        assert_lowers("fn main() { let x = 42; let r = &x; }");
+    }
+
+    #[test]
+    fn test_lower_mutable_reference() {
+        assert_lowers("fn main() { let mut x = 42; let r = &mut x; }");
+    }
+
+    #[test]
+    fn test_lower_dereference() {
+        assert_lowers(r#"
+            fn main() -> i32 {
+                let x = 42;
+                let r = &x;
+                *r
+            }
+        "#);
+    }
+
+    // ============================================================
+    // CLOSURE LOWERING TESTS
+    // ============================================================
+
+    #[test]
+    fn test_lower_closure_no_capture() {
+        assert_lowers("fn main() { let f = |x: i32| x + 1; }");
+    }
+
+    #[test]
+    fn test_lower_closure_with_capture() {
+        assert_lowers(r#"
+            fn main() {
+                let y = 10;
+                let f = |x| x + y;
+            }
+        "#);
+    }
+
+    // ============================================================
+    // MIR VERIFICATION TESTS
+    // ============================================================
+
+    #[test]
+    fn test_mir_has_return_block() {
+        let body = get_main_mir("fn main() {}");
+        // Check that there's at least one block with Return terminator
+        let has_return = body.basic_blocks.iter().any(|bb| {
+            bb.terminator.as_ref().map(|t| t.kind.is_return()).unwrap_or(false)
+        });
+        assert!(has_return, "MIR should have a Return terminator");
+    }
+
+    #[test]
+    fn test_mir_all_blocks_terminated() {
+        let body = get_main_mir("fn main() -> i32 { if true { 1 } else { 2 } }");
+        assert!(body.is_complete(), "All MIR blocks should be terminated");
+    }
+
+    #[test]
+    fn test_mir_has_locals() {
+        let body = get_main_mir("fn main() { let x = 42; let y = x + 1; }");
+        // Should have return place + temporaries + user variables
+        assert!(body.locals.len() >= 3, "MIR should have locals for variables");
+    }
+
+    #[test]
+    fn test_mir_if_creates_multiple_blocks() {
+        let body = get_main_mir("fn main() -> i32 { if true { 1 } else { 2 } }");
+        // if-else should create at least 3 blocks: entry, then, else (plus join)
+        assert!(body.basic_blocks.len() >= 3, "if-else should create multiple blocks");
+    }
+
+    #[test]
+    fn test_mir_loop_creates_cycle() {
+        let body = get_main_mir(r#"
+            fn main() {
+                let mut i = 0;
+                while i < 10 { i = i + 1; }
+            }
+        "#);
+        // A loop should have at least 3 blocks: before, body, after
+        assert!(body.basic_blocks.len() >= 3, "while loop should create multiple blocks");
+    }
+
+    #[test]
+    fn test_mir_entry_block_is_zero() {
+        let body = get_main_mir("fn main() {}");
+        // Entry block should always be bb0
+        assert_eq!(BasicBlockId::ENTRY.0, 0);
+        assert!(!body.basic_blocks.is_empty(), "Should have at least entry block");
+    }
+
+    #[test]
+    fn test_mir_return_place_is_local_zero() {
+        let body = get_main_mir("fn main() -> i32 { 42 }");
+        assert_eq!(body.return_place().index, 0);
+        assert_eq!(*body.return_type(), Type::i32());
+    }
+
+    #[test]
+    fn test_mir_params_follow_return_place() {
+        let (hir, bodies) = source_to_mir("fn foo(x: i32, y: i32) -> i32 { x + y } fn main() { foo(1, 2); }").unwrap();
+        // Find foo function
+        for (def_id, item) in &hir.items {
+            if matches!(item.kind, hir::ItemKind::Fn(_)) && item.name == "foo" {
+                let body = bodies.get(def_id).expect("foo body not found");
+                assert_eq!(body.param_count, 2);
+                // Params should be at indices 1 and 2
+                assert!(body.locals.len() >= 3); // return + 2 params
+                assert!(body.locals[1].is_param());
+                assert!(body.locals[2].is_param());
+                return;
+            }
+        }
+        panic!("foo function not found");
+    }
+
+    #[test]
+    fn test_mir_reachability() {
+        let body = get_main_mir("fn main() -> i32 { if true { 1 } else { 2 } }");
+        // Entry block should be reachable
+        assert!(body.is_reachable(BasicBlockId::ENTRY));
+        // Most blocks should be reachable in simple if-else without early returns
+        let reachable_count = body.block_ids()
+            .filter(|&bb_id| body.is_reachable(bb_id))
+            .count();
+        assert!(reachable_count >= 3, "At least 3 blocks should be reachable in if-else");
+    }
+
+    #[test]
+    fn test_mir_predecessors_consistency() {
+        let body = get_main_mir(r#"
+            fn main() -> i32 {
+                if true { 1 } else { 2 }
+            }
+        "#);
+        let preds = body.predecessors();
+        // Entry block should have no predecessors
+        assert!(preds.get(&BasicBlockId::ENTRY).map(|v| v.is_empty()).unwrap_or(true));
     }
 }
