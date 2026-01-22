@@ -45,10 +45,21 @@ impl<'a> TypeContext<'a> {
             let pending = std::mem::take(&mut self.pending_bodies);
             for (def_id, func, parent_module) in pending {
                 // If this function is inside a module, inject module items as bindings
-                if let Some(mod_id) = parent_module {
+                // in a NEW scope that will be popped after checking the body.
+                // This prevents module bindings from polluting the root scope permanently.
+                let injected_scope = if let Some(mod_id) = parent_module {
+                    self.resolver.push_scope(super::super::resolve::ScopeKind::Block, func.span);
                     self.inject_module_bindings(mod_id);
+                    true
+                } else {
+                    false
+                };
+                let result = self.check_function_body(def_id, &func);
+                // Pop the module bindings scope if we pushed one
+                if injected_scope {
+                    self.resolver.pop_scope();
                 }
-                if let Err(e) = self.check_function_body(def_id, &func) {
+                if let Err(e) = result {
                     // Attach source file info for errors in external modules
                     let e = if let Some(mod_id) = parent_module {
                         if let Some(mod_info) = self.module_defs.get(&mod_id) {
@@ -98,7 +109,7 @@ impl<'a> TypeContext<'a> {
                     let name = def_info.name.clone();
                     let kind = def_info.kind;
 
-                    // Add binding to root scope (current scope when checking top-level bodies)
+                    // Add binding to current scope (module bindings scope)
                     // Use insert to ensure module items shadow any parent module items
                     // with the same name (e.g., type alias Diagnostic in parent shadowed
                     // by struct Diagnostic in child module)
