@@ -534,7 +534,7 @@ impl Unifier {
                 Type::tuple(tys.iter().map(|t| self.resolve(t)).collect())
             }
             TypeKind::Array { element, size } => {
-                Type::array(self.resolve(element), *size)
+                Type::array_with_const(self.resolve(element), size.clone())
             }
             TypeKind::Slice { element } => Type::slice(self.resolve(element)),
             TypeKind::Ref { inner, mutable } => {
@@ -651,7 +651,7 @@ impl Unifier {
                 )
             }
             TypeKind::Array { element, size } => {
-                Type::array(self.substitute_forall_params(element, subst), *size)
+                Type::array_with_const(self.substitute_forall_params(element, subst), size.clone())
             }
             TypeKind::Slice { element } => {
                 Type::slice(self.substitute_forall_params(element, subst))

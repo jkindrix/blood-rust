@@ -106,7 +106,8 @@ fn is_exhaustive(
         TypeKind::Never => (true, vec![]),
         TypeKind::Array { element, size } => {
             // For fixed-size arrays, check if patterns cover all elements
-            check_array_exhaustiveness(patterns, element, *size)
+            let array_size = size.as_u64().unwrap_or(0);
+            check_array_exhaustiveness(patterns, element, array_size)
         }
         TypeKind::Ref { inner, .. } => {
             // Look through references to check exhaustiveness of the inner type

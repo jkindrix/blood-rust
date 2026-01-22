@@ -1072,7 +1072,7 @@ impl LivenessAnalysis {
                     Self::collect_operand_uses(op, uses);
                 }
             }
-            Rvalue::Discriminant(place) | Rvalue::Len(place) | Rvalue::ReadGeneration(place) => {
+            Rvalue::Discriminant(place) | Rvalue::Len(place) | Rvalue::VecLen(place) | Rvalue::ReadGeneration(place) => {
                 uses.insert(place.local);
             }
             Rvalue::NullCheck(op) => {

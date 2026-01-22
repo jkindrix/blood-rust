@@ -303,6 +303,9 @@ impl HandlerLintContext {
             ExprKind::SliceLen(inner) => {
                 self.check_handler_nesting(inner, depth);
             }
+            ExprKind::VecLen(inner) => {
+                self.check_handler_nesting(inner, depth);
+            }
             ExprKind::ArrayToSlice { expr, .. } => {
                 self.check_handler_nesting(expr, depth);
             }
@@ -542,14 +545,15 @@ impl PointerLintContext {
 
         match ty.kind() {
             TypeKind::Array { element, size } => {
-                if self.is_pointer_type(element) && *size > 4 {
+                let array_size = size.as_u64().unwrap_or(0);
+                if self.is_pointer_type(element) && array_size > 4 {
                     let type_str = format!("{}", ty);
                     if !self.warned_types.contains(&format!("ptr_array:{}", type_str)) {
                         self.warned_types.insert(format!("ptr_array:{}", type_str));
                         let warning = Diagnostic::warning(
                             format!(
                                 "array of {} pointers: uses {}x memory of 64-bit pointers",
-                                size,
+                                array_size,
                                 2
                             ),
                             span,

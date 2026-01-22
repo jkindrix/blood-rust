@@ -476,8 +476,13 @@ impl Type {
         Self::new(TypeKind::Ref { inner, mutable })
     }
 
-    /// Create an array type.
+    /// Create an array type with a concrete size.
     pub fn array(element: Type, size: u64) -> Self {
+        Self::new(TypeKind::Array { element, size: ConstValue::Uint(size as u128) })
+    }
+
+    /// Create an array type with a const value (may be a const param).
+    pub fn array_with_const(element: Type, size: ConstValue) -> Self {
         Self::new(TypeKind::Array { element, size })
     }
 
@@ -565,7 +570,9 @@ pub enum TypeKind {
     Tuple(Vec<Type>),
 
     /// An array type: `[T; N]`
-    Array { element: Type, size: u64 },
+    ///
+    /// The size can be a concrete value or a const generic parameter.
+    Array { element: Type, size: ConstValue },
 
     /// A slice type: `[T]`
     Slice { element: Type },

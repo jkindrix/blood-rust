@@ -231,30 +231,52 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
             hir::PatternKind::Variant { variant_idx, fields, .. } => {
                 // First check discriminant, then check field patterns
-                // For now, assume simple enum layout: discriminant + fields
-                // This is a simplified implementation - full enum support needs more work
-                let _struct_val = scrutinee.into_struct_value();
-
-                // Extract discriminant (assume first field)
-                let discriminant = self.builder
-                    .build_extract_value(_struct_val, 0, "discrim")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
-
+                // Handle both unit enums (just i32 discriminant) and payload enums (struct with discriminant + fields)
                 let expected = self.context.i32_type().const_int(*variant_idx as u64, false);
+
+                // Check if scrutinee is a struct (payload enum) or int (unit enum)
+                let (discriminant, struct_val_opt) = match scrutinee {
+                    BasicValueEnum::IntValue(iv) => {
+                        // Unit enum - the value IS the discriminant
+                        (*iv, None)
+                    }
+                    BasicValueEnum::StructValue(sv) => {
+                        // Payload enum - extract discriminant from first field
+                        let discrim = self.builder
+                            .build_extract_value(*sv, 0, "discrim")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .into_int_value();
+                        (discrim, Some(*sv))
+                    }
+                    _ => {
+                        return Err(vec![Diagnostic::error(
+                            format!("Expected enum value in variant pattern, found {:?}", scrutinee.get_type()),
+                            pattern.span,
+                        )]);
+                    }
+                };
+
                 let mut result = self.builder
-                    .build_int_compare(IntPredicate::EQ, discriminant.into_int_value(), expected, "variant.check")
+                    .build_int_compare(IntPredicate::EQ, discriminant, expected, "variant.check")
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
-                // Check field patterns (offset by 1 for discriminant)
-                for (i, field_pat) in fields.iter().enumerate() {
-                    let field_val = self.builder
-                        .build_extract_value(_struct_val, (i + 1) as u32, "field")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                // Check field patterns (offset by 1 for discriminant) - only for payload enums
+                if !fields.is_empty() {
+                    let struct_val = struct_val_opt.ok_or_else(|| vec![Diagnostic::error(
+                        "Cannot match on fields of unit enum variant",
+                        pattern.span,
+                    )])?;
 
-                    let sub_match = self.compile_pattern_test(field_pat, &field_val)?;
-                    result = self.builder
-                        .build_and(result, sub_match, "and")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    for (i, field_pat) in fields.iter().enumerate() {
+                        let field_val = self.builder
+                            .build_extract_value(struct_val, (i + 1) as u32, "field")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                        let sub_match = self.compile_pattern_test(field_pat, &field_val)?;
+                        result = self.builder
+                            .build_and(result, sub_match, "and")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    }
                 }
 
                 Ok(result)
@@ -271,7 +293,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 if let BasicValueEnum::ArrayValue(arr) = scrutinee {
                     // Get array size from the pattern's type
                     let array_size = match pattern.ty.kind() {
-                        hir::TypeKind::Array { size, .. } => *size,
+                        hir::TypeKind::Array { size, .. } => {
+                            size.as_u64().ok_or_else(|| vec![Diagnostic::error(
+                                "Array size must be concrete in pattern matching",
+                                pattern.span,
+                            )])?
+                        }
                         _ => {
                             return Err(vec![Diagnostic::error(
                                 "Expected array type for slice pattern",
@@ -457,13 +484,25 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 Ok(())
             }
             hir::PatternKind::Variant { fields, .. } => {
-                let struct_val = scrutinee.into_struct_value();
-                // Fields start at index 1 (after discriminant)
-                for (i, field_pat) in fields.iter().enumerate() {
-                    let field_val = self.builder
-                        .build_extract_value(struct_val, (i + 1) as u32, "field")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
-                    self.compile_pattern_bindings(field_pat, &field_val)?;
+                // For unit enums (no fields), there's nothing to bind
+                // For payload enums, extract fields from the struct (starting at index 1 after discriminant)
+                if !fields.is_empty() {
+                    match scrutinee {
+                        BasicValueEnum::StructValue(sv) => {
+                            for (i, field_pat) in fields.iter().enumerate() {
+                                let field_val = self.builder
+                                    .build_extract_value(*sv, (i + 1) as u32, "field")
+                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                                self.compile_pattern_bindings(field_pat, &field_val)?;
+                            }
+                        }
+                        _ => {
+                            return Err(vec![Diagnostic::error(
+                                "Cannot bind fields from unit enum variant",
+                                pattern.span,
+                            )]);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -481,7 +520,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 if let BasicValueEnum::ArrayValue(arr) = scrutinee {
                     // Get array size from the pattern's type
                     let array_size = match pattern.ty.kind() {
-                        hir::TypeKind::Array { size, .. } => *size,
+                        hir::TypeKind::Array { size, .. } => {
+                            size.as_u64().ok_or_else(|| vec![Diagnostic::error(
+                                "Array size must be concrete in pattern matching",
+                                pattern.span,
+                            )])?
+                        }
                         _ => {
                             return Err(vec![Diagnostic::error(
                                 "Expected array type for slice pattern",

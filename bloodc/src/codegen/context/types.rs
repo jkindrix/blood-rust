@@ -7,6 +7,7 @@ use inkwell::AddressSpace;
 
 use crate::hir::{Type, TypeKind, PrimitiveTy};
 use crate::hir::def::{IntTy, UintTy};
+use crate::ice;
 
 use super::CodegenContext;
 
@@ -27,7 +28,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
             TypeKind::Array { element, size } => {
                 let elem_type = self.lower_type(element);
-                elem_type.array_type(*size as u32).into()
+                // Get concrete size - should be monomorphized by this point
+                let concrete_size = size.as_u64().unwrap_or_else(|| {
+                    // If we hit a const param in codegen, something went wrong with monomorphization
+                    ice!("array size must be concrete in codegen"; "size" => size);
+                    0
+                });
+                elem_type.array_type(concrete_size as u32).into()
             }
             TypeKind::Slice { element } => {
                 // Slices are { ptr, len }
@@ -321,7 +328,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
             TypeKind::Array { element, size } => {
                 let substituted = self.substitute_type_params(element, args);
-                Type::array(substituted, *size)
+                Type::array_with_const(substituted, size.clone())
             }
             TypeKind::Slice { element } => {
                 let substituted = self.substitute_type_params(element, args);

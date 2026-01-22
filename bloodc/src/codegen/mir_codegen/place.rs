@@ -465,7 +465,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     let idx = if *from_end {
                         // For from_end, compute actual index as array_length - offset - 1
                         let array_len = match effective_array_ty.kind() {
-                            TypeKind::Array { size, .. } => size,
+                            TypeKind::Array { size, .. } => size.as_u64().ok_or_else(|| vec![Diagnostic::error(
+                                "Array size must be concrete for indexing from end",
+                                body.span,
+                            )])?,
                             _ => {
                                 return Err(vec![Diagnostic::error(
                                     format!("ConstantIndex from_end requires array type, got {:?}", current_ty),

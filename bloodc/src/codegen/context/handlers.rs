@@ -512,8 +512,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .build_int_to_ptr(arg_int, param_type.into_pointer_type(), "arg_ptr")
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
                         .into()
+                } else if param_type.is_struct_type() {
+                    // For struct types, the i64 is a pointer to the struct - convert and load
+                    let struct_ptr_type = param_type.into_struct_type().ptr_type(inkwell::AddressSpace::default());
+                    let struct_ptr = self.builder
+                        .build_int_to_ptr(arg_int, struct_ptr_type, "struct_arg_ptr")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                    self.builder
+                        .build_load(struct_ptr, "struct_arg_val")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                } else if param_type.is_array_type() {
+                    // For array types, the i64 is a pointer to the array - convert and load
+                    let array_ptr_type = param_type.into_array_type().ptr_type(inkwell::AddressSpace::default());
+                    let array_ptr = self.builder
+                        .build_int_to_ptr(arg_int, array_ptr_type, "array_arg_ptr")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                    self.builder
+                        .build_load(array_ptr, "array_arg_val")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+                } else if param_type.is_float_type() {
+                    // Float was bitcast to i64, convert back
+                    self.builder
+                        .build_bit_cast(arg_int, param_type, "float_arg")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
                 } else {
-                    // For other types (float, struct), use the raw i64
+                    // For other types, use the raw i64 (shouldn't normally happen)
                     arg_int.into()
                 };
 
@@ -904,7 +927,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .build_int_to_ptr(arg_int, local_type.into_pointer_type(), "arg_ptr")
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
                     .into()
+            } else if local_type.is_struct_type() {
+                // For struct types, the i64 is a pointer to the struct - convert and load
+                let struct_ptr_type = local_type.into_struct_type().ptr_type(inkwell::AddressSpace::default());
+                let struct_ptr = self.builder
+                    .build_int_to_ptr(arg_int, struct_ptr_type, "struct_arg_ptr")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.builder
+                    .build_load(struct_ptr, "struct_arg_val")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+            } else if local_type.is_array_type() {
+                // For array types, the i64 is a pointer to the array - convert and load
+                let array_ptr_type = local_type.into_array_type().ptr_type(inkwell::AddressSpace::default());
+                let array_ptr = self.builder
+                    .build_int_to_ptr(arg_int, array_ptr_type, "array_arg_ptr")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
+                self.builder
+                    .build_load(array_ptr, "array_arg_val")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
+            } else if local_type.is_float_type() {
+                // Float was bitcast to i64, convert back
+                self.builder
+                    .build_bit_cast(arg_int, local_type, "float_arg")
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?
             } else {
+                // For other types, use the raw i64 (shouldn't normally happen)
                 arg_int.into()
             };
 

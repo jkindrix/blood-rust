@@ -115,7 +115,7 @@ fn normalize_type_recursive(ty: &Type, tyvar_to_idx: &HashMap<TyVarId, u32>) -> 
         }
         TypeKind::Array { element, size } => {
             let normalized = normalize_type_recursive(element, tyvar_to_idx);
-            Type::array(normalized, *size)
+            Type::array_with_const(normalized, size.clone())
         }
         TypeKind::Slice { element } => {
             let normalized = normalize_type_recursive(element, tyvar_to_idx);
@@ -197,11 +197,41 @@ fn substitute_mir_types(mir: &MirBody, subst: &HashMap<TyVarId, Type>) -> MirBod
     result
 }
 
-/// Substitute type parameters in a type.
+/// Substitution context containing both type and const param mappings.
+struct SubstContext {
+    type_subst: HashMap<TyVarId, Type>,
+    const_subst: HashMap<hir::ConstParamId, hir::ConstValue>,
+}
+
+impl SubstContext {
+    fn new(type_subst: HashMap<TyVarId, Type>) -> Self {
+        Self {
+            type_subst,
+            const_subst: HashMap::new(),
+        }
+    }
+
+    fn substitute_const(&self, cv: &hir::ConstValue) -> hir::ConstValue {
+        match cv {
+            hir::ConstValue::Param(id) => {
+                self.const_subst.get(id).cloned().unwrap_or_else(|| cv.clone())
+            }
+            _ => cv.clone(),
+        }
+    }
+}
+
+/// Substitute type parameters in a type (legacy wrapper).
 fn substitute_type(ty: &Type, subst: &HashMap<TyVarId, Type>) -> Type {
+    let ctx = SubstContext::new(subst.clone());
+    substitute_type_with_ctx(ty, &ctx)
+}
+
+/// Substitute type parameters in a type with full context.
+fn substitute_type_with_ctx(ty: &Type, ctx: &SubstContext) -> Type {
     match ty.kind() {
         TypeKind::Param(id) => {
-            if let Some(concrete) = subst.get(id) {
+            if let Some(concrete) = ctx.type_subst.get(id) {
                 concrete.clone()
             } else {
                 ty.clone()
@@ -209,93 +239,119 @@ fn substitute_type(ty: &Type, subst: &HashMap<TyVarId, Type>) -> Type {
         }
         TypeKind::Tuple(fields) => {
             let subst_fields: Vec<Type> = fields.iter()
-                .map(|f| substitute_type(f, subst))
+                .map(|f| substitute_type_with_ctx(f, ctx))
                 .collect();
             Type::tuple(subst_fields)
         }
         TypeKind::Array { element, size } => {
-            Type::array(substitute_type(element, subst), *size)
+            let subst_elem = substitute_type_with_ctx(element, ctx);
+            let subst_size = ctx.substitute_const(size);
+            Type::array_with_const(subst_elem, subst_size)
         }
         TypeKind::Slice { element } => {
-            Type::slice(substitute_type(element, subst))
+            Type::slice(substitute_type_with_ctx(element, ctx))
         }
         TypeKind::Ref { inner, mutable } => {
-            Type::reference(substitute_type(inner, subst), *mutable)
+            Type::reference(substitute_type_with_ctx(inner, ctx), *mutable)
         }
         TypeKind::Ptr { inner, mutable } => {
             Type::new(TypeKind::Ptr {
-                inner: substitute_type(inner, subst),
+                inner: substitute_type_with_ctx(inner, ctx),
                 mutable: *mutable,
             })
         }
         TypeKind::Adt { def_id, args } => {
             let subst_args: Vec<Type> = args.iter()
-                .map(|a| substitute_type(a, subst))
+                .map(|a| substitute_type_with_ctx(a, ctx))
                 .collect();
             Type::adt(*def_id, subst_args)
         }
         TypeKind::Fn { params, ret, effects } => {
             let subst_params: Vec<Type> = params.iter()
-                .map(|p| substitute_type(p, subst))
+                .map(|p| substitute_type_with_ctx(p, ctx))
                 .collect();
             let subst_effects: Vec<hir::FnEffect> = effects.iter()
                 .map(|eff| hir::FnEffect {
                     def_id: eff.def_id,
                     type_args: eff.type_args.iter()
-                        .map(|ty| substitute_type(ty, subst))
+                        .map(|ty| substitute_type_with_ctx(ty, ctx))
                         .collect(),
                 })
                 .collect();
-            Type::function_with_effects(subst_params, substitute_type(ret, subst), subst_effects)
+            Type::function_with_effects(subst_params, substitute_type_with_ctx(ret, ctx), subst_effects)
         }
         _ => ty.clone(),
     }
+}
+
+/// Result of type inference containing both type and const param substitutions.
+struct InferResult {
+    type_subst: HashMap<TyVarId, Type>,
+    const_subst: HashMap<hir::ConstParamId, hir::ConstValue>,
 }
 
 /// Infer type arguments by unifying generic signature with concrete types.
 ///
 /// This matches the generic parameter types (which contain TypeKind::Param) with
 /// the concrete parameter types to determine what each type variable maps to.
+/// Also extracts const param mappings for const generics.
 fn infer_type_args(
     generic_params: &[Type],
     concrete_params: &[Type],
     generic_ret: &Type,
     concrete_ret: &Type,
 ) -> HashMap<TyVarId, Type> {
-    let mut subst: HashMap<TyVarId, Type> = HashMap::new();
+    let result = infer_type_and_const_args(generic_params, concrete_params, generic_ret, concrete_ret);
+    result.type_subst
+}
+
+/// Infer both type and const arguments.
+fn infer_type_and_const_args(
+    generic_params: &[Type],
+    concrete_params: &[Type],
+    generic_ret: &Type,
+    concrete_ret: &Type,
+) -> InferResult {
+    let mut type_subst: HashMap<TyVarId, Type> = HashMap::new();
+    let mut const_subst: HashMap<hir::ConstParamId, hir::ConstValue> = HashMap::new();
 
     // Unify parameters
     for (generic, concrete) in generic_params.iter().zip(concrete_params.iter()) {
-        unify_types(generic, concrete, &mut subst);
+        unify_types(generic, concrete, &mut type_subst, &mut const_subst);
     }
 
     // Unify return type
-    unify_types(generic_ret, concrete_ret, &mut subst);
+    unify_types(generic_ret, concrete_ret, &mut type_subst, &mut const_subst);
 
-    subst
+    InferResult { type_subst, const_subst }
 }
 
-/// Recursively unify a generic type with a concrete type, populating the substitution map.
-fn unify_types(generic: &Type, concrete: &Type, subst: &mut HashMap<TyVarId, Type>) {
+/// Recursively unify a generic type with a concrete type, populating the substitution maps.
+fn unify_types(
+    generic: &Type,
+    concrete: &Type,
+    type_subst: &mut HashMap<TyVarId, Type>,
+    const_subst: &mut HashMap<hir::ConstParamId, hir::ConstValue>,
+) {
     match generic.kind() {
         TypeKind::Param(id) => {
             // Found a type variable - record its concrete type
-            subst.entry(*id).or_insert_with(|| concrete.clone());
+            type_subst.entry(*id).or_insert_with(|| concrete.clone());
         }
         TypeKind::Fn { params: gen_params, ret: gen_ret, effects: gen_effects } => {
             // Recursively unify function types
             if let TypeKind::Fn { params: conc_params, ret: conc_ret, effects: conc_effects } = concrete.kind() {
                 for (gp, cp) in gen_params.iter().zip(conc_params.iter()) {
-                    unify_types(gp, cp, subst);
+                    unify_types(gp, cp, type_subst, const_subst);
                 }
-                unify_types(gen_ret, conc_ret, subst);
+                unify_types(gen_ret, conc_ret, type_subst, const_subst);
                 // Also unify effect type arguments
                 // Match effects by def_id and unify their type args
                 for gen_eff in gen_effects {
                     for conc_eff in conc_effects {
                         if gen_eff.def_id == conc_eff.def_id {
                             for (gen_arg, conc_arg) in gen_eff.type_args.iter().zip(conc_eff.type_args.iter()) {
-                                unify_types(gen_arg, conc_arg, subst);
+                                unify_types(gen_arg, conc_arg, type_subst, const_subst);
                             }
                         }
                     }
@@ -305,34 +361,38 @@ fn unify_types(generic: &Type, concrete: &Type, subst: &mut HashMap<TyVarId, Typ
         TypeKind::Tuple(gen_fields) => {
             if let TypeKind::Tuple(conc_fields) = concrete.kind() {
                 for (gf, cf) in gen_fields.iter().zip(conc_fields.iter()) {
-                    unify_types(gf, cf, subst);
+                    unify_types(gf, cf, type_subst, const_subst);
                 }
             }
         }
-        TypeKind::Array { element: gen_elem, .. } => {
-            if let TypeKind::Array { element: conc_elem, .. } = concrete.kind() {
-                unify_types(gen_elem, conc_elem, subst);
+        TypeKind::Array { element: gen_elem, size: gen_size } => {
+            if let TypeKind::Array { element: conc_elem, size: conc_size } = concrete.kind() {
+                unify_types(gen_elem, conc_elem, type_subst, const_subst);
+                // Extract const param mapping from array size
+                if let hir::ConstValue::Param(id) = gen_size {
+                    const_subst.entry(*id).or_insert_with(|| conc_size.clone());
+                }
             }
         }
         TypeKind::Slice { element: gen_elem } => {
             if let TypeKind::Slice { element: conc_elem } = concrete.kind() {
-                unify_types(gen_elem, conc_elem, subst);
+                unify_types(gen_elem, conc_elem, type_subst, const_subst);
             }
         }
         TypeKind::Ref { inner: gen_inner, .. } => {
             if let TypeKind::Ref { inner: conc_inner, .. } = concrete.kind() {
-                unify_types(gen_inner, conc_inner, subst);
+                unify_types(gen_inner, conc_inner, type_subst, const_subst);
             }
         }
         TypeKind::Ptr { inner: gen_inner, .. } => {
             if let TypeKind::Ptr { inner: conc_inner, .. } = concrete.kind() {
-                unify_types(gen_inner, conc_inner, subst);
+                unify_types(gen_inner, conc_inner, type_subst, const_subst);
             }
         }
         TypeKind::Adt { args: gen_args, .. } => {
             if let TypeKind::Adt { args: conc_args, .. } = concrete.kind() {
                 for (ga, ca) in gen_args.iter().zip(conc_args.iter()) {
-                    unify_types(ga, ca, subst);
+                    unify_types(ga, ca, type_subst, const_subst);
                 }
             }
         }
@@ -389,7 +449,7 @@ fn substitute_rvalue_types(rvalue: &mut crate::mir::types::Rvalue, subst: &HashM
                 substitute_operand_types(op, subst);
             }
         }
-        Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::ReadGeneration(_) => {}
+        Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::VecLen(_) | Rvalue::ReadGeneration(_) => {}
         Rvalue::Cast { operand, target_ty } => {
             substitute_operand_types(operand, subst);
             *target_ty = substitute_type(target_ty, subst);
@@ -2486,6 +2546,38 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // String layout starts the same as BloodStr, so we can use str_ptr_type for the pointer
         self.module.add_function("string_len_chars", str_len_chars_type, None);
 
+        // string_contains(s: {*i8, i64}*, pattern: {*i8, i64}*) -> i32
+        let string_contains_type = i32_type.fn_type(&[str_ptr_type.into(), str_ptr_type.into()], false);
+        self.module.add_function("string_contains", string_contains_type, None);
+
+        // string_starts_with(s: {*i8, i64}*, prefix: {*i8, i64}*) -> i32
+        let string_starts_with_type = i32_type.fn_type(&[str_ptr_type.into(), str_ptr_type.into()], false);
+        self.module.add_function("string_starts_with", string_starts_with_type, None);
+
+        // string_ends_with(s: {*i8, i64}*, suffix: {*i8, i64}*) -> i32
+        let string_ends_with_type = i32_type.fn_type(&[str_ptr_type.into(), str_ptr_type.into()], false);
+        self.module.add_function("string_ends_with", string_ends_with_type, None);
+
+        // string_find(s: {*i8, i64}*, pattern: {*i8, i64}*, out: *void) -> void
+        let string_find_type = void_type.fn_type(&[str_ptr_type.into(), str_ptr_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("string_find", string_find_type, None);
+
+        // string_rfind(s: {*i8, i64}*, pattern: {*i8, i64}*, out: *void) -> void
+        let string_rfind_type = void_type.fn_type(&[str_ptr_type.into(), str_ptr_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("string_rfind", string_rfind_type, None);
+
+        // string_trim(s: {*i8, i64}*) -> {*i8, i64}
+        let string_trim_type = str_slice_type.fn_type(&[str_ptr_type.into()], false);
+        self.module.add_function("string_trim", string_trim_type, None);
+
+        // string_trim_start(s: {*i8, i64}*) -> {*i8, i64}
+        let string_trim_start_type = str_slice_type.fn_type(&[str_ptr_type.into()], false);
+        self.module.add_function("string_trim_start", string_trim_start_type, None);
+
+        // string_trim_end(s: {*i8, i64}*) -> {*i8, i64}
+        let string_trim_end_type = str_slice_type.fn_type(&[str_ptr_type.into()], false);
+        self.module.add_function("string_trim_end", string_trim_end_type, None);
+
         // int_to_string(i32) -> {*i8, i64} - convert integer to string
         let int_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false);
         self.module.add_function("int_to_string", int_to_string_type, None);
@@ -3054,6 +3146,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let vec_clear_type = void_type.fn_type(&[i8_ptr_type.into()], false);
         self.module.add_function("vec_clear", vec_clear_type, None);
 
+        // vec_first(vec: *void, elem_size: i64, out: *void) -> void
+        // Returns Option<T> in out (None if empty)
+        let vec_first_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("vec_first", vec_first_type, None);
+
+        // vec_last(vec: *void, elem_size: i64, out: *void) -> void
+        // Returns Option<T> in out (None if empty)
+        let vec_last_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("vec_last", vec_last_type, None);
+
         // vec_free(vec: *void, elem_size: i64) -> void
         let vec_free_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
         self.module.add_function("vec_free", vec_free_type, None);
@@ -3076,6 +3178,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let box_free_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
         self.module.add_function("box_free", box_free_type, None);
 
+        // box_into_inner(boxed: *void, size: i64, out: *void) -> void
+        let box_into_inner_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("box_into_inner", box_into_inner_type, None);
+
+        // box_into_raw(boxed: *void) -> *void
+        let box_into_raw_type = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("box_into_raw", box_into_raw_type, None);
+
+        // box_from_raw(ptr: *void) -> *void
+        let box_from_raw_type = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("box_from_raw", box_from_raw_type, None);
+
+        // box_leak(boxed: *void) -> *void
+        let box_leak_type = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("box_leak", box_leak_type, None);
+
         // === Option<T> Runtime Functions ===
         // Option<T> is { tag: i32, payload: T } where tag=0 is None, tag=1 is Some
 
@@ -3096,6 +3214,78 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Returns tag (0=None, 1=Some). If Some, copies payload to out.
         let option_try_type = i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
         self.module.add_function("option_try", option_try_type, None);
+
+        // option_expect(opt: *void, payload_size: i64, msg: *i8, msg_len: i64, out: *void) -> void
+        // Unwrap with custom panic message
+        let option_expect_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_expect", option_expect_type, None);
+
+        // option_unwrap_or(opt: *void, payload_size: i64, default: *void, out: *void) -> void
+        // Unwrap or return default value
+        let option_unwrap_or_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_unwrap_or", option_unwrap_or_type, None);
+
+        // option_ok_or(opt: *void, t_size: i64, err: *void, e_size: i64, out: *void) -> void
+        // Convert Option<T> to Result<T, E>
+        let option_ok_or_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_ok_or", option_ok_or_type, None);
+
+        // option_and(opt: *void, other: *void, other_size: i64, out: *void) -> void
+        let option_and_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i8_ptr_type.into(),
+            i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_and", option_and_type, None);
+
+        // option_or(opt: *void, other: *void, option_size: i64, out: *void) -> void
+        let option_or_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i8_ptr_type.into(),
+            i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_or", option_or_type, None);
+
+        // option_xor(opt: *void, other: *void, option_size: i64, out: *void) -> void
+        let option_xor_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i8_ptr_type.into(),
+            i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_xor", option_xor_type, None);
+
+        // option_as_ref(opt: *void, payload_size: i64, out: *void) -> void
+        let option_as_ref_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_as_ref", option_as_ref_type, None);
+
+        // option_as_mut(opt: *void, payload_size: i64, out: *void) -> void
+        let option_as_mut_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_as_mut", option_as_mut_type, None);
+
+        // option_take(opt: *void, payload_size: i64, out: *void) -> void
+        let option_take_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_take", option_take_type, None);
+
+        // option_replace(opt: *void, value: *void, payload_size: i64, out: *void) -> void
+        let option_replace_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i8_ptr_type.into(),
+            i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("option_replace", option_replace_type, None);
 
         // === Result<T, E> Runtime Functions ===
         // Result<T, E> is { tag: i32, payload: union { T, E } }
@@ -3123,5 +3313,75 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Returns tag (0=Ok, 1=Err). If Ok, copies payload to out.
         let result_try_type = i32_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
         self.module.add_function("result_try", result_try_type, None);
+
+        // result_ok(res: *void, ok_size: i64, out: *void) -> void
+        // Converts Result<T, E> to Option<T>
+        let result_ok_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("result_ok", result_ok_type, None);
+
+        // result_err(res: *void, err_size: i64, out: *void) -> void
+        // Converts Result<T, E> to Option<E>
+        let result_err_type = void_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("result_err", result_err_type, None);
+
+        // result_expect(res: *void, ok_size: i64, msg: *i8, msg_len: i64, out: *void) -> void
+        // Unwrap with custom panic message
+        let result_expect_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_expect", result_expect_type, None);
+
+        // result_expect_err(res: *void, err_size: i64, msg: *i8, msg_len: i64, out: *void) -> void
+        // Unwrap error with custom panic message
+        let result_expect_err_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_expect_err", result_expect_err_type, None);
+
+        // result_unwrap_or(res: *void, ok_size: i64, default: *void, out: *void) -> void
+        // Unwrap or return default value
+        let result_unwrap_or_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i8_ptr_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_unwrap_or", result_unwrap_or_type, None);
+
+        // result_and(res: *void, other: *void, other_size: i64, err_size: i64, out: *void) -> void
+        // If Ok, returns other. If Err, returns the error from self.
+        let result_and_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i8_ptr_type.into(),
+            i64_type.into(), i64_type.into(),
+            i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_and", result_and_type, None);
+
+        // result_or(res: *void, other: *void, ok_size: i64, other_size: i64, out: *void) -> void
+        // If Ok, returns self. If Err, returns other.
+        let result_or_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i8_ptr_type.into(),
+            i64_type.into(), i64_type.into(),
+            i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_or", result_or_type, None);
+
+        // result_as_ref(res: *void, ok_size: i64, err_size: i64, out: *void) -> void
+        // Converts &Result<T, E> to Result<&T, &E>
+        let result_as_ref_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_as_ref", result_as_ref_type, None);
+
+        // result_as_mut(res: *void, ok_size: i64, err_size: i64, out: *void) -> void
+        // Converts &mut Result<T, E> to Result<&mut T, &mut E>
+        let result_as_mut_type = void_type.fn_type(&[
+            i8_ptr_type.into(), i64_type.into(),
+            i64_type.into(), i8_ptr_type.into()
+        ], false);
+        self.module.add_function("result_as_mut", result_as_mut_type, None);
     }
 }

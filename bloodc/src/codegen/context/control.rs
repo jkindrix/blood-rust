@@ -3,7 +3,7 @@
 //! This module handles compilation of control flow constructs like
 //! blocks, if expressions, loops, break/continue, and return.
 
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicValueEnum, PointerValue};
 use inkwell::IntPredicate;
 
 use crate::hir::{self, Type};
@@ -201,26 +201,63 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(())
     }
 
+    /// Compile an lvalue expression to get its address (for assignment targets).
+    ///
+    /// This returns a pointer to the memory location that can be stored into.
+    /// Supports local variables, struct field access, and array indexing.
+    fn compile_lvalue(&mut self, expr: &hir::Expr) -> Result<PointerValue<'ctx>, Vec<Diagnostic>> {
+        match &expr.kind {
+            hir::ExprKind::Local(local_id) => {
+                self.locals.get(local_id)
+                    .copied()
+                    .ok_or_else(|| vec![Diagnostic::error("Local not found", expr.span)])
+            }
+            hir::ExprKind::Field { base, field_idx } => {
+                // Get address of the base (must be addressable)
+                let base_ptr = self.compile_lvalue(base)?;
+
+                // Compute GEP for the field
+                let zero = self.context.i32_type().const_int(0, false);
+                let field_index = self.context.i32_type().const_int(*field_idx as u64, false);
+                unsafe {
+                    self.builder.build_gep(base_ptr, &[zero, field_index], "field.ptr")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), expr.span)])
+                }
+            }
+            hir::ExprKind::Index { base, index } => {
+                // Get address of the base (must be addressable)
+                let base_ptr = self.compile_lvalue(base)?;
+
+                // Compile the index expression to get the index value
+                let index_val = self.compile_expr(index)?
+                    .ok_or_else(|| vec![Diagnostic::error("Expected index value", index.span)])?
+                    .into_int_value();
+
+                // Compute GEP for the array element
+                let zero = self.context.i32_type().const_int(0, false);
+                unsafe {
+                    self.builder.build_gep(base_ptr, &[zero, index_val], "elem.ptr")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), expr.span)])
+                }
+            }
+            _ => {
+                Err(vec![Diagnostic::error(
+                    "Cannot assign to this expression",
+                    expr.span,
+                )])
+            }
+        }
+    }
+
     /// Compile an assignment.
     pub(super) fn compile_assign(&mut self, target: &hir::Expr, value: &hir::Expr) -> Result<(), Vec<Diagnostic>> {
         let val = self.compile_expr(value)?
             .ok_or_else(|| vec![Diagnostic::error("Expected value for assignment", value.span)])?;
 
-        // Get target address
-        match &target.kind {
-            hir::ExprKind::Local(local_id) => {
-                let alloca = self.locals.get(local_id)
-                    .ok_or_else(|| vec![Diagnostic::error("Local not found", target.span)])?;
-                self.builder.build_store(*alloca, val)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
-            }
-            _ => {
-                return Err(vec![Diagnostic::error(
-                    "Cannot assign to this expression",
-                    target.span,
-                )]);
-            }
-        }
+        // Get target address using compile_lvalue
+        let target_ptr = self.compile_lvalue(target)?;
+        self.builder.build_store(target_ptr, val)
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
 
         Ok(())
     }

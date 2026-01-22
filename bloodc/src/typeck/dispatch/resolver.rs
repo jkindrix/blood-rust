@@ -537,7 +537,7 @@ impl<'a> DispatchResolver<'a> {
 
             TypeKind::Array { element, size } => {
                 let new_elem = self.apply_substitutions(element, substitutions);
-                Type::array(new_elem, *size)
+                Type::array_with_const(new_elem, size.clone())
             }
 
             TypeKind::Slice { element } => {

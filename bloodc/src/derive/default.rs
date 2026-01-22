@@ -194,10 +194,12 @@ fn default_value_for_type(ty: &Type, span: Span) -> Expr {
         }
         TypeKind::Array { element, size } => {
             let default_elem = default_value_for_type(element, span);
+            // Get concrete size, defaulting to 0 if it's a const param (shouldn't happen)
+            let concrete_size = size.as_u64().unwrap_or(0);
             Expr::new(
                 ExprKind::Repeat {
                     value: Box::new(default_elem),
-                    count: *size,
+                    count: concrete_size,
                 },
                 ty.clone(),
                 span,

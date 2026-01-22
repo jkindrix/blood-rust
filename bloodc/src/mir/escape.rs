@@ -726,7 +726,7 @@ impl EscapeAnalyzer {
                     changed |= self.propagate_to_operand(op, target_state);
                 }
             }
-            Rvalue::Discriminant(p) | Rvalue::Len(p) | Rvalue::ReadGeneration(p) => {
+            Rvalue::Discriminant(p) | Rvalue::Len(p) | Rvalue::VecLen(p) | Rvalue::ReadGeneration(p) => {
                 // Reading properties doesn't cause escape
                 let _ = p;
             }

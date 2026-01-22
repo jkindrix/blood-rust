@@ -223,6 +223,9 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
         // SliceLen - check inner expression
         SliceLen(inner) => check_expr_tail_resumptive(inner, false),
 
+        // VecLen - check inner expression
+        VecLen(inner) => check_expr_tail_resumptive(inner, false),
+
         // ArrayToSlice - check inner expression
         ArrayToSlice { expr, .. } => check_expr_tail_resumptive(expr, false),
 
@@ -387,12 +390,38 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .build_ptr_to_int(pv, i64_type, "ptr_as_i64")
                             .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
                     }
-                    other => {
+                    BasicValueEnum::StructValue(sv) => {
+                        // Allocate stack space and store the struct
+                        let struct_alloca = self.builder
+                            .build_alloca(sv.get_type(), "struct_arg")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        self.builder.build_store(struct_alloca, sv)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                        // Pass pointer as i64
+                        self.builder
+                            .build_ptr_to_int(struct_alloca, i64_type, "struct_ptr_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    }
+                    BasicValueEnum::ArrayValue(av) => {
+                        // Allocate stack space and store the array
+                        let array_alloca = self.builder
+                            .build_alloca(av.get_type(), "array_arg")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        self.builder.build_store(array_alloca, av)
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                        // Pass pointer as i64
+                        self.builder
+                            .build_ptr_to_int(array_alloca, i64_type, "array_ptr_as_i64")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    }
+                    BasicValueEnum::VectorValue(_) => {
                         return Err(vec![ice_err!(
                             arg.span,
                             "unsupported argument type in perform expression";
-                            "type" => other.get_type(),
-                            "expected" => "IntValue, FloatValue, or PointerValue"
+                            "type" => "VectorValue",
+                            "expected" => "IntValue, FloatValue, PointerValue, StructValue, or ArrayValue"
                         )]);
                     }
                 };

@@ -15,7 +15,7 @@ pub fn type_size(ty: &Type) -> usize {
     match ty.kind() {
         TypeKind::Primitive(prim) => primitive_size(prim),
         TypeKind::Tuple(types) => types.iter().map(type_size).sum(),
-        TypeKind::Array { element, size } => type_size(element) * (*size as usize),
+        TypeKind::Array { element, size } => type_size(element) * (size.as_u64().unwrap_or(0) as usize),
         TypeKind::Slice { .. } => 16, // fat pointer (ptr + len)
         TypeKind::Ref { .. } | TypeKind::Ptr { .. } => 8, // 64-bit pointer
         TypeKind::Fn { .. } => 8, // function pointer
