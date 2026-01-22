@@ -153,10 +153,41 @@ impl<'src> Parser<'src> {
         self.parse_expr_prec_with_inner(left, min_prec, true)
     }
 
+    /// Parse an expression suitable for a match arm body.
+    /// This doesn't extend block-like expressions with `&` operator, which prevents
+    /// the parser from consuming the next match arm's pattern as part of a binary expression.
+    fn parse_expr_match_body(&mut self) -> Expr {
+        let left = self.parse_prefix_expr();
+        self.parse_expr_prec_with_inner_opts(left, Precedence::None, false, true)
+    }
+
     /// Inner implementation of parse_expr_prec_with with struct literal control.
     fn parse_expr_prec_with_inner(&mut self, mut left: Expr, min_prec: Precedence, no_struct: bool) -> Expr {
+        self.parse_expr_prec_with_inner_opts(left, min_prec, no_struct, false)
+    }
+
+    /// Inner implementation with additional options.
+    /// `no_block_and` - if true, don't extend block-like expressions with `&` operator.
+    /// This is used in match arm bodies to prevent `{ val } & pattern` from being parsed
+    /// as a bitwise AND expression when `& pattern` is actually the next match arm.
+    fn parse_expr_prec_with_inner_opts(
+        &mut self,
+        mut left: Expr,
+        min_prec: Precedence,
+        no_struct: bool,
+        no_block_and: bool,
+    ) -> Expr {
         // Parse binary operators
         while let Some(prec) = binary_precedence(self.current.kind) {
+            // In match arm context, don't extend block-like expressions with `&`.
+            // This prevents `{ val } & Kind::Second { ... }` from being parsed as bitwise AND
+            // when `& Kind::Second { ... }` is actually the pattern for the next match arm.
+            if no_block_and
+                && self.current.kind == TokenKind::And
+                && Self::is_block_like_expr(&left)
+            {
+                break;
+            }
             if prec < min_prec {
                 break;
             }
@@ -1751,7 +1782,10 @@ impl<'src> Parser<'src> {
         };
 
         self.expect(TokenKind::FatArrow);
-        let body = self.parse_expr();
+        // Use parse_expr_match_body to avoid consuming next arm's pattern.
+        // After a block-like expression (e.g., `{ val }`), the parser should NOT
+        // try to extend with `&` because `&Pattern` is likely the next match arm.
+        let body = self.parse_expr_match_body();
 
         MatchArm {
             pattern,
