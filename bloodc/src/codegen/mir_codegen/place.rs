@@ -332,10 +332,44 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         TypeKind::Tuple(fields) => {
                             fields.get(*idx as usize).cloned().unwrap_or(current_ty.clone())
                         }
-                        TypeKind::Adt { .. } => {
-                            // For ADT types, we'd need field type lookup
-                            // For now, keep current_ty as placeholder (field access works via GEP)
-                            current_ty.clone()
+                        TypeKind::Adt { def_id, args } => {
+                            // Look up field type for ADT types
+                            if Some(*def_id) == self.vec_def_id {
+                                // Vec<T> layout: { ptr: *T, len: i64, capacity: i64 }
+                                match idx {
+                                    0 => {
+                                        let elem_ty = args.first().cloned().unwrap_or(Type::unit());
+                                        Type::new(TypeKind::Ptr { inner: elem_ty, mutable: true })
+                                    }
+                                    1 | 2 => Type::usize(),
+                                    _ => current_ty.clone(),
+                                }
+                            } else if Some(*def_id) == self.option_def_id {
+                                // Option<T> layout: { tag: i32, payload: T }
+                                match idx {
+                                    0 => Type::i32(),
+                                    1 => args.first().cloned().unwrap_or(Type::unit()),
+                                    _ => current_ty.clone(),
+                                }
+                            } else if Some(*def_id) == self.result_def_id {
+                                // Result<T, E> layout: { tag: i32, payload: T or E }
+                                match idx {
+                                    0 => Type::i32(),
+                                    1 => args.first().cloned().unwrap_or(Type::unit()),
+                                    2 => args.get(1).cloned().unwrap_or(Type::unit()),
+                                    _ => current_ty.clone(),
+                                }
+                            } else if let Some(field_types) = self.struct_defs.get(def_id) {
+                                // Regular struct - look up field type
+                                if let Some(field_ty) = field_types.get(*idx as usize) {
+                                    self.substitute_type_params(field_ty, args)
+                                } else {
+                                    current_ty.clone()
+                                }
+                            } else {
+                                // Unknown ADT or enum, keep type
+                                current_ty.clone()
+                            }
                         }
                         _ => current_ty.clone(),
                     };
@@ -557,6 +591,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // 1. GEP to field 0 (data pointer field)
                                 // 2. Load the data pointer (*T)
                                 // 3. Index into the data with single-index GEP
+                                // 4. Cast result to proper element type pointer for subsequent projections
                                 let data_ptr_ptr = self.builder.build_struct_gep(current_ptr, 0, "vec_data_ptr_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM GEP error for Vec data pointer: {}", e), body.span
@@ -565,13 +600,22 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
-                                self.builder.build_in_bounds_gep(
+                                let elem_ptr = self.builder.build_in_bounds_gep(
                                     data_ptr,
                                     &[idx_val.into_int_value()],
                                     "vec_idx_gep"
                                 ).map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
-                                )])?
+                                )])?;
+
+                                // Cast to proper element type pointer for subsequent Field projections
+                                // current_ty has already been updated to the element type
+                                let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                self.builder.build_pointer_cast(elem_ptr, elem_ptr_ty, "vec_elem_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?
                             }
                             IndexKind::Other => {
                                 // Other pointer type: single-index GEP
