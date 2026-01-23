@@ -1265,7 +1265,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Evaluate the static expression to get the initializer
                 let init_value = self.evaluate_const_expr(&body.expr, ty)?;
 
-                // Create global variable
+                // Create global variable with linkonce_odr linkage to avoid
+                // multiple definition errors when the same static is compiled
+                // in multiple object files (e.g., when a module is imported
+                // from multiple places in per-definition compilation)
                 let global = self.module.add_global(
                     llvm_type,
                     Some(AddressSpace::default()),
@@ -1273,6 +1276,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 );
                 global.set_initializer(&init_value);
                 global.set_constant(!*mutable); // Only constant if not mutable
+                global.set_linkage(inkwell::module::Linkage::LinkOnceODR);
 
                 // Store for later reference
                 self.static_globals.insert(*def_id, global);
