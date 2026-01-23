@@ -2660,6 +2660,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
         }
 
+        // Pointer value being stored to struct destination: load the value from pointer.
+        // This handles cases where an enum variant field pointer is incorrectly passed as
+        // a value instead of being loaded first. This can happen with complex projection
+        // chains like Downcast + Field on reference types.
+        if val.is_pointer_value() && dest_elem_type.is_struct_type() {
+            let ptr_val = val.into_pointer_value();
+            let ptr_elem_type = ptr_val.get_type().get_element_type();
+            // Only load if the pointer's element type matches the destination struct type
+            if ptr_elem_type == dest_elem_type {
+                let loaded = self.builder.build_load(ptr_val, "store_ptr_load")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM load error: {}", e), span
+                    )])?;
+                return Ok(loaded);
+            }
+        }
+
         // No conversion needed or not possible
         Ok(val)
     }

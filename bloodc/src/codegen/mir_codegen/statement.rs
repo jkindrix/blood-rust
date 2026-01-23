@@ -8,10 +8,11 @@ use inkwell::AddressSpace;
 
 use crate::diagnostics::Diagnostic;
 use crate::effects::evidence::HandlerStateKind;
+use crate::hir::TypeKind;
 use crate::mir::body::MirBody;
 use crate::mir::ptr::MemoryTier;
 use crate::mir::static_evidence::InlineEvidenceMode;
-use crate::mir::types::{Statement, StatementKind};
+use crate::mir::types::{Statement, StatementKind, Rvalue, Operand};
 use crate::mir::EscapeResults;
 
 use super::rvalue::MirRvalueCodegen;
@@ -38,6 +39,28 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     ) -> Result<(), Vec<Diagnostic>> {
         match &stmt.kind {
             StatementKind::Assign(place, rvalue) => {
+                // Check if the rvalue is from a Never-typed source (diverging expression).
+                // Assignments from Never-typed sources are unreachable code - the diverging
+                // expression never returns, so this assignment will never execute.
+                // We skip codegen for these to avoid LLVM type mismatches (Never is i8,
+                // but destination might be a complex ADT).
+                let is_never_source = match rvalue {
+                    Rvalue::Use(Operand::Copy(src_place)) | Rvalue::Use(Operand::Move(src_place)) => {
+                        let src_ty = &body.locals[src_place.local.index() as usize].ty;
+                        let src_effective_ty = self.compute_place_type(src_ty, &src_place.projection);
+                        matches!(src_effective_ty.kind(), TypeKind::Never)
+                    }
+                    _ => false,
+                };
+
+                if is_never_source {
+                    // This assignment is unreachable - the source expression diverges.
+                    // We can safely skip the store. Optionally emit unreachable, but
+                    // only if we're certain the block continues (which we're not here).
+                    // The MIR should end with an unreachable terminator after diverging.
+                    return Ok(());
+                }
+
                 // Pass the destination local to enable escape analysis for closures.
                 // This allows the codegen to decide whether to heap-allocate closure
                 // environments (for escaping closures) or stack-allocate them.
@@ -48,6 +71,7 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     Some(place.local),
                 )?;
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
+
                 // Convert value to match destination type if needed
                 let converted_value = self.convert_value_for_store(value, ptr, stmt.span)?;
                 self.builder.build_store(ptr, converted_value)

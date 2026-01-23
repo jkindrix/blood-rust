@@ -448,6 +448,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // - Slice ref &[T]: ptr is {T*, i64}* (fat pointer), load struct, extract data ptr, single-index GEP
                     // - Ptr to elements *T: current_ptr is **T (e.g., Vec.data), load then single-index GEP
                     // - Vec<T>: current_ptr is Vec*, extract data ptr (field 0), load, then single-index GEP
+                    // - Ref to Vec<T>: current_ptr is Vec**, load to get Vec*, then like VecIndex
                     enum IndexKind {
                         DirectArray,
                         DirectSlice,
@@ -455,6 +456,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         SliceRef,
                         PtrToElements,  // For Vec data pointer or similar
                         VecIndex,       // Direct indexing into Vec<T>
+                        RefToVec,       // Reference to Vec<T> - need to load ref first
                         Other,
                     }
 
@@ -465,6 +467,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             match inner.kind() {
                                 TypeKind::Array { .. } => IndexKind::RefToArray,
                                 TypeKind::Slice { .. } => IndexKind::SliceRef,
+                                // Reference to Vec<T>: need to load ref to get Vec*, then index into it
+                                TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => {
+                                    IndexKind::RefToVec
+                                }
                                 // Pointer to non-array/slice elements (e.g., Vec<T>.data is *T)
                                 // After Field(0) on Vec, we have Ptr { inner: T }
                                 // current_ptr is **T, need to load to get *T then GEP
@@ -486,6 +492,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             match inner.kind() {
                                 TypeKind::Array { element, .. } => element.clone(),
                                 TypeKind::Slice { element } => element.clone(),
+                                // Reference to Vec<T>: indexing gives element type T
+                                TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
+                                    args.first().cloned().unwrap_or(inner.clone())
+                                }
                                 // For Ptr { inner: T } where T is not array/slice,
                                 // indexing into *T gives T (the element type)
                                 _ => inner.clone(),
@@ -613,6 +623,41 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 let elem_llvm_ty = self.lower_type(&current_ty);
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
                                 self.builder.build_pointer_cast(elem_ptr, elem_ptr_ty, "vec_elem_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?
+                            }
+                            IndexKind::RefToVec => {
+                                // Reference to Vec<T>: current_ptr is Vec** (pointer to the ref)
+                                // 1. Load to get Vec* (the reference value)
+                                // 2. GEP to field 0 (data pointer field)
+                                // 3. Load the data pointer (*T)
+                                // 4. GEP with index to get element pointer
+                                // 5. Cast to proper element type pointer
+                                let vec_ptr = self.builder.build_load(current_ptr, "vec_ref")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                let data_ptr_ptr = self.builder.build_struct_gep(vec_ptr, 0, "vec_data_ptr_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM GEP error for Vec data pointer: {}", e), body.span
+                                    )])?;
+                                let data_ptr = self.builder.build_load(data_ptr_ptr, "vec_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                let elem_ptr = self.builder.build_in_bounds_gep(
+                                    data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "ref_vec_idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?;
+
+                                // Cast to proper element type pointer for subsequent Field projections
+                                let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                self.builder.build_pointer_cast(elem_ptr, elem_ptr_ty, "ref_vec_elem_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM pointer cast error: {}", e), body.span
                                     )])?
@@ -759,10 +804,31 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // Downcast is logically an assertion that we have the right variant.
                     // Set variant context so Field knows how to access variant-specific fields.
                     // This is needed for heterogeneous enum payloads (different sized variants).
-                    if let TypeKind::Adt { def_id, .. } = current_ty.kind() {
-                        variant_ctx = Some((*def_id, *variant_idx_val));
+
+                    // Handle both direct enum and reference-to-enum cases
+                    match current_ty.kind() {
+                        TypeKind::Adt { def_id, .. } => {
+                            variant_ctx = Some((*def_id, *variant_idx_val));
+                            current_ptr  // Return the same pointer
+                        }
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            // Reference to enum: load the reference, then set variant context
+                            if let TypeKind::Adt { def_id, .. } = inner.kind() {
+                                variant_ctx = Some((*def_id, *variant_idx_val));
+                                // Load the reference to get the enum pointer
+                                let enum_ptr = self.builder.build_load(current_ptr, "enum_ref")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                // Update current_ty to the inner enum type
+                                current_ty = inner.clone();
+                                enum_ptr
+                            } else {
+                                current_ptr
+                            }
+                        }
+                        _ => current_ptr,
                     }
-                    current_ptr  // Return the same pointer
                 }
             };
         }
@@ -880,6 +946,18 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
                             args.first().cloned().unwrap_or(current_ty)
                         }
+                        // For Ref/Ptr to indexable types, get the inner element type
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            match inner.kind() {
+                                TypeKind::Array { element, .. } => element.clone(),
+                                TypeKind::Slice { element } => element.clone(),
+                                // Reference to Vec<T>: indexing gives T
+                                TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
+                                    args.first().cloned().unwrap_or(current_ty)
+                                }
+                                _ => current_ty,
+                            }
+                        }
                         // For other types, keep the type
                         _ => current_ty,
                     }
@@ -889,9 +967,20 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     current_ty
                 }
                 PlaceElem::Downcast(variant_idx) => {
-                    // Downcast to a specific enum variant - keep the type
+                    // Downcast to a specific enum variant
+                    // For direct enum, keep the type
+                    // For Ref/Ptr to enum, unwrap to the inner enum type
                     let _ = variant_idx;
-                    current_ty
+                    match current_ty.kind() {
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            if matches!(inner.kind(), TypeKind::Adt { .. }) {
+                                inner.clone()
+                            } else {
+                                current_ty
+                            }
+                        }
+                        _ => current_ty,
+                    }
                 }
             };
         }
