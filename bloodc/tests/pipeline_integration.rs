@@ -4376,3 +4376,11 @@ fn test_never_returning_macros() {
 fn test_str_methods() {
     assert_file_type_checks("tests/fixtures/str_methods.blood");
 }
+
+/// Test pub use re-exports work with pattern matching.
+/// This tests that enums re-exported via `pub use` can be pattern matched
+/// using the re-exporting module's qualified path.
+#[test]
+fn test_pub_use_pattern_match() {
+    assert_file_type_checks("tests/fixtures/pub_use_pattern/main.blood");
+}
