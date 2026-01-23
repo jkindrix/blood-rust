@@ -124,7 +124,15 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 if llvm_ty.is_struct_type() {
                     // Enum with payload: { i32 tag, payload... }
                     // Load discriminant from first field (field 0 is the tag/discriminant)
-                    let discr_ptr = self.builder.build_struct_gep(ptr, 0, "discr_ptr")
+                    // First, cast the pointer to the struct type to ensure proper typing
+                    let struct_ty = llvm_ty.into_struct_type();
+                    let struct_ptr_ty = struct_ty.ptr_type(inkwell::AddressSpace::default());
+                    let typed_ptr = self.builder.build_pointer_cast(ptr, struct_ptr_ty, "enum_ptr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM pointer cast error: {}", e), Span::dummy()
+                        )])?;
+
+                    let discr_ptr = self.builder.build_struct_gep(typed_ptr, 0, "discr_ptr")
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM struct gep error: {}", e), Span::dummy()
                         )])?;
@@ -135,8 +143,14 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     Ok(discr)
                 } else {
                     // Tag-only enum: represented as bare i32
-                    // Just load the value directly
-                    let discr = self.builder.build_load(ptr, "discr")
+                    // Cast pointer to i32* to ensure proper load
+                    let i32_type = self.context.i32_type();
+                    let i32_ptr_type = i32_type.ptr_type(inkwell::AddressSpace::default());
+                    let typed_ptr = self.builder.build_pointer_cast(ptr, i32_ptr_type, "discr_ptr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM pointer cast error: {}", e), Span::dummy()
+                        )])?;
+                    let discr = self.builder.build_load(typed_ptr, "discr")
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM load error: {}", e), Span::dummy()
                         )])?;
