@@ -38,7 +38,15 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     ) -> Result<(), Vec<Diagnostic>> {
         match &stmt.kind {
             StatementKind::Assign(place, rvalue) => {
-                let value = self.compile_mir_rvalue(rvalue, body, escape_results)?;
+                // Pass the destination local to enable escape analysis for closures.
+                // This allows the codegen to decide whether to heap-allocate closure
+                // environments (for escaping closures) or stack-allocate them.
+                let value = self.compile_mir_rvalue_with_dest(
+                    rvalue,
+                    body,
+                    escape_results,
+                    Some(place.local),
+                )?;
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
                 self.builder.build_store(ptr, value)
                     .map_err(|e| vec![Diagnostic::error(

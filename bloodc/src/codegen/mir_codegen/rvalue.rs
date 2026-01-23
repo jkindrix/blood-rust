@@ -14,7 +14,8 @@ use crate::mir::body::MirBody;
 use crate::mir::types::{
     Rvalue, Operand, Constant, ConstantKind, BinOp, UnOp, AggregateKind,
 };
-use crate::mir::EscapeResults;
+use crate::hir::LocalId;
+use crate::mir::{EscapeResults, EscapeState};
 use crate::span::Span;
 use crate::ice_err;
 
@@ -29,6 +30,16 @@ pub trait MirRvalueCodegen<'ctx, 'a> {
         rvalue: &Rvalue,
         body: &MirBody,
         escape_results: Option<&EscapeResults>,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>>;
+
+    /// Compile a MIR rvalue with destination local context.
+    /// This is used for closure creation where we need to know if the closure escapes.
+    fn compile_mir_rvalue_with_dest(
+        &mut self,
+        rvalue: &Rvalue,
+        body: &MirBody,
+        escape_results: Option<&EscapeResults>,
+        dest_local: Option<LocalId>,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>>;
 
     /// Compile a MIR operand.
@@ -46,6 +57,17 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         rvalue: &Rvalue,
         body: &MirBody,
         escape_results: Option<&EscapeResults>,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        // Delegate to the version with destination local context (None = unknown)
+        self.compile_mir_rvalue_with_dest(rvalue, body, escape_results, None)
+    }
+
+    fn compile_mir_rvalue_with_dest(
+        &mut self,
+        rvalue: &Rvalue,
+        body: &MirBody,
+        escape_results: Option<&EscapeResults>,
+        dest_local: Option<LocalId>,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         match rvalue {
             Rvalue::Use(operand) => {
@@ -131,7 +153,7 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             Rvalue::Aggregate { kind, operands } => {
-                self.compile_aggregate(kind, operands, body, escape_results)
+                self.compile_aggregate(kind, operands, body, escape_results, dest_local)
             }
 
             Rvalue::NullCheck(operand) => {
@@ -1031,12 +1053,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     /// Compile an aggregate value (struct, tuple, array).
+    ///
+    /// For closure aggregates, `dest_local` is used to check escape analysis.
+    /// If the closure escapes (is returned from a function or stored in a
+    /// heap-allocated location), its captured environment must be heap-allocated
+    /// to survive after the creating function returns.
     pub(super) fn compile_aggregate(
         &mut self,
         kind: &AggregateKind,
         operands: &[Operand],
         body: &MirBody,
         escape_results: Option<&EscapeResults>,
+        dest_local: Option<LocalId>,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         let vals: Vec<BasicValueEnum> = operands.iter()
             .map(|op| self.compile_mir_operand(op, body, escape_results))
@@ -1246,6 +1274,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     )]);
                 };
 
+                // Check if the closure escapes (is returned from a function or stored
+                // in a heap-allocated location). If so, we must heap-allocate the
+                // captured environment so it survives after the creating function returns.
+                let closure_escapes = dest_local
+                    .and_then(|local| escape_results.map(|er| er.get(local)))
+                    .map(|state| state != EscapeState::NoEscape)
+                    .unwrap_or(true); // Conservative: assume escapes if unknown
+
                 // Build the environment pointer
                 let env_ptr = if vals.is_empty() {
                     // No captures - use null pointer
@@ -1263,21 +1299,84 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             .into_struct_value();
                     }
 
-                    // Allocate space and store the captures struct
-                    let captures_alloca = self.builder.build_alloca(captures_struct_ty, "closure_env")
-                        .map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM alloca error: {}", e), Span::dummy()
-                        )])?;
-                    self.builder.build_store(captures_alloca, captures_val)
-                        .map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM store error: {}", e), Span::dummy()
+                    if closure_escapes {
+                        // Closure escapes - heap-allocate the environment using blood_alloc_or_abort.
+                        // This ensures the captured values survive after the creating function returns.
+                        let i32_ty = self.context.i32_type();
+
+                        // Get blood_alloc_or_abort function - signature is:
+                        // blood_alloc_or_abort(size: i64, out_generation: *i32) -> i64
+                        let alloc_fn = self.module.get_function("blood_alloc_or_abort")
+                            .ok_or_else(|| vec![Diagnostic::error(
+                                "Runtime function blood_alloc_or_abort not found", Span::dummy()
+                            )])?;
+
+                        // Calculate size of the captures struct
+                        let size_of_captures = captures_struct_ty.size_of()
+                            .ok_or_else(|| vec![Diagnostic::error(
+                                "Cannot determine size of closure captures struct", Span::dummy()
+                            )])?;
+
+                        // Create a dummy alloca for the generation output (not used for closures,
+                        // but required by the blood_alloc_or_abort signature)
+                        let gen_alloca = self.builder.build_alloca(i32_ty, "closure_env_gen")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM alloca error: {}", e), Span::dummy()
+                            )])?;
+
+                        // Allocate heap memory for the captures
+                        // blood_alloc_or_abort(size: i64, out_gen: *i32) -> i64 (address)
+                        let heap_addr = self.builder.build_call(
+                            alloc_fn,
+                            &[size_of_captures.into(), gen_alloca.into()],
+                            "closure_env_addr"
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM call error: {}", e), Span::dummy()
+                        )])?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or_else(|| vec![Diagnostic::error(
+                            "blood_alloc_or_abort did not return a value", Span::dummy()
+                        )])?
+                        .into_int_value();
+
+                        // Convert i64 address to pointer
+                        let heap_ptr = self.builder.build_int_to_ptr(
+                            heap_addr,
+                            captures_struct_ty.ptr_type(AddressSpace::default()),
+                            "closure_env_ptr"
+                        ).map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM int_to_ptr error: {}", e), Span::dummy()
                         )])?;
 
-                    // Cast to i8* for the closure type
-                    self.builder.build_pointer_cast(captures_alloca, i8_ptr_ty, "env_ptr")
-                        .map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM pointer cast error: {}", e), Span::dummy()
-                        )])?
+                        // Store the captured values
+                        self.builder.build_store(heap_ptr, captures_val)
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM store error: {}", e), Span::dummy()
+                            )])?;
+
+                        // Cast to i8* for the closure type
+                        self.builder.build_pointer_cast(heap_ptr, i8_ptr_ty, "env_ptr")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM pointer cast error: {}", e), Span::dummy()
+                            )])?
+                    } else {
+                        // Closure doesn't escape - use stack allocation (original behavior)
+                        let captures_alloca = self.builder.build_alloca(captures_struct_ty, "closure_env")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM alloca error: {}", e), Span::dummy()
+                            )])?;
+                        self.builder.build_store(captures_alloca, captures_val)
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM store error: {}", e), Span::dummy()
+                            )])?;
+
+                        // Cast to i8* for the closure type
+                        self.builder.build_pointer_cast(captures_alloca, i8_ptr_ty, "env_ptr")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM pointer cast error: {}", e), Span::dummy()
+                            )])?
+                    }
                 };
 
                 // Build the closure fat pointer struct { fn_ptr, env_ptr }
