@@ -268,7 +268,109 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             Operand::Constant(Constant { kind: ConstantKind::FnDef(def_id), ty }) => {
                 // Direct function call
                 if let Some(&fn_value) = self.functions.get(def_id) {
-                    self.builder.build_call(fn_value, &arg_metas, "call_result")
+                    // Convert arguments to match parameter types
+                    // This handles cases like passing a struct value to a function expecting &T
+                    let fn_type = fn_value.get_type();
+                    let param_types = fn_type.get_param_types();
+                    let mut converted_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(arg_vals.len());
+
+                    for (i, val) in arg_vals.iter().enumerate() {
+                        let converted = if let Some(param_type) = param_types.get(i) {
+                            if val.is_int_value() && param_type.is_int_type() {
+                                let val_int = val.into_int_value();
+                                let param_int_type = param_type.into_int_type();
+                                // Zero-extend if arg is smaller (e.g., i1 -> i32)
+                                if val_int.get_type().get_bit_width() < param_int_type.get_bit_width() {
+                                    self.builder
+                                        .build_int_z_extend(val_int, param_int_type, "zext")
+                                        .map(|v| v.into())
+                                        .unwrap_or((*val).into())
+                                } else {
+                                    (*val).into()
+                                }
+                            } else if param_type.is_pointer_type() && val.is_struct_value() {
+                                // Parameter expects a pointer but we have a struct value
+                                // Allocate on stack and pass pointer (for &self method semantics)
+                                let struct_val = val.into_struct_value();
+                                let alloca = self.builder
+                                    .build_alloca(struct_val.get_type(), "arg_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), span
+                                    )])?;
+                                self.builder.build_store(alloca, struct_val)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), span
+                                    )])?;
+                                // Bitcast to expected pointer type if needed
+                                let expected_ptr_type = param_type.into_pointer_type();
+                                if alloca.get_type() != expected_ptr_type {
+                                    self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                                        .map(|p| p.into())
+                                        .unwrap_or(alloca.into())
+                                } else {
+                                    alloca.into()
+                                }
+                            } else if param_type.is_pointer_type() && val.is_pointer_value() {
+                                // Parameter expects pointer and we have pointer - cast if needed
+                                let ptr_val = val.into_pointer_value();
+                                let expected_ptr_type = param_type.into_pointer_type();
+                                if ptr_val.get_type() != expected_ptr_type {
+                                    self.builder.build_pointer_cast(ptr_val, expected_ptr_type, "ptr_cast")
+                                        .map(|p| p.into())
+                                        .unwrap_or((*val).into())
+                                } else {
+                                    (*val).into()
+                                }
+                            } else if param_type.is_pointer_type() && val.is_int_value() {
+                                // Parameter expects pointer but we have int - allocate on stack
+                                let int_val = val.into_int_value();
+                                let alloca = self.builder
+                                    .build_alloca(int_val.get_type(), "int_arg_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), span
+                                    )])?;
+                                self.builder.build_store(alloca, int_val)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), span
+                                    )])?;
+                                let expected_ptr_type = param_type.into_pointer_type();
+                                if alloca.get_type() != expected_ptr_type {
+                                    self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                                        .map(|p| p.into())
+                                        .unwrap_or(alloca.into())
+                                } else {
+                                    alloca.into()
+                                }
+                            } else if param_type.is_pointer_type() && val.is_array_value() {
+                                // Parameter expects pointer but we have array value
+                                let array_val = val.into_array_value();
+                                let alloca = self.builder
+                                    .build_alloca(array_val.get_type(), "array_arg_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), span
+                                    )])?;
+                                self.builder.build_store(alloca, array_val)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), span
+                                    )])?;
+                                let expected_ptr_type = param_type.into_pointer_type();
+                                if alloca.get_type() != expected_ptr_type {
+                                    self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                                        .map(|p| p.into())
+                                        .unwrap_or(alloca.into())
+                                } else {
+                                    alloca.into()
+                                }
+                            } else {
+                                (*val).into()
+                            }
+                        } else {
+                            (*val).into()
+                        };
+                        converted_args.push(converted);
+                    }
+
+                    self.builder.build_call(fn_value, &converted_args, "call_result")
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM call error: {}", e), span
                         )])?
@@ -1475,6 +1577,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let fn_param_count = fn_value.count_params() as usize;
                         let has_env_param = fn_param_count == args.len() + 1;
 
+                        // Get parameter types for argument conversion
+                        let fn_type = fn_value.get_type();
+                        let param_types = fn_type.get_param_types();
+
                         let full_args: Vec<BasicMetadataValueEnum> = if has_env_param {
                             // Closure with captures - extract and prepend env pointer
                             let closure_val = self.compile_mir_operand(func, body, escape_results)?;
@@ -1502,11 +1608,26 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                             let mut full_args = Vec::with_capacity(args.len() + 1);
                             full_args.push(env_ptr.into());
-                            full_args.extend(arg_metas.iter().cloned());
+                            // Convert remaining args (skip param index 0 which is env_ptr)
+                            for (i, val) in arg_vals.iter().enumerate() {
+                                if let Some(param_type) = param_types.get(i + 1) {
+                                    full_args.push(self.convert_arg_for_param(*val, *param_type, span)?);
+                                } else {
+                                    full_args.push((*val).into());
+                                }
+                            }
                             full_args
                         } else {
-                            // Closure without captures - just use the args directly
-                            arg_metas.clone()
+                            // Closure without captures - convert all args
+                            let mut converted = Vec::with_capacity(arg_vals.len());
+                            for (i, val) in arg_vals.iter().enumerate() {
+                                if let Some(param_type) = param_types.get(i) {
+                                    converted.push(self.convert_arg_for_param(*val, *param_type, span)?);
+                                } else {
+                                    converted.push((*val).into());
+                                }
+                            }
+                            converted
                         };
 
                         self.builder.build_call(fn_value, &full_args, "closure_call")
@@ -1558,33 +1679,46 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         )]);
                     };
 
-                    // Build args with env_ptr prepended (closures expect env as first arg)
-                    let mut full_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
-                    full_args.push(env_ptr.into());
-                    full_args.extend(arg_metas.iter().cloned());
-
                     // Build function type: (env_ptr, args...) -> ret
                     // Get the return type from the func operand's type
                     let func_ty = self.get_operand_type(func, body);
                     let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
 
-                    let fn_type = if let crate::hir::TypeKind::Fn { params, ret, .. } = func_ty.kind() {
+                    let (fn_type, llvm_param_types) = if let crate::hir::TypeKind::Fn { params, ret, .. } = func_ty.kind() {
                         let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(params.len() + 1);
+                        let mut llvm_params: Vec<inkwell::types::BasicTypeEnum> = Vec::with_capacity(params.len() + 1);
                         param_types.push(i8_ptr_ty.into()); // env_ptr
+                        llvm_params.push(i8_ptr_ty.into());
                         for p in params {
-                            param_types.push(self.lower_type(p).into());
+                            let llvm_ty = self.lower_type(p);
+                            param_types.push(llvm_ty.into());
+                            llvm_params.push(llvm_ty);
                         }
-                        if ret.is_unit() {
+                        let fn_ty = if ret.is_unit() {
                             self.context.void_type().fn_type(&param_types, false)
                         } else {
                             let ret_type = self.lower_type(ret);
                             ret_type.fn_type(&param_types, false)
-                        }
+                        };
+                        (fn_ty, llvm_params)
                     } else {
                         return Err(vec![Diagnostic::error(
                             "Expected Fn type for indirect call", span
                         )]);
                     };
+
+                    // Build args with env_ptr prepended (closures expect env as first arg)
+                    // Convert arguments to match expected parameter types
+                    let mut full_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
+                    full_args.push(env_ptr.into());
+                    for (i, val) in arg_vals.iter().enumerate() {
+                        // param index i+1 because param 0 is env_ptr
+                        if let Some(param_type) = llvm_param_types.get(i + 1) {
+                            full_args.push(self.convert_arg_for_param(*val, *param_type, span)?);
+                        } else {
+                            full_args.push((*val).into());
+                        }
+                    }
 
                     // Cast fn_ptr to the correct function pointer type
                     let typed_fn_ptr = self.builder.build_pointer_cast(
@@ -2280,5 +2414,101 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             )])?;
 
         Ok(())
+    }
+
+    /// Convert a single argument value to match the expected parameter type.
+    /// This handles cases like passing a struct value to a function expecting a pointer.
+    fn convert_arg_for_param(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        param_type: inkwell::types::BasicTypeEnum<'ctx>,
+        span: crate::span::Span,
+    ) -> Result<BasicMetadataValueEnum<'ctx>, Vec<Diagnostic>> {
+        if val.is_int_value() && param_type.is_int_type() {
+            let val_int = val.into_int_value();
+            let param_int_type = param_type.into_int_type();
+            // Zero-extend if arg is smaller (e.g., i1 -> i32)
+            if val_int.get_type().get_bit_width() < param_int_type.get_bit_width() {
+                Ok(self.builder
+                    .build_int_z_extend(val_int, param_int_type, "zext")
+                    .map(|v| v.into())
+                    .unwrap_or(val.into()))
+            } else {
+                Ok(val.into())
+            }
+        } else if param_type.is_pointer_type() && val.is_struct_value() {
+            // Parameter expects a pointer but we have a struct value
+            let struct_val = val.into_struct_value();
+            let alloca = self.builder
+                .build_alloca(struct_val.get_type(), "arg_tmp")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM alloca error: {}", e), span
+                )])?;
+            self.builder.build_store(alloca, struct_val)
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM store error: {}", e), span
+                )])?;
+            let expected_ptr_type = param_type.into_pointer_type();
+            if alloca.get_type() != expected_ptr_type {
+                Ok(self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                    .map(|p| p.into())
+                    .unwrap_or(alloca.into()))
+            } else {
+                Ok(alloca.into())
+            }
+        } else if param_type.is_pointer_type() && val.is_pointer_value() {
+            // Parameter expects pointer and we have pointer - cast if needed
+            let ptr_val = val.into_pointer_value();
+            let expected_ptr_type = param_type.into_pointer_type();
+            if ptr_val.get_type() != expected_ptr_type {
+                Ok(self.builder.build_pointer_cast(ptr_val, expected_ptr_type, "ptr_cast")
+                    .map(|p| p.into())
+                    .unwrap_or(val.into()))
+            } else {
+                Ok(val.into())
+            }
+        } else if param_type.is_pointer_type() && val.is_int_value() {
+            // Parameter expects pointer but we have int - allocate on stack
+            let int_val = val.into_int_value();
+            let alloca = self.builder
+                .build_alloca(int_val.get_type(), "int_arg_tmp")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM alloca error: {}", e), span
+                )])?;
+            self.builder.build_store(alloca, int_val)
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM store error: {}", e), span
+                )])?;
+            let expected_ptr_type = param_type.into_pointer_type();
+            if alloca.get_type() != expected_ptr_type {
+                Ok(self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                    .map(|p| p.into())
+                    .unwrap_or(alloca.into()))
+            } else {
+                Ok(alloca.into())
+            }
+        } else if param_type.is_pointer_type() && val.is_array_value() {
+            // Parameter expects pointer but we have array value
+            let array_val = val.into_array_value();
+            let alloca = self.builder
+                .build_alloca(array_val.get_type(), "array_arg_tmp")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM alloca error: {}", e), span
+                )])?;
+            self.builder.build_store(alloca, array_val)
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM store error: {}", e), span
+                )])?;
+            let expected_ptr_type = param_type.into_pointer_type();
+            if alloca.get_type() != expected_ptr_type {
+                Ok(self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
+                    .map(|p| p.into())
+                    .unwrap_or(alloca.into()))
+            } else {
+                Ok(alloca.into())
+            }
+        } else {
+            Ok(val.into())
+        }
     }
 }
