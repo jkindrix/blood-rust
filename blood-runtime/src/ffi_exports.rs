@@ -69,6 +69,134 @@ pub struct BloodStr {
     pub len: u64,
 }
 
+/// Blood owned String representation {ptr, len, capacity}.
+#[repr(C)]
+pub struct BloodString {
+    /// Pointer to the string data.
+    pub ptr: *mut u8,
+    /// Length of the string in bytes.
+    pub len: i64,
+    /// Capacity in bytes.
+    pub capacity: i64,
+}
+
+/// Create a new empty String.
+///
+/// # Arguments
+/// * `out` - Output buffer to write the String struct to
+///
+/// # Safety
+/// `out` must be a valid pointer to uninitialized BloodString memory.
+#[no_mangle]
+pub unsafe extern "C" fn string_new(out: *mut BloodString) {
+    (*out).ptr = std::ptr::null_mut();
+    (*out).len = 0;
+    (*out).capacity = 0;
+}
+
+/// Get the str slice from a String.
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+#[no_mangle]
+pub unsafe extern "C" fn string_as_str(s: *const BloodString) -> BloodStr {
+    BloodStr {
+        ptr: (*s).ptr,
+        len: (*s).len as u64,
+    }
+}
+
+/// Get the length of a String in bytes.
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+#[no_mangle]
+pub unsafe extern "C" fn string_len(s: *const BloodString) -> i64 {
+    (*s).len
+}
+
+/// Check if a String is empty.
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+#[no_mangle]
+pub unsafe extern "C" fn string_is_empty(s: *const BloodString) -> i32 {
+    if (*s).len == 0 { 1 } else { 0 }
+}
+
+/// Push a character to a String.
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+#[no_mangle]
+pub unsafe extern "C" fn string_push(s: *mut BloodString, ch: i32) {
+    let c = char::from_u32(ch as u32).unwrap_or('\u{FFFD}');
+    let mut buf = [0u8; 4];
+    let encoded = c.encode_utf8(&mut buf);
+    let bytes = encoded.as_bytes();
+
+    // Ensure capacity
+    let new_len = (*s).len + bytes.len() as i64;
+    if new_len > (*s).capacity {
+        let new_cap = std::cmp::max(new_len, (*s).capacity * 2).max(8);
+        let new_ptr = if (*s).ptr.is_null() {
+            let layout = std::alloc::Layout::from_size_align(new_cap as usize, 1).unwrap();
+            std::alloc::alloc(layout)
+        } else {
+            let old_layout = std::alloc::Layout::from_size_align((*s).capacity as usize, 1).unwrap();
+            std::alloc::realloc((*s).ptr, old_layout, new_cap as usize)
+        };
+        (*s).ptr = new_ptr;
+        (*s).capacity = new_cap;
+    }
+
+    // Copy bytes
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*s).ptr.add((*s).len as usize), bytes.len());
+    (*s).len = new_len;
+}
+
+/// Push a str to a String.
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+/// `other` must be a valid pointer to a BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn string_push_str(s: *mut BloodString, other: *const BloodStr) {
+    if (*other).ptr.is_null() || (*other).len == 0 {
+        return;
+    }
+
+    let bytes_len = (*other).len as i64;
+    let new_len = (*s).len + bytes_len;
+
+    // Ensure capacity
+    if new_len > (*s).capacity {
+        let new_cap = std::cmp::max(new_len, (*s).capacity * 2).max(8);
+        let new_ptr = if (*s).ptr.is_null() {
+            let layout = std::alloc::Layout::from_size_align(new_cap as usize, 1).unwrap();
+            std::alloc::alloc(layout)
+        } else {
+            let old_layout = std::alloc::Layout::from_size_align((*s).capacity as usize, 1).unwrap();
+            std::alloc::realloc((*s).ptr, old_layout, new_cap as usize)
+        };
+        (*s).ptr = new_ptr;
+        (*s).capacity = new_cap;
+    }
+
+    // Copy bytes
+    std::ptr::copy_nonoverlapping((*other).ptr, (*s).ptr.add((*s).len as usize), bytes_len as usize);
+    (*s).len = new_len;
+}
+
+/// Clear a String's contents.
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+#[no_mangle]
+pub unsafe extern "C" fn string_clear(s: *mut BloodString) {
+    (*s).len = 0;
+}
+
 /// Print a string (no newline).
 ///
 /// Takes a Blood str slice {ptr, len}.
@@ -3699,19 +3827,17 @@ pub struct BloodVec {
 ///
 /// # Arguments
 /// * `elem_size` - Size of each element in bytes
+/// * `out` - Output buffer to write the Vec struct to
 ///
-/// # Returns
-/// Pointer to the BloodVec struct (caller owns the memory).
+/// # Safety
+/// `out` must be a valid pointer to uninitialized BloodVec memory.
 #[no_mangle]
-pub extern "C" fn vec_new(elem_size: i64) -> *mut BloodVec {
-    let vec = Box::new(BloodVec {
-        ptr: std::ptr::null_mut(),
-        len: 0,
-        capacity: 0,
-    });
+pub unsafe extern "C" fn vec_new(elem_size: i64, out: *mut BloodVec) {
     // elem_size is stored implicitly - operations must pass it each time
     let _ = elem_size; // silence unused warning
-    Box::into_raw(vec)
+    (*out).ptr = std::ptr::null_mut();
+    (*out).len = 0;
+    (*out).capacity = 0;
 }
 
 /// Create a new Vec with the given capacity.
@@ -3719,27 +3845,25 @@ pub extern "C" fn vec_new(elem_size: i64) -> *mut BloodVec {
 /// # Arguments
 /// * `elem_size` - Size of each element in bytes
 /// * `capacity` - Initial capacity
+/// * `out` - Output buffer to write the Vec struct to
 ///
-/// # Returns
-/// Pointer to the BloodVec struct.
+/// # Safety
+/// `out` must be a valid pointer to uninitialized BloodVec memory.
 #[no_mangle]
-pub extern "C" fn vec_with_capacity(elem_size: i64, capacity: i64) -> *mut BloodVec {
+pub unsafe extern "C" fn vec_with_capacity(elem_size: i64, capacity: i64, out: *mut BloodVec) {
     let ptr = if capacity > 0 {
         let layout = std::alloc::Layout::from_size_align(
             (capacity * elem_size) as usize,
             8, // Default alignment
         ).unwrap();
-        unsafe { std::alloc::alloc(layout) }
+        std::alloc::alloc(layout)
     } else {
         std::ptr::null_mut()
     };
 
-    let vec = Box::new(BloodVec {
-        ptr,
-        len: 0,
-        capacity,
-    });
-    Box::into_raw(vec)
+    (*out).ptr = ptr;
+    (*out).len = 0;
+    (*out).capacity = capacity;
 }
 
 /// Get the length of a Vec.

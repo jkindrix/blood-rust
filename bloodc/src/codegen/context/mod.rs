@@ -2485,10 +2485,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             self.context.void_type().fn_type(&wrapper_param_types, false)
         };
 
-        // Create the wrapper function with a unique name
+        // Create the wrapper function with a unique name.
+        // Use LinkOnceODR linkage so the linker can merge identical wrappers
+        // when the same function is converted to fnptr in multiple compilation units.
         let original_name = original_fn.get_name().to_str().unwrap_or("unknown");
         let wrapper_name = format!("{}$fnptr", original_name);
-        let wrapper_fn = self.module.add_function(&wrapper_name, wrapper_fn_type, None);
+        use inkwell::module::Linkage;
+        let wrapper_fn = self.module.add_function(&wrapper_name, wrapper_fn_type, Some(Linkage::LinkOnceODR));
 
         // Save current builder position (we're in the middle of compiling another function)
         let saved_insert_block = self.builder.get_insert_block();
@@ -2614,6 +2617,34 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // string_as_bytes({*i8, i64, i64}*) -> {*i8, i64} - convert String to byte slice
         // String layout starts the same as BloodStr, so we can use str_ptr_type for the pointer
         self.module.add_function("string_as_bytes", str_as_bytes_type, None);
+
+        // string_new(out: *void) -> void - create an empty String at the output location
+        let string_new_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("string_new", string_new_type, None);
+
+        // string_as_str(s: *void) -> {*i8, i64} - get str slice from String
+        let string_as_str_type = str_slice_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("string_as_str", string_as_str_type, None);
+
+        // string_len(s: *void) -> i64 - get byte length of String
+        let string_len_type = i64_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("string_len", string_len_type, None);
+
+        // string_is_empty(s: *void) -> i32 - check if String is empty
+        let string_is_empty_type = i32_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("string_is_empty", string_is_empty_type, None);
+
+        // string_push(s: *void, ch: i32) -> void - push a character to String
+        let string_push_type = void_type.fn_type(&[i8_ptr_type.into(), i32_type.into()], false);
+        self.module.add_function("string_push", string_push_type, None);
+
+        // string_push_str(s: *void, other: {*i8, i64}*) -> void - push str to String
+        let string_push_str_type = void_type.fn_type(&[i8_ptr_type.into(), str_ptr_type.into()], false);
+        self.module.add_function("string_push_str", string_push_str_type, None);
+
+        // string_clear(s: *void) -> void - clear String contents
+        let string_clear_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("string_clear", string_clear_type, None);
 
         // str_len_chars({*i8, i64}*) -> i64 - count UTF-8 characters (not bytes)
         let str_len_chars_type = i64_type.fn_type(&[str_ptr_type.into()], false);
@@ -3175,12 +3206,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // === Vec<T> Runtime Functions ===
 
-        // vec_new(elem_size: i64) -> *void
-        let vec_new_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+        // vec_new(elem_size: i64, out: *void) -> void - writes Vec struct to output buffer
+        let vec_new_type = void_type.fn_type(&[i64_type.into(), i8_ptr_type.into()], false);
         self.module.add_function("vec_new", vec_new_type, None);
 
-        // vec_with_capacity(elem_size: i64, capacity: i64) -> *void
-        let vec_with_capacity_type = i8_ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        // vec_with_capacity(elem_size: i64, capacity: i64, out: *void) -> void - writes Vec struct to output buffer
+        let vec_with_capacity_type = void_type.fn_type(&[i64_type.into(), i64_type.into(), i8_ptr_type.into()], false);
         self.module.add_function("vec_with_capacity", vec_with_capacity_type, None);
 
         // vec_len(vec: *void) -> i64
