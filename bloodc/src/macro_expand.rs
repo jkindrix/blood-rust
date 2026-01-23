@@ -136,8 +136,10 @@ impl MacroExpander {
             | Declaration::Static(_)
             | Declaration::Bridge(_)
             | Declaration::Module(_)
-            | Declaration::Macro(_) => {
+            | Declaration::Macro(_)
+            | Declaration::Use(_) => {
                 // TODO: Expand macros in these contexts when needed
+                // Use declarations don't contain expressions, so nothing to expand
             }
         }
     }

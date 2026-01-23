@@ -4239,6 +4239,16 @@ fn test_module_resolution_diamond() {
     assert_file_type_checks("tests/fixtures/modules/diamond_dependency.blood");
 }
 
+/// Test that same-named types in different modules don't shadow each other.
+/// This is a regression test for a bug where types from imported submodules
+/// would incorrectly shadow same-named types from the parent module during
+/// the inject_module_bindings phase. Each module should use its own definition
+/// of same-named types, not the definition from an imported module.
+#[test]
+fn test_module_name_collision() {
+    assert_file_type_checks("tests/fixtures/modules/name_collision_main.blood");
+}
+
 /// Test that errors in imported modules report the correct source file.
 /// Previously, errors would be reported using the parent module's source,
 /// causing incorrect line numbers and file paths.
@@ -4284,4 +4294,85 @@ fn test_forward_references() {
 #[test]
 fn test_forward_references_in_module() {
     assert_file_type_checks("tests/fixtures/modules/forward_refs_main.blood");
+}
+
+/// Test `pub use` re-exports.
+/// A module can re-export items from submodules, making them accessible
+/// to external code through the parent module's namespace.
+#[test]
+fn test_pub_use_reexports() {
+    assert_file_type_checks("tests/fixtures/modules/reexport_main.blood");
+}
+
+/// Test that `use` statements can appear after `mod` declarations.
+/// This enables more flexible code organization within a file.
+#[test]
+fn test_use_after_mod_declarations() {
+    assert_file_type_checks("tests/fixtures/modules/use_after_mod.blood");
+}
+
+/// Test that `use` statements can import various items from external modules.
+/// This tests importing structs, enums, functions, constants, and type aliases.
+#[test]
+fn test_use_from_external_modules() {
+    assert_file_type_checks("tests/fixtures/modules/use_from_external.blood");
+}
+
+/// Test advanced use patterns: associated functions, methods, and enum variants
+/// on types imported via `use` statements.
+#[test]
+fn test_use_advanced_external() {
+    assert_file_type_checks("tests/fixtures/modules/use_advanced_external.blood");
+}
+
+/// Test grouped use statements: `use module.{A, B, C};`
+#[test]
+fn test_use_group_external() {
+    assert_file_type_checks("tests/fixtures/modules/use_group_external.blood");
+}
+
+/// Test glob use statements: `use module.*;`
+#[test]
+fn test_use_glob_external() {
+    assert_file_type_checks("tests/fixtures/modules/use_glob_external.blood");
+}
+
+/// Test use statements from nested modules: `use outer.inner.Type;`
+#[test]
+fn test_use_nested_external() {
+    assert_file_type_checks("tests/fixtures/modules/use_nested_external.blood");
+}
+
+/// Test cross-module associated functions on enums.
+#[test]
+fn test_cross_module_enum_associated_fns() {
+    assert_file_type_checks("tests/fixtures/modules/enum_assoc_main.blood");
+}
+
+/// Test cross-module enum associated functions with fully-qualified paths.
+#[test]
+fn test_cross_module_enum_associated_fns_qualified() {
+    assert_file_type_checks("tests/fixtures/modules/enum_assoc_qualified.blood");
+}
+
+/// Test contextual keywords as struct field names.
+/// Keywords like `type`, `in`, `async`, `await`, `move`, `ref`, `with`, `where`
+/// should be usable as field names in structs.
+#[test]
+fn test_contextual_keywords_as_field_names() {
+    assert_file_type_checks("tests/fixtures/contextual_keywords.blood");
+}
+
+/// Test unreachable!, todo!, unimplemented!, and panic! macros.
+/// All of these should return the Never type, allowing them to be used
+/// as the last expression in functions that return any type.
+#[test]
+fn test_never_returning_macros() {
+    assert_file_type_checks("tests/fixtures/unreachable_macro.blood");
+}
+
+/// Test &str methods: len, as_bytes, chars, len_chars, char_at.
+#[test]
+fn test_str_methods() {
+    assert_file_type_checks("tests/fixtures/str_methods.blood");
 }

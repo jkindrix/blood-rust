@@ -477,6 +477,10 @@ impl SemanticAnalyzer {
                     symbol_at_offset.insert(offset, idx);
                 }
             }
+            Declaration::Use(_) => {
+                // Use declarations don't define new symbols in the LSP sense,
+                // they just bring existing symbols into scope
+            }
         }
     }
 
