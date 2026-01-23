@@ -4824,57 +4824,79 @@ impl<'a> TypeContext<'a> {
 
                 // Not a submodule, check if the second segment is an enum and third is a variant
                 // This handles module::Enum::Variant pattern
-                if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
-                    for &item_def_id in &mod_info.items {
-                        if let Some(enum_info) = self.enum_defs.get(&item_def_id).cloned() {
-                            if enum_info.name == type_name {
-                                // Found the enum, now look for the variant
-                                if let Some(variant) = enum_info.variants.iter().find(|v| v.name == third_name) {
-                                    let variant_idx = variant.index;
-                                    let variant_def_id = variant.def_id;
-                                    let variant_fields = variant.fields.clone();
-
-                                    if variant_fields.is_empty() {
-                                        let type_args: Vec<Type> = enum_info.generics.iter()
-                                            .map(|_| self.unifier.fresh_var())
-                                            .collect();
-                                        let enum_ty = Type::adt(item_def_id, type_args);
-
-                                        return Ok(hir::Expr::new(
-                                            hir::ExprKind::Variant {
-                                                def_id: item_def_id,
-                                                variant_idx,
-                                                fields: vec![],
-                                            },
-                                            enum_ty,
-                                            span,
-                                        ));
-                                    } else {
-                                        // Enum variant with fields - return as constructor function
-                                        let type_args: Vec<Type> = enum_info.generics.iter()
-                                            .map(|_| self.unifier.fresh_var())
-                                            .collect();
-
-                                        let subst: std::collections::HashMap<TyVarId, Type> = enum_info.generics.iter()
-                                            .zip(type_args.iter())
-                                            .map(|(&tyvar, ty)| (tyvar, ty.clone()))
-                                            .collect();
-
-                                        let field_types: Vec<Type> = variant_fields.iter()
-                                            .map(|f| self.substitute_type_vars(&f.ty, &subst))
-                                            .collect();
-
-                                        let enum_ty = Type::adt(item_def_id, type_args);
-                                        let fn_ty = Type::function(field_types, enum_ty);
-
-                                        return Ok(hir::Expr::new(
-                                            hir::ExprKind::Def(variant_def_id),
-                                            fn_ty,
-                                            span,
-                                        ));
+                // First, collect enum info from both items and reexports to avoid borrow issues
+                let enum_match: Option<(DefId, super::EnumInfo)> = {
+                    let mut result = None;
+                    if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                        // Check direct items
+                        for &item_def_id in &mod_info.items {
+                            if let Some(enum_info) = self.enum_defs.get(&item_def_id) {
+                                if enum_info.name == type_name {
+                                    result = Some((item_def_id, enum_info.clone()));
+                                    break;
+                                }
+                            }
+                        }
+                        // If not found in items, check re-exports (from `pub use`)
+                        if result.is_none() {
+                            for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
+                                if reexport_name == &type_name {
+                                    if let Some(enum_info) = self.enum_defs.get(reexport_def_id) {
+                                        result = Some((*reexport_def_id, enum_info.clone()));
+                                        break;
                                     }
                                 }
                             }
+                        }
+                    }
+                    result
+                };
+
+                if let Some((enum_def_id, enum_info)) = enum_match {
+                    // Found the enum, now look for the variant
+                    if let Some(variant) = enum_info.variants.iter().find(|v| v.name == third_name) {
+                        let variant_idx = variant.index;
+                        let variant_def_id = variant.def_id;
+                        let variant_fields = variant.fields.clone();
+
+                        if variant_fields.is_empty() {
+                            let type_args: Vec<Type> = enum_info.generics.iter()
+                                .map(|_| self.unifier.fresh_var())
+                                .collect();
+                            let enum_ty = Type::adt(enum_def_id, type_args);
+
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Variant {
+                                    def_id: enum_def_id,
+                                    variant_idx,
+                                    fields: vec![],
+                                },
+                                enum_ty,
+                                span,
+                            ));
+                        } else {
+                            // Enum variant with fields - return as constructor function
+                            let type_args: Vec<Type> = enum_info.generics.iter()
+                                .map(|_| self.unifier.fresh_var())
+                                .collect();
+
+                            let subst: std::collections::HashMap<TyVarId, Type> = enum_info.generics.iter()
+                                .zip(type_args.iter())
+                                .map(|(&tyvar, ty)| (tyvar, ty.clone()))
+                                .collect();
+
+                            let field_types: Vec<Type> = variant_fields.iter()
+                                .map(|f| self.substitute_type_vars(&f.ty, &subst))
+                                .collect();
+
+                            let enum_ty = Type::adt(enum_def_id, type_args);
+                            let fn_ty = Type::function(field_types, enum_ty);
+
+                            return Ok(hir::Expr::new(
+                                hir::ExprKind::Def(variant_def_id),
+                                fn_ty,
+                                span,
+                            ));
                         }
                     }
                 }
@@ -4883,6 +4905,7 @@ impl<'a> TypeContext<'a> {
                 // Find the type (struct or enum) within the module's items (properly scoped)
                 let mut type_def_id: Option<DefId> = None;
                 if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                    // Check direct items
                     for &item_def_id in &mod_info.items {
                         // Check structs
                         if let Some(struct_info) = self.struct_defs.get(&item_def_id) {
@@ -4896,6 +4919,23 @@ impl<'a> TypeContext<'a> {
                             if enum_info.name == type_name {
                                 type_def_id = Some(item_def_id);
                                 break;
+                            }
+                        }
+                    }
+                    // If not found in items, check re-exports (from `pub use`)
+                    if type_def_id.is_none() {
+                        for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
+                            if reexport_name == &type_name {
+                                // Check if it's a struct
+                                if self.struct_defs.contains_key(reexport_def_id) {
+                                    type_def_id = Some(*reexport_def_id);
+                                    break;
+                                }
+                                // Check if it's an enum
+                                if self.enum_defs.contains_key(reexport_def_id) {
+                                    type_def_id = Some(*reexport_def_id);
+                                    break;
+                                }
                             }
                         }
                     }
