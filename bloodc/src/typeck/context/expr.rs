@@ -3633,6 +3633,78 @@ impl<'a> TypeContext<'a> {
                                     }
                                 }
                             }
+
+                        }
+                    }
+
+                    // Check re-exported items separately (from `pub use`)
+                    // We need to extract the reexport info first to avoid borrow issues
+                    let reexport_match: Option<(DefId, hir::DefKind, Option<super::TypeAliasInfo>)> = {
+                        let mut result = None;
+                        for (_mod_def_id, mod_info) in &self.module_defs {
+                            if mod_info.name == module_name {
+                                for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
+                                    if reexport_name == &type_name {
+                                        if let Some(def_info) = self.resolver.def_info.get(reexport_def_id) {
+                                            let alias_info = if def_info.kind == hir::DefKind::TypeAlias {
+                                                self.type_aliases.get(reexport_def_id).cloned()
+                                            } else {
+                                                None
+                                            };
+                                            result = Some((*reexport_def_id, def_info.kind.clone(), alias_info));
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        result
+                    };
+
+                    if let Some((reexport_def_id, def_kind, alias_info_opt)) = reexport_match {
+                        match def_kind {
+                            hir::DefKind::Struct | hir::DefKind::Enum => {
+                                // Extract type arguments if any
+                                let type_args = if let Some(ref args) = path.segments[1].args {
+                                    let mut parsed_args = Vec::new();
+                                    for arg in &args.args {
+                                        if let ast::TypeArg::Type(arg_ty) = arg {
+                                            parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                        }
+                                    }
+                                    parsed_args
+                                } else {
+                                    Vec::new()
+                                };
+                                return Ok(Type::adt(reexport_def_id, type_args));
+                            }
+                            hir::DefKind::TypeAlias => {
+                                if let Some(alias_info) = alias_info_opt {
+                                    let type_args = if let Some(ref args) = path.segments[1].args {
+                                        let mut parsed_args = Vec::new();
+                                        for arg in &args.args {
+                                            if let ast::TypeArg::Type(arg_ty) = arg {
+                                                parsed_args.push(self.ast_type_to_hir_type(arg_ty)?);
+                                            }
+                                        }
+                                        parsed_args
+                                    } else {
+                                        Vec::new()
+                                    };
+
+                                    if !alias_info.generics.is_empty() && !type_args.is_empty() {
+                                        let subst: HashMap<TyVarId, Type> = alias_info.generics.iter()
+                                            .zip(type_args.iter())
+                                            .map(|(&var, ty)| (var, ty.clone()))
+                                            .collect();
+                                        return Ok(self.substitute_type_vars(&alias_info.ty, &subst));
+                                    }
+                                    return Ok(alias_info.ty.clone());
+                                }
+                                return Ok(Type::adt(reexport_def_id, Vec::new()));
+                            }
+                            _ => {}
                         }
                     }
 
@@ -4807,13 +4879,21 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Not an enum variant, try to find a struct and method
-                // Find the type (struct) within the module's items (properly scoped)
+                // Not an enum variant, try to find a struct or enum with an associated function
+                // Find the type (struct or enum) within the module's items (properly scoped)
                 let mut type_def_id: Option<DefId> = None;
                 if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
                     for &item_def_id in &mod_info.items {
+                        // Check structs
                         if let Some(struct_info) = self.struct_defs.get(&item_def_id) {
                             if struct_info.name == type_name {
+                                type_def_id = Some(item_def_id);
+                                break;
+                            }
+                        }
+                        // Check enums (for associated functions, not variants)
+                        if let Some(enum_info) = self.enum_defs.get(&item_def_id) {
+                            if enum_info.name == type_name {
                                 type_def_id = Some(item_def_id);
                                 break;
                             }
@@ -7086,11 +7166,24 @@ impl<'a> TypeContext<'a> {
                         let mut found_struct: Option<(DefId, super::StructInfo)> = None;
 
                         if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                            // Check direct items first
                             for &item_def_id in &mod_info.items {
                                 if let Some(struct_info) = self.struct_defs.get(&item_def_id) {
                                     if struct_info.name == type_name {
                                         found_struct = Some((item_def_id, struct_info.clone()));
                                         break;
+                                    }
+                                }
+                            }
+
+                            // If not found in items, check re-exports (from `pub use`)
+                            if found_struct.is_none() {
+                                for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
+                                    if reexport_name == &type_name {
+                                        if let Some(struct_info) = self.struct_defs.get(reexport_def_id) {
+                                            found_struct = Some((*reexport_def_id, struct_info.clone()));
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -7627,7 +7720,6 @@ impl<'a> TypeContext<'a> {
                     } else {
                         // Type is an ADT but struct definition not found - this indicates
                         // a cross-module struct whose field information wasn't registered.
-                        // Report it as unknown field with the ADT type to help diagnosis.
                         return Err(self.error_unknown_field(&inner_ty, &field_name, span));
                     }
                 }
@@ -7870,8 +7962,9 @@ impl<'a> TypeContext<'a> {
                 // print macros return unit
                 Type::unit()
             }
-            "panic" => {
-                // panic! returns Never type
+            "panic" | "unreachable" | "todo" | "unimplemented" => {
+                // panic!, unreachable!, todo!, unimplemented! all return Never type
+                // (they all terminate the program or branch)
                 Type::new(hir::TypeKind::Never)
             }
             "write" | "writeln" => {
