@@ -437,6 +437,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let mut output_buffer_alloca: Option<inkwell::values::PointerValue> = None;
 
                         // Check for special built-in methods that need additional arguments
+                        // Note: vec_new and vec_with_capacity are handled separately below
+                        // because they get elem_size from the destination type, not from args
                         let needs_elem_size = matches!(
                             builtin_name.as_str(),
                             "box_new" | "box_into_inner" |
@@ -1269,6 +1271,125 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                             let out_ptr = self.builder
                                 .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), span
+                                )])?;
+                            converted_args.push(out_ptr.into());
+                        }
+
+                        // Handle string_new which needs output buffer for String struct
+                        // String::new() has no args, but needs output buffer for the String value
+                        if builtin_name.as_str() == "string_new" {
+                            let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                            // String = { ptr: *i8, len: i64, capacity: i64 }
+                            let string_ty = self.context.struct_type(&[
+                                i8_ptr_type.into(),
+                                self.context.i64_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+
+                            let out_alloca = self.builder
+                                .build_alloca(string_ty, "string_out")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), span
+                                )])?;
+
+                            // Save for later use after call
+                            output_buffer_alloca = Some(out_alloca);
+
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), span
+                                )])?;
+                            converted_args.push(out_ptr.into());
+                        }
+
+                        // Handle vec_new which needs elem_size and output buffer
+                        // Vec::new() has no args, but runtime needs elem_size and output buffer
+                        if builtin_name.as_str() == "vec_new" {
+                            let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                            // Vec = { ptr: *i8, len: i64, capacity: i64 }
+                            let vec_ty = self.context.struct_type(&[
+                                i8_ptr_type.into(),
+                                self.context.i64_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+
+                            // Allocate output buffer for Vec struct
+                            let out_alloca = self.builder
+                                .build_alloca(vec_ty, "vec_out")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), span
+                                )])?;
+
+                            // Save for later use after call
+                            output_buffer_alloca = Some(out_alloca);
+
+                            // Get element type from destination (Vec<T> -> T)
+                            let dest_local = &body.locals[destination.local.index() as usize];
+                            let elem_size: u64 = if let crate::hir::TypeKind::Adt { args: type_args, .. } = dest_local.ty.kind() {
+                                if let Some(elem_ty) = type_args.first() {
+                                    let llvm_ty = self.lower_type(elem_ty);
+                                    self.get_type_size_in_bytes(llvm_ty)
+                                } else {
+                                    8 // Default pointer size
+                                }
+                            } else {
+                                8 // Default pointer size
+                            };
+                            let elem_size_val = self.context.i64_type().const_int(elem_size, false);
+                            converted_args.push(elem_size_val.into());
+
+                            // Add output buffer pointer
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "vec_out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), span
+                                )])?;
+                            converted_args.push(out_ptr.into());
+                        }
+
+                        // Handle vec_with_capacity which needs elem_size, capacity, and output buffer
+                        // Vec::with_capacity(cap) -> vec_with_capacity(elem_size, cap, out)
+                        if builtin_name.as_str() == "vec_with_capacity" {
+                            let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                            // Vec = { ptr: *i8, len: i64, capacity: i64 }
+                            let vec_ty = self.context.struct_type(&[
+                                i8_ptr_type.into(),
+                                self.context.i64_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+
+                            // Allocate output buffer for Vec struct
+                            let out_alloca = self.builder
+                                .build_alloca(vec_ty, "vec_out")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), span
+                                )])?;
+
+                            // Save for later use after call
+                            output_buffer_alloca = Some(out_alloca);
+
+                            // Get element type from destination (Vec<T> -> T)
+                            let dest_local = &body.locals[destination.local.index() as usize];
+                            let elem_size: u64 = if let crate::hir::TypeKind::Adt { args: type_args, .. } = dest_local.ty.kind() {
+                                if let Some(elem_ty) = type_args.first() {
+                                    let llvm_ty = self.lower_type(elem_ty);
+                                    self.get_type_size_in_bytes(llvm_ty)
+                                } else {
+                                    8 // Default pointer size
+                                }
+                            } else {
+                                8 // Default pointer size
+                            };
+                            let elem_size_val = self.context.i64_type().const_int(elem_size, false);
+                            // Insert elem_size at the beginning, capacity is already in converted_args
+                            converted_args.insert(0, elem_size_val.into());
+
+                            // Add output buffer pointer at the end
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "vec_out_ptr_cast")
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM pointer cast error: {}", e), span
                                 )])?;
