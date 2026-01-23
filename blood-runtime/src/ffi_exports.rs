@@ -985,6 +985,435 @@ pub extern "C" fn read_int() -> i32 {
 }
 
 // ============================================================================
+// File I/O Functions
+// ============================================================================
+
+/// Open a file and return a file descriptor.
+///
+/// # Arguments
+/// * `path` - Path to the file as a BloodStr
+/// * `mode` - Mode string: "r" (read), "w" (write), "a" (append), "rw" (read/write)
+///
+/// # Returns
+/// * File descriptor (>= 0) on success
+/// * -1 on error
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_open(path: BloodStr, mode: BloodStr) -> i64 {
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::io::IntoRawFd;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return -1;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mode_str = if mode.ptr.is_null() || mode.len == 0 {
+        "r"
+    } else {
+        let mode_slice = std::slice::from_raw_parts(mode.ptr, mode.len as usize);
+        match std::str::from_utf8(mode_slice) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+
+    let file_result = match mode_str {
+        "r" => File::open(path_str),
+        "w" => File::create(path_str),
+        "a" => OpenOptions::new().append(true).create(true).open(path_str),
+        "rw" => OpenOptions::new().read(true).write(true).open(path_str),
+        "rw+" => OpenOptions::new().read(true).write(true).create(true).open(path_str),
+        _ => return -1,
+    };
+
+    match file_result {
+        Ok(file) => file.into_raw_fd() as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Read from a file descriptor into a buffer.
+///
+/// # Arguments
+/// * `fd` - File descriptor
+/// * `buf` - Buffer to read into
+/// * `count` - Maximum number of bytes to read
+///
+/// # Returns
+/// * Number of bytes read (>= 0) on success
+/// * -1 on error
+///
+/// # Safety
+/// The buffer must be valid for `count` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_read(fd: i64, buf: *mut u8, count: u64) -> i64 {
+    use std::os::unix::io::FromRawFd;
+    use std::io::Read;
+
+    if fd < 0 || buf.is_null() {
+        return -1;
+    }
+
+    // Create a File from the raw fd, but use ManuallyDrop to avoid closing it
+    let mut file = std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd as i32));
+    let buffer = std::slice::from_raw_parts_mut(buf, count as usize);
+
+    match file.read(buffer) {
+        Ok(n) => n as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Write to a file descriptor from a buffer.
+///
+/// # Arguments
+/// * `fd` - File descriptor
+/// * `buf` - Buffer to write from
+/// * `count` - Number of bytes to write
+///
+/// # Returns
+/// * Number of bytes written (>= 0) on success
+/// * -1 on error
+///
+/// # Safety
+/// The buffer must be valid for `count` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_write(fd: i64, buf: *const u8, count: u64) -> i64 {
+    use std::os::unix::io::FromRawFd;
+    use std::io::Write;
+
+    if fd < 0 || buf.is_null() {
+        return -1;
+    }
+
+    // Create a File from the raw fd, but use ManuallyDrop to avoid closing it
+    let mut file = std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd as i32));
+    let buffer = std::slice::from_raw_parts(buf, count as usize);
+
+    match file.write(buffer) {
+        Ok(n) => n as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Close a file descriptor.
+///
+/// # Arguments
+/// * `fd` - File descriptor to close
+///
+/// # Returns
+/// * 0 on success
+/// * -1 on error
+#[no_mangle]
+pub extern "C" fn file_close(fd: i64) -> i32 {
+    use std::os::unix::io::FromRawFd;
+
+    if fd < 0 {
+        return -1;
+    }
+
+    // Create a File from the raw fd and let it drop (which closes the fd)
+    let _file = unsafe { std::fs::File::from_raw_fd(fd as i32) };
+    0
+}
+
+/// Read an entire file into a string.
+///
+/// This is a convenience function that opens a file, reads its entire contents,
+/// and returns it as a BloodStr. The returned string is allocated on the heap
+/// and must be freed by the caller using `blood_str_free`.
+///
+/// # Arguments
+/// * `path` - Path to the file as a BloodStr
+///
+/// # Returns
+/// * BloodStr containing file contents on success
+/// * Empty BloodStr (ptr=null, len=0) on error
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_read_to_string(path: BloodStr) -> BloodStr {
+    use std::fs;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return BloodStr { ptr: std::ptr::null(), len: 0 },
+    };
+
+    match fs::read_to_string(path_str) {
+        Ok(contents) => string_to_blood_str(contents),
+        Err(_) => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+/// Write a string to a file, creating or truncating it.
+///
+/// # Arguments
+/// * `path` - Path to the file as a BloodStr
+/// * `content` - Content to write as a BloodStr
+///
+/// # Returns
+/// * true on success
+/// * false on error
+///
+/// # Safety
+/// Both pointers must be valid for their respective lengths.
+#[no_mangle]
+pub unsafe extern "C" fn file_write_string(path: BloodStr, content: BloodStr) -> bool {
+    use std::fs;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return false;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let content_str = if content.ptr.is_null() || content.len == 0 {
+        ""
+    } else {
+        let content_slice = std::slice::from_raw_parts(content.ptr, content.len as usize);
+        match std::str::from_utf8(content_slice) {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    fs::write(path_str, content_str).is_ok()
+}
+
+/// Append a string to a file, creating it if it doesn't exist.
+///
+/// # Arguments
+/// * `path` - Path to the file as a BloodStr
+/// * `content` - Content to append as a BloodStr
+///
+/// # Returns
+/// * true on success
+/// * false on error
+///
+/// # Safety
+/// Both pointers must be valid for their respective lengths.
+#[no_mangle]
+pub unsafe extern "C" fn file_append_string(path: BloodStr, content: BloodStr) -> bool {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return false;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let content_str = if content.ptr.is_null() || content.len == 0 {
+        ""
+    } else {
+        let content_slice = std::slice::from_raw_parts(content.ptr, content.len as usize);
+        match std::str::from_utf8(content_slice) {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    match OpenOptions::new().append(true).create(true).open(path_str) {
+        Ok(mut file) => file.write_all(content_str.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Check if a file exists.
+///
+/// # Arguments
+/// * `path` - Path to check as a BloodStr
+///
+/// # Returns
+/// * true if the file exists
+/// * false otherwise
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_exists(path: BloodStr) -> bool {
+    use std::path::Path;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return false;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    Path::new(path_str).exists()
+}
+
+/// Delete a file.
+///
+/// # Arguments
+/// * `path` - Path to the file to delete as a BloodStr
+///
+/// # Returns
+/// * true on success
+/// * false on error
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_delete(path: BloodStr) -> bool {
+    use std::fs;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return false;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    fs::remove_file(path_str).is_ok()
+}
+
+/// Get the size of a file in bytes.
+///
+/// # Arguments
+/// * `path` - Path to the file as a BloodStr
+///
+/// # Returns
+/// * File size in bytes (>= 0) on success
+/// * -1 on error
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn file_size(path: BloodStr) -> i64 {
+    use std::fs;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return -1;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    match fs::metadata(path_str) {
+        Ok(metadata) => metadata.len() as i64,
+        Err(_) => -1,
+    }
+}
+
+// ============================================================================
+// Command-Line Argument Functions
+// ============================================================================
+
+/// Global storage for command-line arguments.
+/// Initialized once at program start via `blood_init_args`.
+static ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Initialize command-line arguments.
+///
+/// This should be called once at program startup (typically from the entry point)
+/// with argc and argv from main().
+///
+/// # Safety
+/// argv must be a valid array of argc null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn blood_init_args(argc: c_int, argv: *const *const c_char) {
+    let mut args = Vec::with_capacity(argc as usize);
+    for i in 0..argc as isize {
+        let arg_ptr = *argv.offset(i);
+        if !arg_ptr.is_null() {
+            if let Ok(arg_str) = CStr::from_ptr(arg_ptr).to_str() {
+                args.push(arg_str.to_string());
+            }
+        }
+    }
+    let _ = ARGS.set(args);
+}
+
+/// Get the number of command-line arguments.
+///
+/// # Returns
+/// * Number of arguments (including program name)
+/// * 0 if arguments haven't been initialized
+#[no_mangle]
+pub extern "C" fn args_count() -> i32 {
+    ARGS.get().map(|args| args.len() as i32).unwrap_or(0)
+}
+
+/// Get a command-line argument by index.
+///
+/// # Arguments
+/// * `index` - Zero-based index of the argument
+///
+/// # Returns
+/// * BloodStr containing the argument on success
+/// * Empty BloodStr (ptr=null, len=0) if index is out of bounds or args not initialized
+#[no_mangle]
+pub extern "C" fn args_get(index: i32) -> BloodStr {
+    if index < 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    match ARGS.get() {
+        Some(args) => {
+            if let Some(arg) = args.get(index as usize) {
+                BloodStr {
+                    ptr: arg.as_ptr(),
+                    len: arg.len() as u64,
+                }
+            } else {
+                BloodStr { ptr: std::ptr::null(), len: 0 }
+            }
+        }
+        None => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+/// Get all command-line arguments as a single string separated by spaces.
+///
+/// # Returns
+/// * BloodStr containing all arguments separated by spaces
+/// * Empty BloodStr if args not initialized
+#[no_mangle]
+pub extern "C" fn args_join() -> BloodStr {
+    match ARGS.get() {
+        Some(args) => {
+            let joined = args.join(" ");
+            string_to_blood_str(joined)
+        }
+        None => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+// ============================================================================
 // Size Functions
 // ============================================================================
 

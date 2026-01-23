@@ -297,6 +297,50 @@ impl<'a> TypeContext<'a> {
 
         // pow(f64, f64) -> f64 - power
         self.register_builtin_fn("pow", vec![f64_ty.clone(), f64_ty.clone()], f64_ty.clone());
+
+        // === File I/O Functions ===
+
+        // file_open(&str, &str) -> i64 - open a file, returns fd or -1 on error
+        // Mode: "r" (read), "w" (write), "a" (append), "rw" (read/write), "rw+" (read/write/create)
+        self.register_builtin_fn("file_open", vec![ref_str_ty.clone(), ref_str_ty.clone()], i64_ty.clone());
+
+        // file_read(fd: i64, buf: u64, count: u64) -> i64 - read from fd, returns bytes read or -1
+        self.register_builtin_fn("file_read", vec![i64_ty.clone(), u64_ty.clone(), u64_ty.clone()], i64_ty.clone());
+
+        // file_write(fd: i64, buf: u64, count: u64) -> i64 - write to fd, returns bytes written or -1
+        self.register_builtin_fn("file_write", vec![i64_ty.clone(), u64_ty.clone(), u64_ty.clone()], i64_ty.clone());
+
+        // file_close(fd: i64) -> i32 - close fd, returns 0 on success or -1 on error
+        self.register_builtin_fn("file_close", vec![i64_ty.clone()], i32_ty.clone());
+
+        // file_read_to_string(&str) -> &str - read entire file as string
+        self.register_builtin_fn("file_read_to_string", vec![ref_str_ty.clone()], ref_str_ty.clone());
+
+        // file_write_string(&str, &str) -> bool - write string to file (creates/truncates)
+        self.register_builtin_fn("file_write_string", vec![ref_str_ty.clone(), ref_str_ty.clone()], bool_ty.clone());
+
+        // file_append_string(&str, &str) -> bool - append string to file (creates if needed)
+        self.register_builtin_fn("file_append_string", vec![ref_str_ty.clone(), ref_str_ty.clone()], bool_ty.clone());
+
+        // file_exists(&str) -> bool - check if file exists
+        self.register_builtin_fn("file_exists", vec![ref_str_ty.clone()], bool_ty.clone());
+
+        // file_delete(&str) -> bool - delete a file
+        self.register_builtin_fn("file_delete", vec![ref_str_ty.clone()], bool_ty.clone());
+
+        // file_size(&str) -> i64 - get file size in bytes, returns -1 on error
+        self.register_builtin_fn("file_size", vec![ref_str_ty.clone()], i64_ty.clone());
+
+        // === Command-Line Argument Functions ===
+
+        // args_count() -> i32 - get number of command-line arguments
+        self.register_builtin_fn("args_count", vec![], i32_ty.clone());
+
+        // args_get(i32) -> &str - get argument at index (returns empty string if out of bounds)
+        self.register_builtin_fn("args_get", vec![i32_ty.clone()], ref_str_ty.clone());
+
+        // args_join() -> &str - get all arguments as a single space-separated string
+        self.register_builtin_fn("args_join", vec![], ref_str_ty.clone());
     }
 
     /// Register a single built-in function.

@@ -4384,3 +4384,15 @@ fn test_str_methods() {
 fn test_pub_use_pattern_match() {
     assert_file_type_checks("tests/fixtures/pub_use_pattern/main.blood");
 }
+
+/// Test file I/O builtins: file_exists, file_read_to_string, file_size, etc.
+#[test]
+fn test_file_io_builtins() {
+    assert_file_type_checks("tests/fixtures/file_io_builtins.blood");
+}
+
+/// Test command-line argument builtins: args_count, args_get, args_join.
+#[test]
+fn test_cli_args_builtins() {
+    assert_file_type_checks("tests/fixtures/cli_args_builtins.blood");
+}
