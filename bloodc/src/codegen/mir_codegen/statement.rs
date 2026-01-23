@@ -48,7 +48,9 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     Some(place.local),
                 )?;
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
-                self.builder.build_store(ptr, value)
+                // Convert value to match destination type if needed
+                let converted_value = self.convert_value_for_store(value, ptr, stmt.span)?;
+                self.builder.build_store(ptr, converted_value)
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM store error: {}", e), stmt.span
                     )])?;

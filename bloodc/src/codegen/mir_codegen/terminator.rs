@@ -1511,7 +1511,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM load error: {}", e), span
                                 )])?;
-                            self.builder.build_store(dest_ptr, result)
+                            // Convert result to match destination type if needed
+                            let converted_result = self.convert_value_for_store(result, dest_ptr, span)?;
+                            self.builder.build_store(dest_ptr, converted_result)
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM store error: {}", e), span
                                 )])?;
@@ -1752,26 +1754,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;
         if let Some(ret_val) = call_result.try_as_basic_value().left() {
             // Convert return value to destination type if needed
-            let dest_elem_type = dest_ptr.get_type().get_element_type();
-            let converted_val = if ret_val.is_int_value() && dest_elem_type.is_int_type() {
-                let ret_int = ret_val.into_int_value();
-                let dest_int_type = dest_elem_type.into_int_type();
-                // Truncate if destination is narrower (e.g., i32 -> i1 for bool)
-                if ret_int.get_type().get_bit_width() > dest_int_type.get_bit_width() {
-                    self.builder.build_int_truncate(ret_int, dest_int_type, "trunc")
-                        .map(|v| v.into())
-                        .unwrap_or(ret_val)
-                // Zero-extend if destination is wider
-                } else if ret_int.get_type().get_bit_width() < dest_int_type.get_bit_width() {
-                    self.builder.build_int_z_extend(ret_int, dest_int_type, "zext")
-                        .map(|v| v.into())
-                        .unwrap_or(ret_val)
-                } else {
-                    ret_val
-                }
-            } else {
-                ret_val
-            };
+            let converted_val = self.convert_value_for_store(ret_val, dest_ptr, span)?;
             self.builder.build_store(dest_ptr, converted_val)
                 .map_err(|e| vec![Diagnostic::error(
                     format!("LLVM store error: {}", e), span
@@ -2510,5 +2493,104 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         } else {
             Ok(val.into())
         }
+    }
+
+    /// Convert a value to match the expected destination pointer element type for a store.
+    /// This handles cases like storing i8* to a typed pointer, or integer width mismatches.
+    pub(super) fn convert_value_for_store(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        dest_ptr: inkwell::values::PointerValue<'ctx>,
+        span: crate::span::Span,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use inkwell::types::AnyType;
+
+        let dest_elem_type = dest_ptr.get_type().get_element_type();
+
+        // Integer type conversions (truncate or extend)
+        if val.is_int_value() && dest_elem_type.is_int_type() {
+            let val_int = val.into_int_value();
+            let dest_int_type = dest_elem_type.into_int_type();
+            let val_width = val_int.get_type().get_bit_width();
+            let dest_width = dest_int_type.get_bit_width();
+
+            if val_width > dest_width {
+                // Truncate
+                return Ok(self.builder.build_int_truncate(val_int, dest_int_type, "store_trunc")
+                    .map(|v| v.into())
+                    .unwrap_or(val));
+            } else if val_width < dest_width {
+                // Zero-extend
+                return Ok(self.builder.build_int_z_extend(val_int, dest_int_type, "store_zext")
+                    .map(|v| v.into())
+                    .unwrap_or(val));
+            }
+        }
+
+        // Pointer to different pointer type: cast
+        if val.is_pointer_value() && dest_elem_type.is_pointer_type() {
+            let ptr_val = val.into_pointer_value();
+            let expected_ptr_type = dest_elem_type.into_pointer_type();
+            if ptr_val.get_type() != expected_ptr_type {
+                return Ok(self.builder.build_pointer_cast(ptr_val, expected_ptr_type, "store_ptr_cast")
+                    .map(|p| p.into())
+                    .unwrap_or(val));
+            }
+        }
+
+        // Integer to pointer conversion (for opaque pointers represented as integers)
+        if val.is_int_value() && dest_elem_type.is_pointer_type() {
+            let int_val = val.into_int_value();
+            let ptr_type = dest_elem_type.into_pointer_type();
+            return Ok(self.builder.build_int_to_ptr(int_val, ptr_type, "store_int_to_ptr")
+                .map(|p| p.into())
+                .unwrap_or(val));
+        }
+
+        // Pointer to integer conversion
+        if val.is_pointer_value() && dest_elem_type.is_int_type() {
+            let ptr_val = val.into_pointer_value();
+            let int_type = dest_elem_type.into_int_type();
+            return Ok(self.builder.build_ptr_to_int(ptr_val, int_type, "store_ptr_to_int")
+                .map(|i| i.into())
+                .unwrap_or(val));
+        }
+
+        // Float width conversions
+        if val.is_float_value() && dest_elem_type.is_float_type() {
+            let float_val = val.into_float_value();
+            let dest_float_type = dest_elem_type.into_float_type();
+            if float_val.get_type() != dest_float_type {
+                return Ok(self.builder.build_float_cast(float_val, dest_float_type, "store_float_cast")
+                    .map(|f| f.into())
+                    .unwrap_or(val));
+            }
+        }
+
+        // Struct value to pointer (store to temporary then return pointer)
+        // Note: This is for cases where dest expects a pointer but we have a struct value
+        // This shouldn't happen in normal store operations, but handle it defensively
+        if val.is_struct_value() && dest_elem_type.is_pointer_type() {
+            let struct_val = val.into_struct_value();
+            let alloca = self.builder
+                .build_alloca(struct_val.get_type(), "store_struct_tmp")
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM alloca error: {}", e), span
+                )])?;
+            self.builder.build_store(alloca, struct_val)
+                .map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM store error: {}", e), span
+                )])?;
+            let expected_ptr_type = dest_elem_type.into_pointer_type();
+            if alloca.get_type() != expected_ptr_type {
+                return Ok(self.builder.build_pointer_cast(alloca, expected_ptr_type, "store_tmp_cast")
+                    .map(|p| p.into())
+                    .unwrap_or(alloca.into()));
+            }
+            return Ok(alloca.into());
+        }
+
+        // No conversion needed or not possible
+        Ok(val)
     }
 }
