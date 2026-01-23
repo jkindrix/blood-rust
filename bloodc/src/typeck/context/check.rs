@@ -103,6 +103,7 @@ impl<'a> TypeContext<'a> {
         use crate::hir::DefKind;
 
         if let Some(module_info) = self.module_defs.get(&module_def_id).cloned() {
+            // Inject direct items
             for item_def_id in &module_info.items {
                 // Look up the item's name from def_info
                 if let Some(def_info) = self.resolver.def_info.get(item_def_id) {
@@ -132,6 +133,34 @@ impl<'a> TypeContext<'a> {
                             self.resolver.current_scope_mut()
                                 .type_bindings
                                 .insert(name, *item_def_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Also inject re-exported items (from `pub use` and `use`)
+            // This allows the module's own code to use imported items without qualification
+            for (name, reexport_def_id, _vis) in &module_info.reexports {
+                if let Some(def_info) = self.resolver.def_info.get(reexport_def_id) {
+                    let kind = def_info.kind;
+
+                    // Skip enum variants
+                    if kind == DefKind::Variant {
+                        continue;
+                    }
+
+                    // Add value binding
+                    self.resolver.current_scope_mut()
+                        .bindings
+                        .insert(name.clone(), Binding::Def(*reexport_def_id));
+
+                    // Add type binding for type-defining items
+                    match kind {
+                        DefKind::Struct | DefKind::Enum | DefKind::TypeAlias => {
+                            self.resolver.current_scope_mut()
+                                .type_bindings
+                                .insert(name.clone(), *reexport_def_id);
                         }
                         _ => {}
                     }
