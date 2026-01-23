@@ -814,7 +814,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 } else {
                                     current_ty
                                 }
-                            } else if let Some(variants) = self.enum_defs.get(def_id) {
+                            } else if let Some(_variants) = self.enum_defs.get(def_id) {
                                 // Enum - field access on enum value (after Downcast)
                                 // For now, return current type since Downcast should handle this
                                 current_ty

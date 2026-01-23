@@ -2513,8 +2513,6 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         dest_ptr: inkwell::values::PointerValue<'ctx>,
         span: crate::span::Span,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
-        use inkwell::types::AnyType;
-
         let dest_elem_type = dest_ptr.get_type().get_element_type();
 
         // Integer type conversions (truncate or extend)
