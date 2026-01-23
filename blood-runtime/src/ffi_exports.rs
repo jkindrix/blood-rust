@@ -3984,14 +3984,15 @@ pub unsafe extern "C" fn vec_pop(vec: *mut BloodVec, elem_size: i64, out: *mut u
 
 /// Get an element from the Vec by index.
 ///
+/// Returns Option<&T> as a struct: { tag: i32, ptr: *T }
+/// - tag = 0 for None (out of bounds)
+/// - tag = 1 for Some, with ptr pointing to the element in the Vec
+///
 /// # Arguments
 /// * `vec` - Pointer to the BloodVec
 /// * `index` - Index of the element to get
 /// * `elem_size` - Size of each element in bytes
-/// * `out` - Output buffer for the element (must be at least elem_size bytes)
-///
-/// # Returns
-/// 1 if the element exists (Some), 0 if index is out of bounds (None).
+/// * `out` - Output buffer for the Option struct (tag + pointer)
 ///
 /// # Safety
 /// All pointers must be valid.
@@ -4001,24 +4002,30 @@ pub unsafe extern "C" fn vec_get(
     index: i64,
     elem_size: i64,
     out: *mut u8,
-) -> i32 {
+) {
+    if out.is_null() {
+        return;
+    }
+
     if vec.is_null() {
-        return 0;
+        // None
+        *(out as *mut i32) = 0;
+        return;
     }
 
     let v = &*vec;
 
     if index < 0 || index >= v.len {
-        return 0; // None - out of bounds
+        // None - out of bounds
+        *(out as *mut i32) = 0;
+        return;
     }
 
-    // Copy the element to the output buffer
-    if !out.is_null() {
-        let src = v.ptr.add((index * elem_size) as usize);
-        std::ptr::copy_nonoverlapping(src, out, elem_size as usize);
-    }
-
-    1 // Some
+    // Some - write tag and pointer to element
+    *(out as *mut i32) = 1;
+    let ptr_offset = 8usize; // Pointer alignment (tag is 4 bytes, pad to 8)
+    let elem_ptr = v.ptr.add((index * elem_size) as usize);
+    *(out.add(ptr_offset) as *mut *const u8) = elem_ptr;
 }
 
 /// Get a pointer to an element in the Vec by index (for indexing operator).

@@ -911,7 +911,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             let size_val = self.context.i64_type().const_int(elem_size, false);
                             converted_args.push(size_val.into());
 
-                            // For Option/Result unwrap/try methods, Vec first/last, and Box into_inner, we need an output buffer
+                            // For Option/Result unwrap/try methods, Vec first/last/get, and Box into_inner, we need an output buffer
                             if matches!(builtin_name.as_str(), "option_unwrap" | "option_try" |
                                 "option_expect" | "option_unwrap_or" | "option_ok_or" |
                                 "option_and" | "option_or" | "option_xor" |
@@ -920,7 +920,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 "result_ok" | "result_err" | "result_expect" | "result_expect_err" |
                                 "result_unwrap_or" | "result_and" | "result_or" |
                                 "result_as_ref" | "result_as_mut" |
-                                "vec_first" | "vec_last" | "vec_pop" |
+                                "vec_first" | "vec_last" | "vec_pop" | "vec_get" |
                                 "box_into_inner") {
                                 // Get the type to determine the output buffer type
                                 let container_ty = self.get_operand_type(&args[0], body);
@@ -1208,14 +1208,24 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                                 self.context.i64_type().into()
                                             }
                                         }
-                                        // vec_first/vec_last return Option<&T>, so output is Option struct with pointer
-                                        "vec_first" | "vec_last" => {
+                                        // vec_first/vec_last/vec_get return Option<&T>, so output is Option struct with pointer
+                                        "vec_first" | "vec_last" | "vec_get" => {
                                             // Option<&T> = { tag: i32, payload: *T }
-                                            let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
-                                            self.context.struct_type(&[
-                                                self.context.i32_type().into(),
-                                                ptr_type.into(),
-                                            ], false).into()
+                                            // Use the actual element type pointer for proper type matching
+                                            if let Some(elem_ty) = type_args.first() {
+                                                let elem_llvm_ty = self.lower_type(elem_ty);
+                                                let ptr_type = elem_llvm_ty.ptr_type(AddressSpace::default());
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    ptr_type.into(),
+                                                ], false).into()
+                                            } else {
+                                                let ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                                                self.context.struct_type(&[
+                                                    self.context.i32_type().into(),
+                                                    ptr_type.into(),
+                                                ], false).into()
+                                            }
                                         }
                                         // vec_pop returns Option<T>, so output is Option struct
                                         "vec_pop" => {
@@ -2588,6 +2598,68 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .unwrap_or(alloca.into()));
             }
             return Ok(alloca.into());
+        }
+
+        // Struct-to-struct conversion with different pointer field types
+        // This handles cases like { i32, i8* } to { i32, *Point } (Option with opaque vs typed pointer)
+        if val.is_struct_value() && dest_elem_type.is_struct_type() {
+            let struct_val = val.into_struct_value();
+            let val_struct_type = struct_val.get_type();
+            let dest_struct_type = dest_elem_type.into_struct_type();
+
+            // Check if same number of fields
+            if val_struct_type.count_fields() == dest_struct_type.count_fields() {
+                let field_count = val_struct_type.count_fields();
+                let mut needs_conversion = false;
+
+                // Check if any field types differ
+                for i in 0..field_count {
+                    let val_field_type = val_struct_type.get_field_type_at_index(i);
+                    let dest_field_type = dest_struct_type.get_field_type_at_index(i);
+                    if val_field_type != dest_field_type {
+                        needs_conversion = true;
+                        break;
+                    }
+                }
+
+                if needs_conversion {
+                    // Build a new struct with converted fields
+                    let mut new_struct = dest_struct_type.get_undef();
+
+                    for i in 0..field_count {
+                        let field_val = self.builder.build_extract_value(struct_val, i, &format!("field_{}", i))
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM extract_value error: {}", e), span
+                            )])?;
+
+                        if let Some(dest_field_type) = dest_struct_type.get_field_type_at_index(i) {
+                            // Convert field if needed
+                            let converted_field = if field_val.is_pointer_value() && dest_field_type.is_pointer_type() {
+                                // Pointer to different pointer type - cast
+                                let ptr_val = field_val.into_pointer_value();
+                                let expected_ptr_type = dest_field_type.into_pointer_type();
+                                if ptr_val.get_type() != expected_ptr_type {
+                                    self.builder.build_pointer_cast(ptr_val, expected_ptr_type, "field_ptr_cast")
+                                        .map(|p| p.into())
+                                        .unwrap_or(field_val)
+                                } else {
+                                    field_val
+                                }
+                            } else {
+                                field_val
+                            };
+
+                            new_struct = self.builder.build_insert_value(new_struct, converted_field, i, &format!("insert_{}", i))
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM insert_value error: {}", e), span
+                                )])?
+                                .into_struct_value();
+                        }
+                    }
+
+                    return Ok(new_struct.into());
+                }
+            }
         }
 
         // No conversion needed or not possible
