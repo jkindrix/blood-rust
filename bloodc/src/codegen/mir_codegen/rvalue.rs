@@ -1053,6 +1053,29 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 Ok(cast.into())
             }
 
+            // Fat pointer (struct) to thin pointer - extract data pointer from field 0
+            // This handles cases like &str -> *const u8 where &str is { i8*, i64 }
+            (BasicValueEnum::StructValue(struct_val), BasicTypeEnum::PointerType(ptr_ty)) => {
+                // Extract the data pointer from field 0 of the fat pointer
+                let data_ptr = self.builder.build_extract_value(struct_val, 0, "fat_ptr_data")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM extract_value error: {}", e), Span::dummy()
+                    )])?;
+                // Cast to the target pointer type if needed
+                if let BasicValueEnum::PointerValue(ptr_val) = data_ptr {
+                    let cast = self.builder.build_pointer_cast(ptr_val, ptr_ty, "fat_to_thin_ptr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM ptrcast error: {}", e), Span::dummy()
+                        )])?;
+                    Ok(cast.into())
+                } else {
+                    Err(vec![Diagnostic::error(
+                        format!("Fat pointer field 0 is not a pointer: {:?}", data_ptr.get_type()),
+                        Span::dummy()
+                    )])
+                }
+            }
+
             // Same type, no cast needed
             _ if val.get_type() == target_llvm => Ok(val),
 
