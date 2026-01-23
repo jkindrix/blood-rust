@@ -7624,6 +7624,11 @@ impl<'a> TypeContext<'a> {
                         } else {
                             return Err(self.error_unknown_field(&inner_ty, &field_name, span));
                         }
+                    } else {
+                        // Type is an ADT but struct definition not found - this indicates
+                        // a cross-module struct whose field information wasn't registered.
+                        // Report it as unknown field with the ADT type to help diagnosis.
+                        return Err(self.error_unknown_field(&inner_ty, &field_name, span));
                     }
                 }
 
