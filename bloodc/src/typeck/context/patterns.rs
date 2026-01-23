@@ -565,14 +565,26 @@ impl<'a> TypeContext<'a> {
                         pattern.span,
                     ))?;
 
-                    // Find the enum within the module's items
+                    // Find the enum within the module's items OR reexports
                     let mut found_enum: Option<(DefId, super::EnumInfo)> = None;
                     if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                        // Check direct items first
                         for &item_def_id in &mod_info.items {
                             if let Some(enum_info) = self.enum_defs.get(&item_def_id).cloned() {
                                 if enum_info.name == enum_name {
                                     found_enum = Some((item_def_id, enum_info));
                                     break;
+                                }
+                            }
+                        }
+                        // If not found in items, check reexports (from `pub use`)
+                        if found_enum.is_none() {
+                            for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
+                                if reexport_name == &enum_name {
+                                    if let Some(enum_info) = self.enum_defs.get(reexport_def_id).cloned() {
+                                        found_enum = Some((*reexport_def_id, enum_info));
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1165,14 +1177,26 @@ impl<'a> TypeContext<'a> {
                         pattern.span,
                     ))?;
 
-                    // Find the enum within the module's items
+                    // Find the enum within the module's items OR reexports
                     let mut found_enum: Option<(DefId, super::EnumInfo)> = None;
                     if let Some(mod_info) = self.module_defs.get(&mod_def_id) {
+                        // Check direct items first
                         for &item_def_id in &mod_info.items {
                             if let Some(enum_info) = self.enum_defs.get(&item_def_id).cloned() {
                                 if enum_info.name == enum_name {
                                     found_enum = Some((item_def_id, enum_info));
                                     break;
+                                }
+                            }
+                        }
+                        // If not found in items, check reexports (from `pub use`)
+                        if found_enum.is_none() {
+                            for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
+                                if reexport_name == &enum_name {
+                                    if let Some(enum_info) = self.enum_defs.get(reexport_def_id).cloned() {
+                                        found_enum = Some((*reexport_def_id, enum_info));
+                                        break;
+                                    }
                                 }
                             }
                         }
