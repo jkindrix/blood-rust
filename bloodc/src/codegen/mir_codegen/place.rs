@@ -412,11 +412,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // - Direct slice [T]: ptr is {T*, i64}* (fat pointer), extract data ptr, single-index GEP
                     // - Ref to array &[T; N]: ptr is [N x T]**, load to get [N x T]*, two-index GEP
                     // - Slice ref &[T]: ptr is {T*, i64}* (fat pointer), load struct, extract data ptr, single-index GEP
+                    // - Ptr to elements *T: current_ptr is **T (e.g., Vec.data), load then single-index GEP
                     enum IndexKind {
                         DirectArray,
                         DirectSlice,
                         RefToArray,
                         SliceRef,
+                        PtrToElements,  // For Vec data pointer or similar
                         Other,
                     }
 
@@ -427,7 +429,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             match inner.kind() {
                                 TypeKind::Array { .. } => IndexKind::RefToArray,
                                 TypeKind::Slice { .. } => IndexKind::SliceRef,
-                                _ => IndexKind::Other,
+                                // Pointer to non-array/slice elements (e.g., Vec<T>.data is *T)
+                                // After Field(0) on Vec, we have Ptr { inner: T }
+                                // current_ptr is **T, need to load to get *T then GEP
+                                _ => IndexKind::PtrToElements,
                             }
                         }
                         _ => IndexKind::Other,
@@ -441,7 +446,9 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             match inner.kind() {
                                 TypeKind::Array { element, .. } => element.clone(),
                                 TypeKind::Slice { element } => element.clone(),
-                                _ => current_ty.clone(),
+                                // For Ptr { inner: T } where T is not array/slice,
+                                // indexing into *T gives T (the element type)
+                                _ => inner.clone(),
                             }
                         }
                         _ => current_ty.clone(),
@@ -515,6 +522,22 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     data_ptr,
                                     &[idx_val.into_int_value()],
                                     "idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
+                            IndexKind::PtrToElements => {
+                                // Pointer to elements (e.g., Vec<T>.data which is *T)
+                                // current_ptr is **T (pointer to the pointer field)
+                                // Need to load the pointer value, then single-index GEP
+                                let data_ptr = self.builder.build_load(current_ptr, "data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                self.builder.build_in_bounds_gep(
+                                    data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "ptr_idx_gep"
                                 ).map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
                                 )])?
