@@ -176,9 +176,13 @@ fn substitute_mir_types(mir: &MirBody, subst: &HashMap<TyVarId, Type>) -> MirBod
     // Clone the MIR body
     let mut result = mir.clone();
 
-    // Substitute types in locals
+    // Substitute types in locals, but skip the __env parameter for closures.
+    // The __env parameter should always be i8* in the calling convention,
+    // not the actual captured environment type.
     for local in &mut result.locals {
-        local.ty = substitute_type(&local.ty, subst);
+        if local.name.as_deref() != Some("__env") {
+            local.ty = substitute_type(&local.ty, subst);
+        }
     }
 
     // Substitute types in basic blocks
@@ -522,6 +526,42 @@ fn substitute_terminator_types(term: &mut crate::mir::types::Terminator, subst: 
     }
 }
 
+/// Collect all closure DefIds referenced in a MIR body.
+fn collect_closure_def_ids(mir: &MirBody) -> Vec<DefId> {
+    use crate::mir::types::{Rvalue, AggregateKind, StatementKind};
+
+    let mut closure_ids = Vec::new();
+
+    for block in &mir.basic_blocks {
+        for stmt in &block.statements {
+            if let StatementKind::Assign(_, rvalue) = &stmt.kind {
+                if let Rvalue::Aggregate { kind: AggregateKind::Closure { def_id }, .. } = rvalue {
+                    closure_ids.push(*def_id);
+                }
+            }
+        }
+    }
+
+    closure_ids
+}
+
+/// Remap closure DefIds in a MIR body using the provided mapping.
+fn remap_closure_def_ids(mir: &mut MirBody, remap: &HashMap<DefId, DefId>) {
+    use crate::mir::types::{Rvalue, AggregateKind, StatementKind};
+
+    for block in &mut mir.basic_blocks {
+        for stmt in &mut block.statements {
+            if let StatementKind::Assign(_, rvalue) = &mut stmt.kind {
+                if let Rvalue::Aggregate { kind: AggregateKind::Closure { def_id }, .. } = rvalue {
+                    if let Some(&new_id) = remap.get(def_id) {
+                        *def_id = new_id;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Loop context for break/continue support.
 #[derive(Clone)]
 pub(super) struct LoopContext<'ctx> {
@@ -616,8 +656,15 @@ pub struct CodegenContext<'ctx, 'a> {
     pub(super) generic_mir_bodies: HashMap<DefId, MirBody>,
     /// Monomorphization cache: (generic DefId, type args) -> monomorphized DefId.
     pub(super) mono_cache: HashMap<(DefId, Vec<Type>), DefId>,
-    /// Counter for generating unique monomorphized DefIds.
+    /// Counter for generating unique monomorphized DefIds (for non-closure functions).
     pub(super) mono_counter: u32,
+    /// Counter for generating unique monomorphized closure DefIds.
+    /// Uses base 0xFFFF_8000 so they're still detected as closures (>= 0xFFFF_0000).
+    pub(super) mono_closure_counter: u32,
+    /// Monomorphized closure MIR bodies pending compilation.
+    /// When a generic function with closures is monomorphized, nested closures
+    /// also need their types substituted. This stores those for later compilation.
+    pub(super) mono_closure_mirs: HashMap<DefId, MirBody>,
     /// Inline handler bodies for try/with blocks (codegen for inline effect handlers).
     /// Maps synthetic DefId to the handler body info.
     pub(super) inline_handler_bodies: InlineHandlerBodies,
@@ -678,6 +725,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             generic_mir_bodies: HashMap::new(),
             mono_cache: HashMap::new(),
             mono_counter: 0,
+            mono_closure_counter: 0,
+            mono_closure_mirs: HashMap::new(),
             inline_handler_bodies: HashMap::new(),
             fn_ptr_wrappers: HashMap::new(),
             box_def_id: None,
@@ -718,12 +767,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     ///
     /// Generic functions are not compiled directly - instead, they are
     /// monomorphized on-demand when called with concrete types.
+    ///
+    /// This also stores closure MIR bodies (DefIds >= 0xFFFF_0000) which may be
+    /// needed when monomorphizing generic functions that contain closures.
     pub fn set_generic_mir_bodies(&mut self, mir_bodies: &HashMap<DefId, MirBody>) {
         for (&def_id, mir_body) in mir_bodies {
+            // Store generic function MIR bodies
             if let Some((fn_def, _)) = self.generic_fn_defs.get(&def_id) {
                 if !fn_def.sig.generics.is_empty() {
                     self.generic_mir_bodies.insert(def_id, mir_body.clone());
                 }
+            }
+            // Also store closure MIR bodies (synthetic DefIds >= 0xFFFF_0000)
+            // These may be needed when monomorphizing generic functions that contain closures
+            if def_id.index() >= 0xFFFF_0000 {
+                self.generic_mir_bodies.insert(def_id, mir_body.clone());
             }
         }
     }
@@ -2366,7 +2424,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.mono_counter += 1;
 
         // Clone and substitute types in MIR body
-        let mono_mir = substitute_mir_types(&mir_body, &subst);
+        let mut mono_mir = substitute_mir_types(&mir_body, &subst);
+
+        // Monomorphize closures referenced in this function.
+        // Closures that capture generic-typed variables need their MIR bodies
+        // to also be type-substituted with the same substitution map.
+        let closure_remap = self.monomorphize_closures_recursive(&mono_mir, &subst);
+        remap_closure_def_ids(&mut mono_mir, &closure_remap);
 
         // Build mangled name for monomorphized function.
         // Use only generic_def_id and concrete types (not mono_def_id) so the name
@@ -2418,7 +2482,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Compile the monomorphized MIR body with escape analysis results
         use crate::codegen::mir_codegen::MirCodegen;
-        let result = self.compile_mir_body(mono_def_id, &mono_mir, Some(&escape_results));
+        let mut result = self.compile_mir_body(mono_def_id, &mono_mir, Some(&escape_results));
+
+        // Compile any monomorphized closures that were created during this monomorphization.
+        // These closures were declared but need their bodies compiled.
+        if result.is_ok() {
+            // Take the pending closure MIRs to avoid borrowing issues
+            let pending_closures: Vec<(DefId, MirBody)> =
+                std::mem::take(&mut self.mono_closure_mirs).into_iter().collect();
+
+            for (closure_def_id, closure_mir) in pending_closures {
+                // Clear state for each closure compilation
+                self.locals.clear();
+                self.local_generations.clear();
+
+                // Run escape analysis on the closure
+                let mut analyzer = EscapeAnalyzer::new();
+                let closure_escape = analyzer.analyze(&closure_mir);
+
+                // Compile the closure
+                if let Err(e) = self.compile_mir_body(closure_def_id, &closure_mir, Some(&closure_escape)) {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
 
         // Restore previous function state
         self.locals = saved_locals;
@@ -2438,6 +2526,68 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         }
 
         Some(fn_value)
+    }
+
+    /// Recursively monomorphize all closures in a MIR body.
+    ///
+    /// When monomorphizing a generic function, closures defined inside it may capture
+    /// variables with generic types. These closures need their MIR bodies type-substituted
+    /// with the same substitution map as the enclosing function.
+    ///
+    /// This method:
+    /// 1. Finds all closure references in the MIR body
+    /// 2. For each closure, substitutes types in its MIR body
+    /// 3. Recursively processes nested closures
+    /// 4. Declares the monomorphized closure functions
+    /// 5. Returns a mapping from old closure DefIds to new ones
+    fn monomorphize_closures_recursive(
+        &mut self,
+        mir: &MirBody,
+        subst: &HashMap<TyVarId, Type>,
+    ) -> HashMap<DefId, DefId> {
+        let mut remap = HashMap::new();
+
+        // Collect all closure DefIds in this MIR body
+        let closure_ids = collect_closure_def_ids(mir);
+
+        for old_closure_id in closure_ids {
+            // Skip if already remapped (handles diamond dependencies)
+            if remap.contains_key(&old_closure_id) {
+                continue;
+            }
+
+            // Get the closure's original MIR body
+            let closure_mir = match self.generic_mir_bodies.get(&old_closure_id) {
+                Some(m) => m.clone(),
+                None => continue, // Closure not in generic bodies, skip
+            };
+
+            // Substitute types in the closure MIR
+            let mut mono_closure_mir = substitute_mir_types(&closure_mir, subst);
+
+            // Recursively handle nested closures
+            let nested_remap = self.monomorphize_closures_recursive(&mono_closure_mir, subst);
+            remap_closure_def_ids(&mut mono_closure_mir, &nested_remap);
+
+            // Merge nested remappings into our remap
+            remap.extend(nested_remap);
+
+            // Generate new DefId for monomorphized closure.
+            // Use 0xFFFF_8000+ so they're still detected as closures (>= 0xFFFF_0000).
+            let new_closure_id = DefId::new(0xFFFF_8000 + self.mono_closure_counter);
+            self.mono_closure_counter += 1;
+
+            // Declare the monomorphized closure function
+            self.declare_closure_from_mir(new_closure_id, &mono_closure_mir);
+
+            // Store the monomorphized closure MIR for later compilation
+            self.mono_closure_mirs.insert(new_closure_id, mono_closure_mir);
+
+            // Record the remapping
+            remap.insert(old_closure_id, new_closure_id);
+        }
+
+        remap
     }
 
     /// Get or create a wrapper function for a plain function used as a fn() pointer.
