@@ -93,8 +93,10 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
 
                 // Get the Blood type of the enum to determine its LLVM representation
+                // Must compute the type AFTER applying projections (e.g., Deref for &Option<T>)
                 let base_ty = &body.locals[place.local.index() as usize].ty;
-                let llvm_ty = self.lower_type(base_ty);
+                let place_ty = self.compute_place_type(base_ty, &place.projection);
+                let llvm_ty = self.lower_type(&place_ty);
 
                 // Check if the enum is represented as a struct (has payload) or bare i32 (tag-only)
                 if llvm_ty.is_struct_type() {
