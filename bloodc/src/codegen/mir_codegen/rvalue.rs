@@ -731,6 +731,64 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let lhs_int = lhs.into_int_value();
         let rhs_int = rhs.into_int_value();
 
+        // Handle type mismatches for boolean operations (i1 vs i8)
+        // This can happen when one operand is a loaded bool (i1) and the other
+        // is a constant with a different integer type (e.g., i8 from unit type).
+        let (lhs_int, rhs_int) = if lhs_int.get_type().get_bit_width() != rhs_int.get_type().get_bit_width() {
+            let lhs_width = lhs_int.get_type().get_bit_width();
+            let rhs_width = rhs_int.get_type().get_bit_width();
+
+            // For boolean operations, coerce both to i1 (bool type)
+            if matches!(op, BinOp::BitAnd | BinOp::BitOr) && (lhs_width == 1 || rhs_width == 1) {
+                let bool_ty = self.context.bool_type();
+                let new_lhs = if lhs_width == 1 {
+                    lhs_int
+                } else {
+                    // Truncate to i1 (non-zero becomes true)
+                    self.builder.build_int_truncate(lhs_int, bool_ty, "bool_trunc")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM truncate error: {}", e), Span::dummy()
+                        )])?
+                };
+                let new_rhs = if rhs_width == 1 {
+                    rhs_int
+                } else {
+                    // Truncate to i1 (non-zero becomes true)
+                    self.builder.build_int_truncate(rhs_int, bool_ty, "bool_trunc")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM truncate error: {}", e), Span::dummy()
+                        )])?
+                };
+                (new_lhs, new_rhs)
+            } else {
+                // For other operations, extend the smaller operand to match the larger
+                let target_ty = if lhs_width > rhs_width {
+                    lhs_int.get_type()
+                } else {
+                    rhs_int.get_type()
+                };
+                let new_lhs = if lhs_width < rhs_width {
+                    self.builder.build_int_z_extend(lhs_int, target_ty, "zext")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM zext error: {}", e), Span::dummy()
+                        )])?
+                } else {
+                    lhs_int
+                };
+                let new_rhs = if rhs_width < lhs_width {
+                    self.builder.build_int_z_extend(rhs_int, target_ty, "zext")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM zext error: {}", e), Span::dummy()
+                        )])?
+                } else {
+                    rhs_int
+                };
+                (new_lhs, new_rhs)
+            }
+        } else {
+            (lhs_int, rhs_int)
+        };
+
         let result = match op {
             BinOp::Add => self.builder.build_int_add(lhs_int, rhs_int, "add"),
             BinOp::Sub => self.builder.build_int_sub(lhs_int, rhs_int, "sub"),
