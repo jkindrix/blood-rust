@@ -60,6 +60,15 @@ impl<'src> Parser<'src> {
                 }
             }
 
+            // Never type (alias for `!`)
+            TokenKind::Ident if self.text(&start) == "never" => {
+                self.advance();
+                Type {
+                    kind: TypeKind::Never,
+                    span: start,
+                }
+            }
+
             // Reference type
             TokenKind::And => {
                 self.advance();
