@@ -38,6 +38,7 @@ Program {
                     start_col: 5,
                 },
             },
+            visibility: Private,
             span: Span {
                 start: 0,
                 end: 15,

@@ -192,6 +192,7 @@ impl<'src> Parser<'src> {
     fn is_contextual_keyword(kind: TokenKind) -> bool {
         matches!(
             kind,
+            // Effect system keywords
             TokenKind::Default
                 | TokenKind::Handle
                 | TokenKind::Handler
@@ -199,6 +200,19 @@ impl<'src> Parser<'src> {
                 | TokenKind::Op
                 | TokenKind::Deep
                 | TokenKind::Shallow
+                | TokenKind::Pure
+                | TokenKind::Resume
+                | TokenKind::Perform
+                // Common field names
+                | TokenKind::Type
+                | TokenKind::In
+                | TokenKind::Async
+                | TokenKind::Await
+                | TokenKind::Move
+                | TokenKind::Ref
+                | TokenKind::With
+                | TokenKind::Where
+                | TokenKind::Module
         )
     }
 
@@ -666,7 +680,16 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Parse an import statement (private, for top-of-file imports).
     fn parse_import(&mut self) -> Import {
+        self.parse_import_with_visibility(Visibility::Private)
+    }
+
+    /// Parse an import statement with the given visibility.
+    ///
+    /// This is used for both top-of-file imports (always private) and
+    /// declaration-level imports which can have visibility modifiers (`pub use`).
+    fn parse_import_with_visibility(&mut self, visibility: Visibility) -> Import {
         let start = self.current.span;
         self.advance(); // consume 'use'
 
@@ -679,6 +702,7 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::Semi);
                 Import::Glob {
                     path,
+                    visibility,
                     span: start.merge(self.previous.span),
                 }
             } else if self.try_consume(TokenKind::LBrace) {
@@ -716,6 +740,7 @@ impl<'src> Parser<'src> {
                 Import::Group {
                     path,
                     items,
+                    visibility,
                     span: start.merge(self.previous.span),
                 }
             } else if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
@@ -733,6 +758,7 @@ impl<'src> Parser<'src> {
                 Import::Group {
                     path,
                     items: vec![ImportItem { name, alias }],
+                    visibility,
                     span: start.merge(self.previous.span),
                 }
             } else {
@@ -741,6 +767,7 @@ impl<'src> Parser<'src> {
                 Import::Simple {
                     path,
                     alias: None,
+                    visibility,
                     span: start.merge(self.previous.span),
                 }
             }
@@ -758,6 +785,7 @@ impl<'src> Parser<'src> {
             Import::Simple {
                 path,
                 alias,
+                visibility,
                 span: start.merge(self.previous.span),
             }
         }

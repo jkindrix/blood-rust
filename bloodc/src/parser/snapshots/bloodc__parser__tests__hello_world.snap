@@ -91,6 +91,7 @@ Program {
                 },
             },
             alias: None,
+            visibility: Private,
             span: Span {
                 start: 25,
                 end: 45,

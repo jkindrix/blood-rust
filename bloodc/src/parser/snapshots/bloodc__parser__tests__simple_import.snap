@@ -39,6 +39,7 @@ Program {
                 },
             },
             alias: None,
+            visibility: Private,
             span: Span {
                 start: 0,
                 end: 11,

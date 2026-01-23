@@ -114,23 +114,30 @@ pub struct ModulePath {
 }
 
 /// Import statement.
+///
+/// Imports can be either private (default) or public (re-exports).
+/// Public imports (`pub use ...`) make the imported item available
+/// to external modules, enabling clean API surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Import {
-    /// `use std.mem.allocate;`
+    /// `use std.mem.allocate;` or `pub use std.mem.allocate;`
     Simple {
         path: ModulePath,
         alias: Option<Spanned<Symbol>>,
+        visibility: Visibility,
         span: Span,
     },
     /// `use std.iter::{Iterator, IntoIterator};`
     Group {
         path: ModulePath,
         items: Vec<ImportItem>,
+        visibility: Visibility,
         span: Span,
     },
     /// `use std.ops::*;`
     Glob {
         path: ModulePath,
+        visibility: Visibility,
         span: Span,
     },
 }
@@ -158,6 +165,10 @@ pub enum Declaration {
     Module(ModItemDecl),
     /// Declarative macro definition: `macro name!(...) { ... }`
     Macro(MacroDecl),
+    /// Use/import declaration: `use path;` or `pub use path;`
+    /// This allows use statements to appear anywhere in the file,
+    /// enabling imports after module declarations.
+    Use(Import),
 }
 
 impl Declaration {
@@ -176,6 +187,11 @@ impl Declaration {
             Declaration::Bridge(d) => d.span,
             Declaration::Module(d) => d.span,
             Declaration::Macro(d) => d.span,
+            Declaration::Use(import) => match import {
+                Import::Simple { span, .. } => *span,
+                Import::Group { span, .. } => *span,
+                Import::Glob { span, .. } => *span,
+            },
         }
     }
 }

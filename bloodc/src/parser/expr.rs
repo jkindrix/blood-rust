@@ -999,9 +999,9 @@ impl<'src> Parser<'src> {
         // Parse based on macro name
         let kind = match macro_name.as_str() {
             // Format-style macros: format!("...", args), println!("...", args), etc.
-            // Also includes todo! and unimplemented! which behave like panic! with default messages
+            // Also includes todo!, unimplemented!, unreachable! which behave like panic! with default messages
             "format" | "println" | "print" | "eprintln" | "eprint" | "panic" | "write" | "writeln"
-            | "todo" | "unimplemented" => {
+            | "todo" | "unimplemented" | "unreachable" => {
                 self.parse_format_macro_args(delim, close_kind)
             }
 

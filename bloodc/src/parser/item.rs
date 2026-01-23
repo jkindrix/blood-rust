@@ -35,38 +35,14 @@ impl<'src> Parser<'src> {
             TokenKind::Extern => Some(Declaration::Bridge(self.parse_extern_block(attrs))),
             TokenKind::Mod => Some(Declaration::Module(self.parse_mod_decl(attrs, vis))),
             TokenKind::Macro => Some(Declaration::Macro(self.parse_macro_decl(attrs, vis))),
-            // Handle `use` encountered after declarations have started
-            // This is an error (imports must come before declarations) but we
-            // need to handle it to avoid infinite loops in error recovery
+            // Use declarations can now appear anywhere (after module declarations).
+            // This enables `pub use` re-exports and more flexible import organization.
             TokenKind::Use => {
-                self.error_expected_one_of(&[
-                    "`fn`", "`struct`", "`enum`", "`trait`", "`impl`",
-                    "`effect`", "`handler`", "`type`", "`const`", "`static`",
-                    "`bridge`", "`extern`", "`mod`", "`macro`",
-                ]);
-                // Skip past the use statement to avoid infinite loop
-                while !self.is_at_end()
-                    && !matches!(
-                        self.current.kind,
-                        TokenKind::Fn
-                            | TokenKind::Struct
-                            | TokenKind::Enum
-                            | TokenKind::Effect
-                            | TokenKind::Handler
-                            | TokenKind::Trait
-                            | TokenKind::Impl
-                            | TokenKind::Type
-                            | TokenKind::Const
-                            | TokenKind::Static
-                            | TokenKind::Pub
-                            | TokenKind::Module
-                            | TokenKind::Extern
-                            | TokenKind::Macro
-                    )
-                {
-                    self.advance();
+                // Warn if there are attributes on a use declaration (they're ignored)
+                if !attrs.is_empty() {
+                    // TODO: emit warning about attributes on use declarations
                 }
-                None
+                Some(Declaration::Use(self.parse_import_with_visibility(vis)))
             }
             _ => {
                 self.error_expected_one_of(&[
