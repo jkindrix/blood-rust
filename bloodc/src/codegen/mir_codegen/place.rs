@@ -710,20 +710,65 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     match current_ty.kind() {
                         TypeKind::Ref { inner, .. } => inner.clone(),
                         TypeKind::Ptr { inner, .. } => inner.clone(),
+                        // For Box<T>, the inner type is T
+                        TypeKind::Adt { def_id, args } if Some(*def_id) == self.box_def_id => {
+                            args.first().cloned().unwrap_or(current_ty)
+                        }
                         // For other types, keep the type (should not happen in valid MIR)
                         _ => current_ty,
                     }
                 }
                 PlaceElem::Field(idx) => {
-                    // Field access: get the field type from struct/tuple
+                    // Field access: get the field type from struct/tuple/ADT
                     match current_ty.kind() {
                         TypeKind::Tuple(tys) => {
                             tys.get(*idx as usize).cloned().unwrap_or(current_ty)
                         }
-                        // For ADT types, we'd need DefId lookup to get field types
-                        // For now, return current type (length queries on ADT fields
-                        // will fail with an appropriate error message)
-                        TypeKind::Adt { .. } => current_ty,
+                        TypeKind::Adt { def_id, args } => {
+                            // Handle built-in types first
+                            if Some(*def_id) == self.vec_def_id {
+                                // Vec<T> layout: { ptr: *T, len: i64, capacity: i64 }
+                                match idx {
+                                    0 => {
+                                        // Field 0 is the data pointer *T
+                                        let elem_ty = args.first().cloned().unwrap_or(Type::unit());
+                                        Type::new(TypeKind::Ptr { inner: elem_ty, mutable: true })
+                                    }
+                                    1 | 2 => Type::usize(), // len and capacity
+                                    _ => current_ty,
+                                }
+                            } else if Some(*def_id) == self.option_def_id {
+                                // Option<T> layout: { tag: i32, payload: T }
+                                match idx {
+                                    0 => Type::i32(), // discriminant tag
+                                    1 => args.first().cloned().unwrap_or(Type::unit()), // payload
+                                    _ => current_ty,
+                                }
+                            } else if Some(*def_id) == self.result_def_id {
+                                // Result<T, E> layout: { tag: i32, payload: T or E }
+                                match idx {
+                                    0 => Type::i32(), // discriminant tag
+                                    1 => args.first().cloned().unwrap_or(Type::unit()), // ok payload
+                                    2 => args.get(1).cloned().unwrap_or(Type::unit()), // err payload
+                                    _ => current_ty,
+                                }
+                            } else if let Some(field_types) = self.struct_defs.get(def_id) {
+                                // Regular struct - look up field type
+                                if let Some(field_ty) = field_types.get(*idx as usize) {
+                                    // Substitute type parameters with actual args
+                                    self.substitute_type_params(field_ty, args)
+                                } else {
+                                    current_ty
+                                }
+                            } else if let Some(variants) = self.enum_defs.get(def_id) {
+                                // Enum - field access on enum value (after Downcast)
+                                // For now, return current type since Downcast should handle this
+                                current_ty
+                            } else {
+                                // Unknown ADT, keep type
+                                current_ty
+                            }
+                        }
                         // For other types, keep the type
                         _ => current_ty,
                     }
@@ -733,6 +778,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     match current_ty.kind() {
                         TypeKind::Array { element, .. } => element.clone(),
                         TypeKind::Slice { element } => element.clone(),
+                        // For Vec<T>, indexing gives T
+                        TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
+                            args.first().cloned().unwrap_or(current_ty)
+                        }
                         // For other types, keep the type
                         _ => current_ty,
                     }
