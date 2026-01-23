@@ -87,8 +87,18 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         for elem in &place.projection {
             current_ptr = match elem {
                 PlaceElem::Deref => {
+                    // Save original type to check if this is a fat pointer (slice reference)
+                    let original_ty = current_ty.clone();
+                    let is_fat_ptr = match original_ty.kind() {
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+                            matches!(inner.kind(), TypeKind::Slice { .. })
+                        }
+                        TypeKind::Slice { .. } => true,
+                        _ => false,
+                    };
+
                     // Update current_ty to the inner type (dereference the reference/pointer)
-                    current_ty = match current_ty.kind() {
+                    current_ty = match original_ty.kind() {
                         TypeKind::Ref { inner, .. } => inner.clone(),
                         TypeKind::Ptr { inner, .. } => inner.clone(),
                         _ => current_ty.clone(), // Keep as-is if not a reference type
@@ -99,7 +109,55 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM load error: {}", e), body.span
                         )])?;
-                    let ptr_val = loaded.into_pointer_value();
+
+                    // Handle different loaded value types:
+                    // - PointerValue: thin reference (normal case)
+                    // - StructValue: fat reference (like &[T] or &str - contains ptr + metadata)
+                    //                Only extract field 0 if this is actually a fat pointer type
+                    // - IntValue: opaque pointer representation or enum variant data
+                    use inkwell::values::BasicValueEnum;
+                    let ptr_val = match loaded {
+                        BasicValueEnum::PointerValue(ptr) => ptr,
+                        BasicValueEnum::StructValue(sv) => {
+                            if is_fat_ptr {
+                                // Fat pointer (slice/str) - extract the data pointer from field 0
+                                self.builder.build_extract_value(sv, 0, "fat_ptr_data")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM extract_value error: {}", e), body.span
+                                    )])?
+                                    .into_pointer_value()
+                            } else {
+                                // This is a struct value but NOT a fat pointer.
+                                // This can happen when we have a Copy type stored by value.
+                                // We need to store it to a temporary and return pointer to that.
+                                let struct_ty = sv.get_type();
+                                let tmp_alloca = self.builder.build_alloca(struct_ty, "deref_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), body.span
+                                    )])?;
+                                self.builder.build_store(tmp_alloca, sv)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), body.span
+                                    )])?;
+                                tmp_alloca
+                            }
+                        }
+                        BasicValueEnum::IntValue(int_val) => {
+                            // Opaque pointer as integer - convert to pointer type
+                            let inner_ty = self.lower_type(&current_ty);
+                            let ptr_ty = inner_ty.ptr_type(inkwell::AddressSpace::default());
+                            self.builder.build_int_to_ptr(int_val, ptr_ty, "deref_int_to_ptr")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM int_to_ptr error: {}", e), body.span
+                                )])?
+                        }
+                        other => {
+                            return Err(vec![Diagnostic::error(
+                                format!("Expected pointer, struct (fat ptr), or integer for Deref, got {:?}", other),
+                                body.span,
+                            )]);
+                        }
+                    };
 
                     // Check if we should skip generation checks for this local.
                     // NoEscape locals are stack-allocated and safe by lexical scoping.
@@ -285,10 +343,40 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // Get struct element pointer
                     if is_ref_to_struct {
                         // Reference to struct: load pointer then struct_gep
-                        let struct_ptr = self.builder.build_load(current_ptr, "struct_ptr")
+                        let loaded_val = self.builder.build_load(current_ptr, "struct_ptr")
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM load error: {}", e), body.span
-                            )])?.into_pointer_value();
+                            )])?;
+
+                        // Handle different loaded value types:
+                        // - PointerValue: thin reference, use directly for struct_gep
+                        // - StructValue: fat reference (like &[T]), GEP into the struct for the data pointer
+                        // - IntValue: opaque pointer representation, convert to pointer
+                        use inkwell::values::BasicValueEnum;
+                        let struct_ptr = match loaded_val {
+                            BasicValueEnum::PointerValue(ptr) => ptr,
+                            BasicValueEnum::IntValue(int_val) => {
+                                // Opaque pointer as integer - convert to pointer type
+                                let struct_llvm_ty = self.lower_type(&effective_ty);
+                                let ptr_ty = struct_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                self.builder.build_int_to_ptr(int_val, ptr_ty, "struct_ptr_cast")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM int_to_ptr error: {}", e), body.span
+                                    )])?
+                            }
+                            BasicValueEnum::StructValue(_) => {
+                                // Fat pointer or value type reference - the referenced data is
+                                // already at current_ptr (it's the value, not a separate pointer).
+                                // Use current_ptr directly for GEP since it points to the struct.
+                                current_ptr
+                            }
+                            other => {
+                                return Err(vec![Diagnostic::error(
+                                    format!("Expected pointer, integer, or struct for reference, got {:?}", other),
+                                    body.span,
+                                )]);
+                            }
+                        };
                         self.builder.build_struct_gep(
                             struct_ptr,
                             actual_idx,
