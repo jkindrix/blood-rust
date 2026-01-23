@@ -165,6 +165,16 @@ pub struct TypeContext<'a> {
     pub(crate) loop_labels: HashMap<String, hir::LoopId>,
     /// Pending derive macro requests to expand during into_hir().
     pub(crate) pending_derives: Vec<crate::derive::DeriveRequest>,
+    /// Stack of item DefIds for the current module being collected.
+    /// This tracks only items directly defined in the current module scope,
+    /// NOT items from nested submodules. Used to fix the name collision bug
+    /// where items from submodules would incorrectly shadow same-named items
+    /// from the parent module.
+    pub(crate) current_module_items: Vec<DefId>,
+    /// Stack of re-exported items for the current module being collected.
+    /// Each entry is (local_name, original_def_id, visibility).
+    /// Used by `pub use` re-exports.
+    pub(crate) current_module_reexports: Vec<(String, DefId, crate::ast::Visibility)>,
     /// DefId for the built-in Option<T> type.
     pub(crate) option_def_id: Option<DefId>,
     /// DefId for the built-in Result<T, E> type.
@@ -651,6 +661,9 @@ pub struct ModuleInfo {
     pub source_path: Option<PathBuf>,
     /// Source content (for external modules, used for error reporting).
     pub source_content: Option<String>,
+    /// Re-exported items via `pub use`.
+    /// Each entry is (local_name, original_def_id, visibility).
+    pub reexports: Vec<(String, DefId, crate::ast::Visibility)>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -715,6 +728,8 @@ impl<'a> TypeContext<'a> {
             loop_stack: Vec::new(),
             loop_labels: HashMap::new(),
             pending_derives: Vec::new(),
+            current_module_items: Vec::new(),
+            current_module_reexports: Vec::new(),
             option_def_id: None,
             result_def_id: None,
             vec_def_id: None,
@@ -1453,6 +1468,7 @@ impl<'a> TypeContext<'a> {
                         hir::ItemKind::Module(hir::ModuleDef {
                             items: module_info.items.clone(),
                             is_external: module_info.is_external,
+                            reexports: module_info.reexports.clone(),
                         })
                     } else {
                         continue;

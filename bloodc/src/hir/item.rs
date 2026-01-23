@@ -112,6 +112,9 @@ pub struct ModuleDef {
     pub items: Vec<DefId>,
     /// Whether this is an external module (loaded from file) or inline.
     pub is_external: bool,
+    /// Re-exported items via `pub use`.
+    /// Each entry is (local_name, original_def_id, visibility).
+    pub reexports: Vec<(String, DefId, Visibility)>,
 }
 
 /// Handler kind: determines continuation semantics.

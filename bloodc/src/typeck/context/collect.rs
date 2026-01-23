@@ -307,14 +307,14 @@ impl<'a> TypeContext<'a> {
     /// Resolve an import statement.
     fn resolve_import(&mut self, import: &ast::Import) -> Result<(), TypeError> {
         match import {
-            ast::Import::Simple { path, alias, span } => {
-                self.resolve_simple_import(path, alias.as_ref(), *span)
+            ast::Import::Simple { path, alias, visibility, span } => {
+                self.resolve_simple_import(path, alias.as_ref(), *visibility, *span)
             }
-            ast::Import::Group { path, items, span } => {
-                self.resolve_group_import(path, items, *span)
+            ast::Import::Group { path, items, visibility, span } => {
+                self.resolve_group_import(path, items, *visibility, *span)
             }
-            ast::Import::Glob { path, span } => {
-                self.resolve_glob_import(path, *span)
+            ast::Import::Glob { path, visibility, span } => {
+                self.resolve_glob_import(path, *visibility, *span)
             }
         }
     }
@@ -324,6 +324,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         path: &ast::ModulePath,
         alias: Option<&crate::span::Spanned<ast::Symbol>>,
+        visibility: ast::Visibility,
         span: crate::span::Span,
     ) -> Result<(), TypeError> {
         // Resolve the path to find the target definition
@@ -347,14 +348,25 @@ impl<'a> TypeContext<'a> {
         };
 
         // Determine if this is a type or value import based on the DefKind
+        // Struct and Enum need to be imported in BOTH namespaces:
+        //   - Type namespace: for type annotations like `let x: Point`
+        //   - Value namespace: for constructors like `Point { x: 0 }`
         if let Some(info) = self.resolver.def_info.get(&def_id) {
             match info.kind {
-                hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias
-                | hir::DefKind::Effect | hir::DefKind::Trait => {
-                    self.resolver.import_type_binding(local_name, def_id, span)?;
+                hir::DefKind::Struct | hir::DefKind::Enum => {
+                    // Import as type (for type annotations)
+                    self.resolver.import_type_binding(local_name.clone(), def_id, span)?;
+                    // Also import as value (for constructors)
+                    // Ignore duplicate error since it might already exist in value namespace
+                    let _ = self.resolver.import_binding(local_name.clone(), def_id, span);
+                }
+                hir::DefKind::TypeAlias | hir::DefKind::Effect | hir::DefKind::Trait => {
+                    // Pure types - only type namespace
+                    self.resolver.import_type_binding(local_name.clone(), def_id, span)?;
                 }
                 _ => {
-                    self.resolver.import_binding(local_name, def_id, span)?;
+                    // Values (functions, constants, etc.) - only value namespace
+                    self.resolver.import_binding(local_name.clone(), def_id, span)?;
                 }
             }
         } else {
@@ -366,6 +378,12 @@ impl<'a> TypeContext<'a> {
             ));
         }
 
+        // For `pub use` re-exports, add this item to the current module's exports
+        // This makes the imported item visible to external modules
+        if matches!(visibility, ast::Visibility::Public | ast::Visibility::PublicCrate) {
+            self.register_reexport(local_name, def_id, visibility, span);
+        }
+
         Ok(())
     }
 
@@ -374,6 +392,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         path: &ast::ModulePath,
         items: &[ast::ImportItem],
+        visibility: ast::Visibility,
         span: crate::span::Span,
     ) -> Result<(), TypeError> {
         // For group imports, we need to resolve the base path as a module
@@ -391,17 +410,26 @@ impl<'a> TypeContext<'a> {
                     item_name.clone()
                 };
 
-                // Import based on def kind
+                // Import based on def kind (struct/enum need both namespaces)
                 if let Some(info) = self.resolver.def_info.get(&def_id) {
                     match info.kind {
-                        hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias
-                        | hir::DefKind::Effect | hir::DefKind::Trait => {
-                            self.resolver.import_type_binding(local_name, def_id, span)?;
+                        hir::DefKind::Struct | hir::DefKind::Enum => {
+                            // Import as type and value (for annotations and constructors)
+                            self.resolver.import_type_binding(local_name.clone(), def_id, span)?;
+                            let _ = self.resolver.import_binding(local_name.clone(), def_id, span);
+                        }
+                        hir::DefKind::TypeAlias | hir::DefKind::Effect | hir::DefKind::Trait => {
+                            self.resolver.import_type_binding(local_name.clone(), def_id, span)?;
                         }
                         _ => {
-                            self.resolver.import_binding(local_name, def_id, span)?;
+                            self.resolver.import_binding(local_name.clone(), def_id, span)?;
                         }
                     }
+                }
+
+                // For `pub use` re-exports, add this item to the current module's exports
+                if matches!(visibility, ast::Visibility::Public | ast::Visibility::PublicCrate) {
+                    self.register_reexport(local_name, def_id, visibility, span);
                 }
             } else {
                 return Err(TypeError::new(
@@ -420,6 +448,7 @@ impl<'a> TypeContext<'a> {
     fn resolve_glob_import(
         &mut self,
         path: &ast::ModulePath,
+        visibility: ast::Visibility,
         span: crate::span::Span,
     ) -> Result<(), TypeError> {
         // Resolve the path as a module and import all public items
@@ -430,10 +459,17 @@ impl<'a> TypeContext<'a> {
 
         for (name, def_id) in items {
             // Import based on def kind (skip if already exists)
+            // Struct and enum need both type and value namespaces
             if let Some(info) = self.resolver.def_info.get(&def_id) {
                 let result = match info.kind {
-                    hir::DefKind::Struct | hir::DefKind::Enum | hir::DefKind::TypeAlias
-                    | hir::DefKind::Effect | hir::DefKind::Trait => {
+                    hir::DefKind::Struct | hir::DefKind::Enum => {
+                        // Import as type first
+                        let type_result = self.resolver.import_type_binding(name.clone(), def_id, span);
+                        // Also import as value (ignore duplicate)
+                        let _ = self.resolver.import_binding(name.clone(), def_id, span);
+                        type_result
+                    }
+                    hir::DefKind::TypeAlias | hir::DefKind::Effect | hir::DefKind::Trait => {
                         self.resolver.import_type_binding(name.clone(), def_id, span)
                     }
                     _ => {
@@ -447,10 +483,42 @@ impl<'a> TypeContext<'a> {
                         return Err(e);
                     }
                 }
+
+                // For `pub use *` re-exports, add all items to the current module's exports
+                if matches!(visibility, ast::Visibility::Public | ast::Visibility::PublicCrate) {
+                    self.register_reexport(name, def_id, visibility, span);
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Register a re-exported item in the current module.
+    ///
+    /// When `pub use path::item;` is used, the imported item should be
+    /// re-exported from the current module, making it accessible to external
+    /// modules that import from this module.
+    fn register_reexport(
+        &mut self,
+        name: String,
+        def_id: DefId,
+        visibility: ast::Visibility,
+        _span: crate::span::Span,
+    ) {
+        // Track re-exports in the current module's reexports list.
+        // This is stored separately during collection and merged into
+        // the ModuleInfo when the module is finalized.
+        //
+        // The key insight is that the DefId already exists (from the original
+        // definition), we just need to make it visible under a new name in
+        // the current module's namespace.
+        if self.current_module.is_some() {
+            // Add to current module's reexports list
+            self.current_module_reexports.push((name, def_id, visibility));
+        }
+        // For top-level re-exports (not inside a module), the item is already
+        // in global scope from the import, so no additional action needed.
     }
 
     /// Resolve an import path to find the target definition.
@@ -572,12 +640,19 @@ impl<'a> TypeContext<'a> {
     fn lookup_in_module(&self, module_id: DefId, name: &str) -> Option<DefId> {
         // Check if we have module info for this DefId
         if let Some(module_def) = self.module_defs.get(&module_id) {
-            // Look in the module's items
+            // Look in the module's directly defined items
             for &item_id in &module_def.items {
                 if let Some(info) = self.resolver.def_info.get(&item_id) {
                     if info.name == name {
                         return Some(item_id);
                     }
+                }
+            }
+
+            // Also look in re-exported items (from `pub use`)
+            for (reexport_name, def_id, _vis) in &module_def.reexports {
+                if reexport_name == name {
+                    return Some(*def_id);
                 }
             }
         }
@@ -591,6 +666,7 @@ impl<'a> TypeContext<'a> {
         let mut items = Vec::new();
 
         if let Some(module_def) = self.module_defs.get(&module_id) {
+            // Include directly defined public items
             for &item_id in &module_def.items {
                 if let Some(info) = self.resolver.def_info.get(&item_id) {
                     // Only include public items (Public or PublicCrate from outside)
@@ -601,6 +677,18 @@ impl<'a> TypeContext<'a> {
                         Visibility::Private | Visibility::PublicSuper | Visibility::PublicSelf => {
                             // Private items are not exported
                         }
+                    }
+                }
+            }
+
+            // Include re-exported items (from `pub use`)
+            for (name, def_id, vis) in &module_def.reexports {
+                match vis {
+                    Visibility::Public | Visibility::PublicCrate => {
+                        items.push((name.clone(), *def_id));
+                    }
+                    Visibility::Private | Visibility::PublicSuper | Visibility::PublicSelf => {
+                        // Non-public re-exports are not visible externally
                     }
                 }
             }
@@ -625,6 +713,7 @@ impl<'a> TypeContext<'a> {
             ast::Declaration::Bridge(b) => self.collect_bridge(b),
             ast::Declaration::Module(m) => self.collect_module(m),
             ast::Declaration::Macro(m) => self.collect_macro(m),
+            ast::Declaration::Use(import) => self.resolve_import(import),
         }
     }
 
@@ -1065,6 +1154,9 @@ impl<'a> TypeContext<'a> {
             func.vis,
         )?;
 
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
+
         // Register generic type parameters before processing parameter types
         // This allows type references like `T` to be resolved in the function signature
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1208,6 +1300,9 @@ impl<'a> TypeContext<'a> {
             def_id
         };
 
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
+
         // Register generic type parameters before processing field types
         let saved_generic_params = std::mem::take(&mut self.generic_params);
         let saved_const_params = std::mem::take(&mut self.const_params);
@@ -1319,6 +1414,9 @@ impl<'a> TypeContext<'a> {
             def_id
         };
 
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
+
         // Register generic type parameters before processing the aliased type
         let saved_generic_params = std::mem::take(&mut self.generic_params);
         let saved_const_params = std::mem::take(&mut self.const_params);
@@ -1387,6 +1485,9 @@ impl<'a> TypeContext<'a> {
             self.resolver.define_type(name.clone(), def_id, enum_decl.span)?;
             def_id
         };
+
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
 
         // Register generic type parameters before processing variant types
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1518,6 +1619,9 @@ impl<'a> TypeContext<'a> {
             const_decl.span,
         )?;
 
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
+
         // Convert the declared type
         let ty = self.ast_type_to_hir_type(&const_decl.ty)?;
 
@@ -1559,6 +1663,9 @@ impl<'a> TypeContext<'a> {
             hir::DefKind::Static,
             static_decl.span,
         )?;
+
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
 
         // Convert the declared type
         let ty = self.ast_type_to_hir_type(&static_decl.ty)?;
@@ -1602,6 +1709,9 @@ impl<'a> TypeContext<'a> {
             self.resolver.define_type(name.clone(), def_id, effect.span)?;
             def_id
         };
+
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
 
         // Collect generic parameters
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -1693,6 +1803,9 @@ impl<'a> TypeContext<'a> {
             hir::DefKind::Handler,
             handler.span,
         )?;
+
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
 
         // Collect generic parameters
         let saved_generic_params = std::mem::take(&mut self.generic_params);
@@ -2069,6 +2182,9 @@ impl<'a> TypeContext<'a> {
             def_id
         };
 
+        // Track this item as belonging to the current module
+        self.current_module_items.push(def_id);
+
         // Save current generic params and current_impl_self_ty
         let saved_generic_params = std::mem::take(&mut self.generic_params);
         let saved_impl_self_ty = self.current_impl_self_ty.take();
@@ -2426,6 +2542,10 @@ impl<'a> TypeContext<'a> {
             module.span,
         )?;
 
+        // Track this module as belonging to the PARENT module's items.
+        // This must happen BEFORE we save/clear current_module_items for the nested module.
+        self.current_module_items.push(def_id);
+
         match &module.body {
             Some(declarations) => {
                 // Inline module - push a new scope and collect declarations
@@ -2435,8 +2555,12 @@ impl<'a> TypeContext<'a> {
                 let saved_module = self.current_module;
                 self.current_module = Some(def_id);
 
-                // Track the starting DefId counter
-                let def_id_start = self.resolver.current_def_id_counter();
+                // Save and clear current_module_items to track only this module's items.
+                // This fixes the name collision bug where items from submodules would
+                // be incorrectly included in the parent module's item list, causing
+                // same-named items to shadow each other during inject_module_bindings.
+                let saved_module_items = std::mem::take(&mut self.current_module_items);
+                let saved_module_reexports = std::mem::take(&mut self.current_module_reexports);
 
                 // Phase 1: Pre-register all type names so forward references work within the module
                 for decl in declarations {
@@ -2452,14 +2576,14 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Collect DefIds of items defined during this module's collection
-                let def_id_end = self.resolver.current_def_id_counter();
-                let item_def_ids: Vec<DefId> = (def_id_start..def_id_end)
-                    .map(DefId::new)
-                    .collect();
+                // Get the items and reexports collected for THIS module only (not submodules)
+                let item_def_ids = std::mem::take(&mut self.current_module_items);
+                let reexports = std::mem::take(&mut self.current_module_reexports);
 
-                // Restore previous module context
+                // Restore previous module context, items, and reexports
                 self.current_module = saved_module;
+                self.current_module_items = saved_module_items;
+                self.current_module_reexports = saved_module_reexports;
                 self.resolver.pop_scope();
 
                 // Store module info
@@ -2470,6 +2594,7 @@ impl<'a> TypeContext<'a> {
                     span: module.span,
                     source_path: None,
                     source_content: None,
+                    reexports,
                 });
             }
             None => {
@@ -2580,6 +2705,7 @@ impl<'a> TypeContext<'a> {
                             span: module.span,
                             source_path: existing_info.source_path,
                             source_content: existing_info.source_content,
+                            reexports: existing_info.reexports,
                         });
                         return Ok(());
                     }
@@ -2633,8 +2759,12 @@ impl<'a> TypeContext<'a> {
                 let saved_source_path = self.source_path.take();
                 self.source_path = Some(module_path.clone());
 
-                // Track the starting DefId counter
-                let def_id_start = self.resolver.current_def_id_counter();
+                // Save and clear current_module_items to track only this module's items.
+                // This fixes the name collision bug where items from submodules would
+                // be incorrectly included in the parent module's item list, causing
+                // same-named items to shadow each other during inject_module_bindings.
+                let saved_module_items = std::mem::take(&mut self.current_module_items);
+                let saved_module_reexports = std::mem::take(&mut self.current_module_reexports);
 
                 // Phase 1: Pre-register all type names so forward references work within the module
                 for decl in &module_ast.declarations {
@@ -2653,15 +2783,15 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Collect DefIds of items defined during this module's collection
-                let def_id_end = self.resolver.current_def_id_counter();
-                let item_def_ids: Vec<DefId> = (def_id_start..def_id_end)
-                    .map(DefId::new)
-                    .collect();
+                // Get the items and reexports collected for THIS module only (not submodules)
+                let item_def_ids = std::mem::take(&mut self.current_module_items);
+                let reexports = std::mem::take(&mut self.current_module_reexports);
 
-                // Restore previous module context and source path
+                // Restore previous module context, source path, items, and reexports
                 self.source_path = saved_source_path;
                 self.current_module = saved_module;
+                self.current_module_items = saved_module_items;
+                self.current_module_reexports = saved_module_reexports;
                 self.resolver.pop_scope();
 
                 // Store module info with source for error reporting
@@ -2672,6 +2802,7 @@ impl<'a> TypeContext<'a> {
                     span: module.span,
                     source_path: Some(module_path),
                     source_content: Some(module_source),
+                    reexports,
                 });
 
                 // Cache this module by canonical path for future diamond dependency detection
