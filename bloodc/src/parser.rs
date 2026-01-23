@@ -486,6 +486,13 @@ impl<'src> Parser<'src> {
             .push(Diagnostic::error(message, span).with_error_code(code));
     }
 
+    /// Emit a warning at the given span.
+    /// Unlike errors, warnings don't trigger panic mode.
+    fn warn_at(&mut self, span: Span, message: &str, code: ErrorCode) {
+        self.errors
+            .push(Diagnostic::warning(message, span).with_error_code(code));
+    }
+
     fn error_expected(&mut self, expected: &str) {
         let found = self.current.kind.description();
         let message = format!("expected {}, found {}", expected, found);

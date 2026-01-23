@@ -2,6 +2,7 @@
 
 use super::Parser;
 use crate::ast::*;
+use crate::diagnostics::ErrorCode;
 use crate::lexer::TokenKind;
 use crate::span::{Span, Spanned};
 
@@ -40,7 +41,12 @@ impl<'src> Parser<'src> {
             TokenKind::Use => {
                 // Warn if there are attributes on a use declaration (they're ignored)
                 if !attrs.is_empty() {
-                    // TODO: emit warning about attributes on use declarations
+                    // Emit warning for first attribute (representative of all)
+                    self.warn_at(
+                        attrs[0].span,
+                        "attributes on use declarations are ignored",
+                        ErrorCode::IgnoredAttributeOnUse,
+                    );
                 }
                 Some(Declaration::Use(self.parse_import_with_visibility(vis)))
             }

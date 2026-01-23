@@ -1139,10 +1139,60 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .left()
                         .ok_or_else(|| vec![Diagnostic::error("str_char_at_index should return value", Span::dummy())])?;
 
-                    // Result is {i32 tag, i32 value} - extract the char value
-                    // If tag == 0 (None), we should panic, but for now just return the value
-                    // TODO: Add bounds checking / panic on None
+                    // Result is {i32 tag, i32 value} - extract tag and value
+                    // tag=0 means None (out of bounds), tag=1 means Some(char)
                     let result_struct = result.into_struct_value();
+
+                    // Extract the tag to check for out-of-bounds
+                    let tag = self.builder
+                        .build_extract_value(result_struct, 0, "tag")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .into_int_value();
+
+                    // Check if tag == 0 (None/out-of-bounds)
+                    let zero = self.context.i32_type().const_zero();
+                    let is_none = self.builder
+                        .build_int_compare(IntPredicate::EQ, tag, zero, "is_none")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Get current function for creating basic blocks
+                    let fn_value = self.current_fn.ok_or_else(|| {
+                        vec![Diagnostic::error("No current function for string index bounds check", Span::dummy())]
+                    })?;
+
+                    // Create basic blocks for bounds check
+                    let panic_bb = self.context.append_basic_block(fn_value, "str_index_oob");
+                    let continue_bb = self.context.append_basic_block(fn_value, "str_index_ok");
+
+                    // Branch: if tag == 0, panic; else continue
+                    self.builder.build_conditional_branch(is_none, panic_bb, continue_bb)
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Panic block: call blood_panic with out-of-bounds message
+                    self.builder.position_at_end(panic_bb);
+
+                    let panic_fn = self.module.get_function("blood_panic")
+                        .unwrap_or_else(|| {
+                            let void_type = self.context.void_type();
+                            let i8_type = self.context.i8_type();
+                            let i8_ptr_type = i8_type.ptr_type(AddressSpace::default());
+                            let panic_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+                            self.module.add_function("blood_panic", panic_type, None)
+                        });
+
+                    let msg_global = self.builder
+                        .build_global_string_ptr("string index out of bounds", "str_oob_msg")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    self.builder.build_call(panic_fn, &[msg_global.as_pointer_value().into()], "")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    self.builder.build_unreachable()
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Continue block: extract and return the char value
+                    self.builder.position_at_end(continue_bb);
+
                     let char_val = self.builder
                         .build_extract_value(result_struct, 1, "char_val")
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
@@ -1221,8 +1271,60 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .left()
                         .ok_or_else(|| vec![Diagnostic::error("str_char_at_index should return value", Span::dummy())])?;
 
-                    // Result is {i32 tag, i32 value} - extract the char value
+                    // Result is {i32 tag, i32 value} - extract tag and value
+                    // tag=0 means None (out of bounds), tag=1 means Some(char)
                     let result_struct = result.into_struct_value();
+
+                    // Extract the tag to check for out-of-bounds
+                    let tag = self.builder
+                        .build_extract_value(result_struct, 0, "tag")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .into_int_value();
+
+                    // Check if tag == 0 (None/out-of-bounds)
+                    let zero = self.context.i32_type().const_zero();
+                    let is_none = self.builder
+                        .build_int_compare(IntPredicate::EQ, tag, zero, "is_none")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Get current function for creating basic blocks
+                    let fn_value = self.current_fn.ok_or_else(|| {
+                        vec![Diagnostic::error("No current function for string index bounds check", Span::dummy())]
+                    })?;
+
+                    // Create basic blocks for bounds check
+                    let panic_bb = self.context.append_basic_block(fn_value, "str_index_oob");
+                    let continue_bb = self.context.append_basic_block(fn_value, "str_index_ok");
+
+                    // Branch: if tag == 0, panic; else continue
+                    self.builder.build_conditional_branch(is_none, panic_bb, continue_bb)
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Panic block: call blood_panic with out-of-bounds message
+                    self.builder.position_at_end(panic_bb);
+
+                    let panic_fn = self.module.get_function("blood_panic")
+                        .unwrap_or_else(|| {
+                            let void_type = self.context.void_type();
+                            let i8_type = self.context.i8_type();
+                            let i8_ptr_type = i8_type.ptr_type(AddressSpace::default());
+                            let panic_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+                            self.module.add_function("blood_panic", panic_type, None)
+                        });
+
+                    let msg_global = self.builder
+                        .build_global_string_ptr("string index out of bounds", "str_oob_msg")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    self.builder.build_call(panic_fn, &[msg_global.as_pointer_value().into()], "")
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    self.builder.build_unreachable()
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+
+                    // Continue block: extract and return the char value
+                    self.builder.position_at_end(continue_bb);
+
                     let char_val = self.builder
                         .build_extract_value(result_struct, 1, "char_val")
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;

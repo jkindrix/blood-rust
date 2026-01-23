@@ -33,7 +33,8 @@ use thiserror::Error;
 /// - E0300-E0399: Type errors
 /// - E0400-E0499: Effect/handler errors
 /// - W0001-W0099: Memory/pointer warnings
-/// - W0100-W0199: Performance warnings
+/// - W0100-W0199: Effect/handler warnings
+/// - W0200-W0299: Syntax/parser warnings
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum ErrorCode {
@@ -131,6 +132,12 @@ pub enum ErrorCode {
 
     /// Handler with many operations may be better split.
     LargeHandlerDefinition = 1101,
+
+    // ============================================================
+    // Syntax/Parser Warnings (W0200-W0299)
+    // ============================================================
+    /// Attributes on use declarations are ignored.
+    IgnoredAttributeOnUse = 1200,
 }
 
 impl ErrorCode {
@@ -192,6 +199,8 @@ impl ErrorCode {
             // Effect/Handler warnings
             ErrorCode::DeeplyNestedHandlers => "deeply nested effect handlers add lookup overhead",
             ErrorCode::LargeHandlerDefinition => "handler with many operations may impact readability",
+            // Syntax/Parser warnings
+            ErrorCode::IgnoredAttributeOnUse => "attributes on use declarations are ignored",
         }
     }
 
