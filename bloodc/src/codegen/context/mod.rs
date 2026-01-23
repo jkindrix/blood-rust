@@ -1427,6 +1427,80 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     )])
                 }
             }
+            ExprKind::Variant { def_id: _, variant_idx, fields } => {
+                // Get the LLVM type for the enum
+                let enum_llvm_type = self.lower_type(ty);
+
+                // Handle unit enums (no payload fields) - lowered to just i32 tag
+                if enum_llvm_type.is_int_type() {
+                    // Unit enum - just return the tag value as a constant
+                    let tag = self.context.i32_type().const_int(*variant_idx as u64, false);
+                    return Ok(tag.into());
+                }
+
+                // Payload enum - create a constant struct with tag + fields
+                let enum_struct_type = enum_llvm_type.into_struct_type();
+
+                // Evaluate all field values as constants
+                let mut field_values: Vec<inkwell::values::BasicValueEnum<'ctx>> = Vec::new();
+
+                // First field is always the discriminant/tag
+                let tag = self.context.i32_type().const_int(*variant_idx as u64, false);
+                field_values.push(tag.into());
+
+                // Get variant field types from the enum type
+                // The struct type has: [tag, field1, field2, ...]
+                // We need to match field expressions to their expected types
+                for (i, field_expr) in fields.iter().enumerate() {
+                    let field_val = self.evaluate_const_expr_with_env(field_expr, &field_expr.ty, bindings)?;
+
+                    // Check if we need to pad the value to match the struct field type
+                    let struct_field_type = enum_struct_type.get_field_type_at_index((i + 1) as u32);
+                    if let Some(expected_type) = struct_field_type {
+                        let actual_type = field_val.get_type();
+
+                        // If types don't match, we may need padding for union-like representation
+                        if actual_type != expected_type {
+                            // For now, try to use the value directly if it fits
+                            // This handles cases where the enum payload is smaller than the max variant
+                            if let (inkwell::values::BasicValueEnum::IntValue(iv), inkwell::types::BasicTypeEnum::IntType(target_int)) = (field_val, expected_type) {
+                                let from_bits = iv.get_type().get_bit_width();
+                                let to_bits = target_int.get_bit_width();
+                                if from_bits < to_bits {
+                                    field_values.push(iv.const_z_ext(target_int).into());
+                                } else if from_bits > to_bits {
+                                    field_values.push(iv.const_truncate(target_int).into());
+                                } else {
+                                    field_values.push(field_val);
+                                }
+                            } else {
+                                // For non-integer types or complex cases, use the value as-is
+                                // and hope LLVM can handle it (it usually can for compatible types)
+                                field_values.push(field_val);
+                            }
+                        } else {
+                            field_values.push(field_val);
+                        }
+                    } else {
+                        field_values.push(field_val);
+                    }
+                }
+
+                // If we have fewer fields than the struct expects (e.g., Some(x) vs None),
+                // pad with zeros/undef for remaining fields
+                let num_struct_fields = enum_struct_type.count_fields();
+                while field_values.len() < num_struct_fields as usize {
+                    let idx = field_values.len() as u32;
+                    if let Some(field_type) = enum_struct_type.get_field_type_at_index(idx) {
+                        field_values.push(field_type.const_zero());
+                    } else {
+                        break;
+                    }
+                }
+
+                // Create the constant struct
+                Ok(enum_struct_type.const_named_struct(&field_values).into())
+            }
             _ => Err(vec![Diagnostic::error(
                 format!("Expression kind {:?} is not const-evaluable", std::mem::discriminant(&expr.kind)),
                 expr.span,
