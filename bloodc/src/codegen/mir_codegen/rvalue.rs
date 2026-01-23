@@ -86,7 +86,7 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
             Rvalue::BinaryOp { op, left, right } => {
                 let operand_ty = self.get_operand_type(left, body);
-                let is_float = self.is_float_type(operand_ty);
+                let is_float = self.is_float_type(&operand_ty);
                 let lhs = self.compile_mir_operand(left, body, escape_results)?;
                 let rhs = self.compile_mir_operand(right, body, escape_results)?;
                 self.compile_binary_op(*op, lhs, rhs, is_float)
@@ -95,7 +95,7 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             Rvalue::CheckedBinaryOp { op, left, right } => {
                 // Checked operations return (result, overflow_flag) tuple
                 let operand_ty = self.get_operand_type(left, body);
-                let is_signed = self.is_signed_type(operand_ty);
+                let is_signed = self.is_signed_type(&operand_ty);
                 let lhs = self.compile_mir_operand(left, body, escape_results)?;
                 let rhs = self.compile_mir_operand(right, body, escape_results)?;
                 self.compile_checked_binary_op(*op, lhs, rhs, is_signed)
@@ -1637,12 +1637,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     /// Get the type of an MIR operand.
-    pub(super) fn get_operand_type<'b>(&self, operand: &'b Operand, body: &'b MirBody) -> &'b Type {
+    ///
+    /// This handles projections on places, returning the type after applying
+    /// all projections (e.g., field access on tuples/structs).
+    pub(super) fn get_operand_type(&self, operand: &Operand, body: &MirBody) -> Type {
         match operand {
             Operand::Copy(place) | Operand::Move(place) => {
-                &body.locals[place.local.index() as usize].ty
+                let base_ty = &body.locals[place.local.index() as usize].ty;
+                if place.projection.is_empty() {
+                    base_ty.clone()
+                } else {
+                    // Compute the type after applying projections
+                    self.compute_place_type(base_ty, &place.projection)
+                }
             }
-            Operand::Constant(constant) => &constant.ty,
+            Operand::Constant(constant) => constant.ty.clone(),
         }
     }
 

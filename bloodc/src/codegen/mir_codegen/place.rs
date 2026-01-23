@@ -413,12 +413,14 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // - Ref to array &[T; N]: ptr is [N x T]**, load to get [N x T]*, two-index GEP
                     // - Slice ref &[T]: ptr is {T*, i64}* (fat pointer), load struct, extract data ptr, single-index GEP
                     // - Ptr to elements *T: current_ptr is **T (e.g., Vec.data), load then single-index GEP
+                    // - Vec<T>: current_ptr is Vec*, extract data ptr (field 0), load, then single-index GEP
                     enum IndexKind {
                         DirectArray,
                         DirectSlice,
                         RefToArray,
                         SliceRef,
                         PtrToElements,  // For Vec data pointer or similar
+                        VecIndex,       // Direct indexing into Vec<T>
                         Other,
                     }
 
@@ -435,6 +437,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 _ => IndexKind::PtrToElements,
                             }
                         }
+                        // Vec<T> indexing: need to extract data pointer and index into it
+                        TypeKind::Adt { def_id, .. } if Some(*def_id) == self.vec_def_id => {
+                            IndexKind::VecIndex
+                        }
                         _ => IndexKind::Other,
                     };
 
@@ -450,6 +456,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // indexing into *T gives T (the element type)
                                 _ => inner.clone(),
                             }
+                        }
+                        // Vec<T> indexing gives element type T
+                        TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
+                            args.first().cloned().unwrap_or(current_ty.clone())
                         }
                         _ => current_ty.clone(),
                     };
@@ -538,6 +548,27 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     data_ptr,
                                     &[idx_val.into_int_value()],
                                     "ptr_idx_gep"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
+                            }
+                            IndexKind::VecIndex => {
+                                // Vec<T> direct indexing: current_ptr is Vec*, need to:
+                                // 1. GEP to field 0 (data pointer field)
+                                // 2. Load the data pointer (*T)
+                                // 3. Index into the data with single-index GEP
+                                let data_ptr_ptr = self.builder.build_struct_gep(current_ptr, 0, "vec_data_ptr_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM GEP error for Vec data pointer: {}", e), body.span
+                                    )])?;
+                                let data_ptr = self.builder.build_load(data_ptr_ptr, "vec_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM load error: {}", e), body.span
+                                    )])?.into_pointer_value();
+                                self.builder.build_in_bounds_gep(
+                                    data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "vec_idx_gep"
                                 ).map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
                                 )])?
