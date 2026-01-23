@@ -704,6 +704,29 @@ impl<'a> TypeContext<'a> {
             "str_as_bytes",
         );
 
+        // str.chars(&self) -> Vec<char>
+        // Returns characters as a Vec (for iteration)
+        let vec_def_id = self.vec_def_id.expect("BUG: vec_def_id not set");
+        let vec_char_ty = Type::adt(vec_def_id, vec![Type::char()]);
+        self.register_builtin_method(
+            BuiltinMethodType::Str,
+            "chars",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            vec_char_ty.clone(),
+            "str_chars",
+        );
+
+        // &str.chars(&self) -> Vec<char>
+        self.register_builtin_method(
+            BuiltinMethodType::StrRef,
+            "chars",
+            false,
+            vec![Type::reference(Type::str(), false)],
+            vec_char_ty,
+            "str_chars",
+        );
+
         // str.to_uppercase(&self) -> String
         self.register_builtin_method(
             BuiltinMethodType::Str,
