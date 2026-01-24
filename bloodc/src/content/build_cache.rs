@@ -466,6 +466,11 @@ impl Default for BuildCache {
 /// This produces a hash based on the canonical form of the item,
 /// suitable for incremental compilation cache keys.
 ///
+/// The `def_id` is included to ensure each definition gets a unique hash,
+/// even if two definitions have identical content. This is necessary because
+/// compiled object files contain symbol names that include the DefId, so
+/// cached object files cannot be reused across different DefIds.
+///
 /// The `items` map is used to resolve handler references to their names,
 /// ensuring that functions using different handlers get different hashes
 /// even if the handlers have the same DefId index.
@@ -474,12 +479,18 @@ impl Default for BuildCache {
 /// between different source files that may have items with identical content
 /// but different external dependencies.
 pub fn hash_hir_item(
+    def_id: DefId,
     item: &hir::Item,
     bodies: &HashMap<hir::BodyId, hir::Body>,
     items: &HashMap<DefId, hir::Item>,
     source_path: Option<&std::path::Path>,
 ) -> ContentHash {
     let mut hasher = ContentHasher::new();
+
+    // Include DefId to ensure each definition gets a unique hash.
+    // Object files contain symbol names with the DefId baked in, so
+    // we cannot reuse cached object files across different DefIds.
+    hasher.update_u32(def_id.index);
 
     // Include source file path to prevent cross-file cache collisions.
     // Different files may have identically-named items that reference
