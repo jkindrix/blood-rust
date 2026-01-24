@@ -155,7 +155,7 @@ impl Lexer {
         if self.is_at_end() {
             None
         } else {
-            Some(self.source.char_at(self.pos as usize))
+            self.source.char_at(self.pos as usize)
         }
     }
 
@@ -165,7 +165,7 @@ impl Lexer {
         if next_pos >= self.source.len() as u32 {
             None
         } else {
-            Some(self.source.char_at(next_pos as usize))
+            self.source.char_at(next_pos as usize)
         }
     }
 
@@ -175,17 +175,20 @@ impl Lexer {
             return None;
         }
 
-        let ch = self.source.char_at(self.pos as usize);
-        self.pos = self.pos + 1;
+        if let Some(ch) = self.source.char_at(self.pos as usize) {
+            self.pos = self.pos + 1;
 
-        if ch == '\n' {
-            self.line = self.line + 1;
-            self.column = 1;
+            if ch == '\n' {
+                self.line = self.line + 1;
+                self.column = 1;
+            } else {
+                self.column = self.column + 1;
+            }
+
+            Some(ch)
         } else {
-            self.column = self.column + 1;
+            None
         }
-
-        Some(ch)
     }
 
     /// Consume characters while a predicate holds.
@@ -515,7 +518,7 @@ impl Lexer {
     /// Scan a number literal.
     fn scan_number(&mut self, start: u32, start_line: u32, start_column: u32) -> Token {
         // Check for hex, octal, binary prefix
-        if self.source.char_at((start) as usize) == '0' {
+        if self.source.char_at(start as usize) == Some('0') {
             match self.peek() {
                 Some('x') | Some('X') => {
                     self.advance();
