@@ -60,6 +60,18 @@ pub extern "C" fn println_i64(n: i64) {
     println!("{n}");
 }
 
+/// Print just a newline.
+#[no_mangle]
+pub extern "C" fn println() {
+    println!();
+}
+
+/// Print just a newline (alias for println).
+#[no_mangle]
+pub extern "C" fn print_newline() {
+    println!();
+}
+
 /// Blood str slice representation {ptr, len}.
 #[repr(C)]
 pub struct BloodStr {
@@ -195,6 +207,125 @@ pub unsafe extern "C" fn string_push_str(s: *mut BloodString, other: *const Bloo
 #[no_mangle]
 pub unsafe extern "C" fn string_clear(s: *mut BloodString) {
     (*s).len = 0;
+}
+
+/// Convert a str slice to an owned String.
+///
+/// This allocates new memory and copies the string data.
+///
+/// # Arguments
+/// * `s` - Pointer to the input BloodStr slice
+/// * `out` - Output buffer to write the String struct to
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodStr.
+/// `out` must be a valid pointer to uninitialized BloodString memory.
+#[no_mangle]
+pub unsafe extern "C" fn str_to_string(s: *const BloodStr, out: *mut BloodString) {
+    if s.is_null() || out.is_null() {
+        // Initialize to empty string on null input
+        (*out).ptr = std::ptr::null_mut();
+        (*out).len = 0;
+        (*out).capacity = 0;
+        return;
+    }
+
+    let input = &*s;
+    let len = input.len as i64;
+
+    if len == 0 || input.ptr.is_null() {
+        // Empty string
+        (*out).ptr = std::ptr::null_mut();
+        (*out).len = 0;
+        (*out).capacity = 0;
+        return;
+    }
+
+    // Allocate memory for the new string
+    let capacity = len;
+    let layout = std::alloc::Layout::from_size_align(capacity as usize, 1).unwrap();
+    let new_ptr = std::alloc::alloc(layout);
+
+    if new_ptr.is_null() {
+        // Allocation failed
+        (*out).ptr = std::ptr::null_mut();
+        (*out).len = 0;
+        (*out).capacity = 0;
+        return;
+    }
+
+    // Copy the data
+    std::ptr::copy_nonoverlapping(input.ptr, new_ptr, len as usize);
+
+    // Initialize the output String
+    (*out).ptr = new_ptr;
+    (*out).len = len;
+    (*out).capacity = capacity;
+}
+
+/// Extract a substring from a String by byte indices.
+///
+/// Creates a new String containing the bytes from `start` to `end` (exclusive).
+///
+/// # Arguments
+/// * `s` - Pointer to the input BloodString
+/// * `start` - Start byte index (inclusive)
+/// * `end` - End byte index (exclusive)
+/// * `out` - Output buffer to write the new String to
+///
+/// # Safety
+/// `s` must be a valid pointer to a BloodString.
+/// `out` must be a valid pointer to uninitialized BloodString memory.
+/// `start` and `end` should be valid byte indices (clamped if out of bounds).
+#[no_mangle]
+pub unsafe extern "C" fn string_substring(
+    s: *const BloodString,
+    start: i64,
+    end: i64,
+    out: *mut BloodString,
+) {
+    if s.is_null() || out.is_null() {
+        (*out).ptr = std::ptr::null_mut();
+        (*out).len = 0;
+        (*out).capacity = 0;
+        return;
+    }
+
+    let input = &*s;
+
+    // Clamp indices to valid range
+    let len = input.len;
+    let start = start.max(0).min(len) as usize;
+    let end = end.max(0).min(len) as usize;
+
+    if start >= end || input.ptr.is_null() {
+        // Empty substring
+        (*out).ptr = std::ptr::null_mut();
+        (*out).len = 0;
+        (*out).capacity = 0;
+        return;
+    }
+
+    let substr_len = (end - start) as i64;
+
+    // Allocate memory for the new string
+    let layout = std::alloc::Layout::from_size_align(substr_len as usize, 1).unwrap();
+    let new_ptr = std::alloc::alloc(layout);
+
+    if new_ptr.is_null() {
+        (*out).ptr = std::ptr::null_mut();
+        (*out).len = 0;
+        (*out).capacity = 0;
+        return;
+    }
+
+    // Copy the substring data
+    std::ptr::copy_nonoverlapping(input.ptr.add(start), new_ptr, substr_len as usize);
+
+    // Initialize the output String
+    (*out).ptr = new_ptr;
+    (*out).len = substr_len;
+    (*out).capacity = substr_len;
 }
 
 /// Print a string (no newline).
