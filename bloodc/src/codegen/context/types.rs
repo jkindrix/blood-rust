@@ -120,20 +120,27 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         self.context.struct_type(&field_types, false).into()
                     }
                 } else if let Some(variants) = self.enum_defs.get(def_id) {
-                    // Enum: { i32 tag, [i8 x payload_size] }
-                    // We use an opaque byte array for the payload to support heterogeneous
-                    // variant access via pointer casting. This allows different variants
-                    // to have different field types stored in the same payload area.
+                    // Enum: { i32 tag, payload }
+                    // The payload must have:
+                    // 1. Enough size to hold the largest variant
+                    // 2. Alignment at least as high as the most-aligned variant
                     //
-                    // For generic enums, substitute type parameters with concrete args
-                    // and find the maximum payload size across all variants.
+                    // IMPORTANT: We track both max_size AND max_alignment separately because
+                    // the largest variant might not have the highest alignment requirement.
+                    // For example: Variant A = {i32, i32, i32} (12 bytes, 4-byte align)
+                    //              Variant B = {i64} (8 bytes, 8-byte align)
+                    // Using A's type as payload would misalign B's i64 access.
+                    //
+                    // Solution: Use an array of the highest-alignment type, sized to fit
+                    // the largest variant. This ensures proper alignment for all variants.
                     let mut max_payload_size: u64 = 0;
+                    let mut max_alignment: u32 = 1;
                     let mut has_payload = false;
 
                     for variant_fields in variants {
                         if !variant_fields.is_empty() {
                             has_payload = true;
-                            // Build the variant's struct type to get its size
+                            // Build the variant's struct type to get its size and alignment
                             let variant_field_types: Vec<BasicTypeEnum> = variant_fields.iter()
                                 .map(|field_ty| {
                                     let substituted = self.substitute_type_params(field_ty, args);
@@ -142,8 +149,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .collect();
                             let variant_struct_ty = self.context.struct_type(&variant_field_types, false);
                             let variant_size = self.get_type_size_approx(variant_struct_ty.into()) as u64;
+                            let variant_align = self.get_max_field_alignment(&variant_field_types);
+
                             if variant_size > max_payload_size {
                                 max_payload_size = variant_size;
+                            }
+                            if variant_align > max_alignment {
+                                max_alignment = variant_align;
                             }
                         }
                     }
@@ -152,10 +164,27 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // No payload fields in any variant - just tag
                         self.context.i32_type().into()
                     } else {
-                        // Create { i32 tag, [i8 x payload_size] }
+                        // Create { i32 tag, aligned_payload }
+                        // Use an array of the appropriately-aligned type to ensure
+                        // proper alignment for all variant payloads.
                         let tag_type = self.context.i32_type();
-                        let payload_type = self.context.i8_type().array_type(max_payload_size as u32);
-                        self.context.struct_type(&[tag_type.into(), payload_type.into()], false).into()
+                        let payload_type = if max_alignment >= 8 {
+                            // Need 8-byte alignment: use [i64 x N]
+                            let num_i64s = (max_payload_size + 7) / 8;
+                            self.context.i64_type().array_type(num_i64s as u32).into()
+                        } else if max_alignment >= 4 {
+                            // Need 4-byte alignment: use [i32 x N]
+                            let num_i32s = (max_payload_size + 3) / 4;
+                            self.context.i32_type().array_type(num_i32s as u32).into()
+                        } else if max_alignment >= 2 {
+                            // Need 2-byte alignment: use [i16 x N]
+                            let num_i16s = (max_payload_size + 1) / 2;
+                            self.context.i16_type().array_type(num_i16s as u32).into()
+                        } else {
+                            // 1-byte alignment: use [i8 x N]
+                            self.context.i8_type().array_type(max_payload_size as u32).into()
+                        };
+                        self.context.struct_type(&[tag_type.into(), payload_type], false).into()
                     }
                 } else {
                     // Unknown ADT - use pointer placeholder
@@ -295,6 +324,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             BasicTypeEnum::ArrayType(t) => t.len() as usize * 8, // Approximation
             BasicTypeEnum::VectorType(_) => 16, // Assume 128-bit vectors
         }
+    }
+
+    /// Get the maximum alignment requirement for a list of field types.
+    /// This is used for enum variant alignment calculation.
+    fn get_max_field_alignment(&self, field_types: &[BasicTypeEnum<'ctx>]) -> u32 {
+        let mut max_align: u32 = 1;
+        for ty in field_types {
+            let align = self.get_type_alignment(*ty);
+            if align > max_align {
+                max_align = align;
+            }
+        }
+        max_align
     }
 
     /// Substitute type parameters in a type with concrete type arguments.
