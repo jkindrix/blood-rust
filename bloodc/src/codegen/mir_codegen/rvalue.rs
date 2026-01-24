@@ -87,9 +87,10 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             Rvalue::BinaryOp { op, left, right } => {
                 let operand_ty = self.get_operand_type(left, body);
                 let is_float = self.is_float_type(&operand_ty);
+                let is_signed = self.is_signed_type(&operand_ty);
                 let lhs = self.compile_mir_operand(left, body, escape_results)?;
                 let rhs = self.compile_mir_operand(right, body, escape_results)?;
-                self.compile_binary_op(*op, lhs, rhs, is_float)
+                self.compile_binary_op(*op, lhs, rhs, is_float, is_signed)
             }
 
             Rvalue::CheckedBinaryOp { op, left, right } => {
@@ -713,11 +714,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
         is_float: bool,
+        is_signed: bool,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         if is_float {
             self.compile_float_binary_op(op, lhs, rhs)
         } else {
-            self.compile_int_binary_op(op, lhs, rhs)
+            self.compile_int_binary_op(op, lhs, rhs, is_signed)
         }
     }
 
@@ -727,6 +729,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         op: BinOp,
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
+        is_signed: bool,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         let lhs_int = lhs.into_int_value();
         let rhs_int = rhs.into_int_value();
@@ -768,17 +771,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     rhs_int.get_type()
                 };
                 let new_lhs = if lhs_width < rhs_width {
-                    self.builder.build_int_z_extend(lhs_int, target_ty, "zext")
-                        .map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM zext error: {}", e), Span::dummy()
+                    if is_signed {
+                        self.builder.build_int_s_extend(lhs_int, target_ty, "sext")
+                    } else {
+                        self.builder.build_int_z_extend(lhs_int, target_ty, "zext")
+                    }.map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM extend error: {}", e), Span::dummy()
                         )])?
                 } else {
                     lhs_int
                 };
                 let new_rhs = if rhs_width < lhs_width {
-                    self.builder.build_int_z_extend(rhs_int, target_ty, "zext")
-                        .map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM zext error: {}", e), Span::dummy()
+                    if is_signed {
+                        self.builder.build_int_s_extend(rhs_int, target_ty, "sext")
+                    } else {
+                        self.builder.build_int_z_extend(rhs_int, target_ty, "zext")
+                    }.map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM extend error: {}", e), Span::dummy()
                         )])?
                 } else {
                     rhs_int
@@ -793,19 +802,39 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             BinOp::Add => self.builder.build_int_add(lhs_int, rhs_int, "add"),
             BinOp::Sub => self.builder.build_int_sub(lhs_int, rhs_int, "sub"),
             BinOp::Mul => self.builder.build_int_mul(lhs_int, rhs_int, "mul"),
-            BinOp::Div => self.builder.build_int_signed_div(lhs_int, rhs_int, "div"),
-            BinOp::Rem => self.builder.build_int_signed_rem(lhs_int, rhs_int, "rem"),
+            BinOp::Div => if is_signed {
+                self.builder.build_int_signed_div(lhs_int, rhs_int, "sdiv")
+            } else {
+                self.builder.build_int_unsigned_div(lhs_int, rhs_int, "udiv")
+            },
+            BinOp::Rem => if is_signed {
+                self.builder.build_int_signed_rem(lhs_int, rhs_int, "srem")
+            } else {
+                self.builder.build_int_unsigned_rem(lhs_int, rhs_int, "urem")
+            },
             BinOp::BitAnd => self.builder.build_and(lhs_int, rhs_int, "and"),
             BinOp::BitOr => self.builder.build_or(lhs_int, rhs_int, "or"),
             BinOp::BitXor => self.builder.build_xor(lhs_int, rhs_int, "xor"),
             BinOp::Shl => self.builder.build_left_shift(lhs_int, rhs_int, "shl"),
-            BinOp::Shr => self.builder.build_right_shift(lhs_int, rhs_int, true, "shr"),
+            BinOp::Shr => self.builder.build_right_shift(lhs_int, rhs_int, is_signed, "shr"),
             BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, lhs_int, rhs_int, "eq"),
             BinOp::Ne => self.builder.build_int_compare(IntPredicate::NE, lhs_int, rhs_int, "ne"),
-            BinOp::Lt => self.builder.build_int_compare(IntPredicate::SLT, lhs_int, rhs_int, "lt"),
-            BinOp::Le => self.builder.build_int_compare(IntPredicate::SLE, lhs_int, rhs_int, "le"),
-            BinOp::Gt => self.builder.build_int_compare(IntPredicate::SGT, lhs_int, rhs_int, "gt"),
-            BinOp::Ge => self.builder.build_int_compare(IntPredicate::SGE, lhs_int, rhs_int, "ge"),
+            BinOp::Lt => self.builder.build_int_compare(
+                if is_signed { IntPredicate::SLT } else { IntPredicate::ULT },
+                lhs_int, rhs_int, "lt"
+            ),
+            BinOp::Le => self.builder.build_int_compare(
+                if is_signed { IntPredicate::SLE } else { IntPredicate::ULE },
+                lhs_int, rhs_int, "le"
+            ),
+            BinOp::Gt => self.builder.build_int_compare(
+                if is_signed { IntPredicate::SGT } else { IntPredicate::UGT },
+                lhs_int, rhs_int, "gt"
+            ),
+            BinOp::Ge => self.builder.build_int_compare(
+                if is_signed { IntPredicate::SGE } else { IntPredicate::UGE },
+                lhs_int, rhs_int, "ge"
+            ),
             BinOp::Offset => {
                 // Pointer offset - treat as add for now
                 self.builder.build_int_add(lhs_int, rhs_int, "offset")
@@ -901,7 +930,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // For operations without overflow intrinsics, fall back to unchecked
             // and return (result, false)
             _ => {
-                let result = self.compile_binary_op(op, lhs, rhs, false)?;
+                let result = self.compile_binary_op(op, lhs, rhs, false, is_signed)?;
                 // Build a struct with result and false (no overflow)
                 let bool_type = self.context.bool_type();
                 let no_overflow = bool_type.const_zero();
