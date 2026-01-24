@@ -1417,6 +1417,34 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             converted_args.push(out_ptr.into());
                         }
 
+                        // Handle str_to_string which needs output buffer for String struct
+                        // str.to_string() takes &str input (already in args), needs output buffer
+                        if builtin_name.as_str() == "str_to_string" {
+                            let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                            // String = { ptr: *i8, len: i64, capacity: i64 }
+                            let string_ty = self.context.struct_type(&[
+                                i8_ptr_type.into(),
+                                self.context.i64_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+
+                            let out_alloca = self.builder
+                                .build_alloca(string_ty, "str_to_string_out")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), span
+                                )])?;
+
+                            // Save for later use after call
+                            output_buffer_alloca = Some(out_alloca);
+
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), span
+                                )])?;
+                            converted_args.push(out_ptr.into());
+                        }
+
                         // Handle vec_new which needs elem_size and output buffer
                         // Vec::new() has no args, but runtime needs elem_size and output buffer
                         if builtin_name.as_str() == "vec_new" {

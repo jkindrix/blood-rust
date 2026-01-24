@@ -189,6 +189,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), span)])?;
         }
 
+        // Set WeakODR linkage now that the closure function has a body.
+        // This allows the linker to merge duplicate definitions when the same
+        // closure is compiled into multiple object files (per-definition mode).
+        // We use WeakODR instead of LinkOnceODR because LinkOnceODR can be
+        // stripped by LLVM optimization when there are no local callers.
+        use inkwell::module::Linkage;
+        fn_value.set_linkage(Linkage::WeakODR);
+
         // Restore context
         self.current_fn = saved_fn;
         self.locals = saved_locals;

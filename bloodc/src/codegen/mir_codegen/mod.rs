@@ -284,6 +284,13 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             self.compile_mir_block(body, bb_id, &llvm_blocks, escape_results)?;
         }
 
+        // Set WeakODR linkage now that the function has a body.
+        // This allows the linker to merge duplicate definitions when the same
+        // function is compiled into multiple object files (per-definition mode).
+        // We use WeakODR instead of LinkOnceODR because LinkOnceODR can be
+        // stripped by LLVM optimization when there are no local callers.
+        self.set_function_weak_odr(def_id);
+
         self.current_fn = None;
         Ok(())
     }

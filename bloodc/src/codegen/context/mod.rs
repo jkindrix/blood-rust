@@ -2206,9 +2206,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             let fn_type = self.fn_type_from_sig(&fn_def.sig);
             (llvm_name, fn_type)
         };
+
         let fn_value = self.module.add_function(&llvm_name, fn_type, None);
         self.functions.insert(def_id, fn_value);
         Ok(())
+    }
+
+    /// Set a function's linkage to WeakODR after compiling its body.
+    /// This allows the linker to merge duplicate definitions when the same
+    /// function is compiled into multiple object files.
+    ///
+    /// We use WeakODR instead of LinkOnceODR because LinkOnceODR functions
+    /// can be stripped by LLVM optimization when they have no callers in the
+    /// current module. WeakODR preserves the function for linking.
+    ///
+    /// Skips `blood_main` which must have External linkage for the runtime.
+    pub fn set_function_weak_odr(&mut self, def_id: DefId) {
+        if let Some(fn_value) = self.functions.get(&def_id) {
+            let name = fn_value.get_name().to_string_lossy();
+            // blood_main must remain External for the runtime to find it
+            if name == "blood_main" {
+                return;
+            }
+            use inkwell::module::Linkage;
+            fn_value.set_linkage(Linkage::WeakODR);
+        }
     }
 
     /// Mangle a function name with DefId and parameter types to ensure uniqueness.
@@ -2803,6 +2825,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let string_clear_type = void_type.fn_type(&[i8_ptr_type.into()], false);
         self.module.add_function("string_clear", string_clear_type, None);
 
+        // str_to_string(s: *{*i8, i64}, out: *void) -> void - convert str to owned String
+        let str_to_string_type = void_type.fn_type(&[str_ptr_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("str_to_string", str_to_string_type, None);
+
         // str_len_chars({*i8, i64}*) -> i64 - count UTF-8 characters (not bytes)
         let str_len_chars_type = i64_type.fn_type(&[str_ptr_type.into()], false);
         self.module.add_function("str_len_chars", str_len_chars_type, None);
@@ -2842,6 +2868,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // string_trim_end(s: {*i8, i64}*) -> {*i8, i64}
         let string_trim_end_type = str_slice_type.fn_type(&[str_ptr_type.into()], false);
         self.module.add_function("string_trim_end", string_trim_end_type, None);
+
+        // string_substring(s: *void, start: i64, end: i64, out: *void) -> void
+        // Extracts a substring from byte indices [start, end) and writes to output String
+        let string_substring_type = void_type.fn_type(
+            &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
+            false,
+        );
+        self.module.add_function("string_substring", string_substring_type, None);
 
         // int_to_string(i32) -> {*i8, i64} - convert integer to string
         let int_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false);
