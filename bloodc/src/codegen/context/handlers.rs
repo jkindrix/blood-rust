@@ -125,7 +125,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let ret_clause_type = i64_type.fn_type(&[i64_type.into(), i8_ptr_type.into()], false);
         // Use handler name for content-based naming (enables cache sharing across files)
         let fn_name = format!("{}_return", _handler_name);
-        let fn_value = self.module.add_function(&fn_name, ret_clause_type, None);
+
+        // Check if function was already declared (e.g., by compile_handle when compiling
+        // the 'with ... handle' expression). If so, reuse it; otherwise create it.
+        let fn_value = self.module.get_function(&fn_name).unwrap_or_else(|| {
+            self.module.add_function(&fn_name, ret_clause_type, None)
+        });
 
         // Create entry block
         let entry_block = self.context.append_basic_block(fn_value, "entry");
@@ -698,8 +703,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             });
 
         // Create a global constructor function to register handlers at startup
+        // Use LinkOnceODR linkage so the linker can merge duplicates if this
+        // function exists in multiple object files (e.g., both whole_module.o
+        // and handler_registration.o).
         let init_fn_type = void_type.fn_type(&[], false);
-        let init_fn = self.module.add_function("__blood_register_handlers", init_fn_type, None);
+        use inkwell::module::Linkage;
+        let init_fn = self.module.add_function("__blood_register_handlers", init_fn_type, Some(Linkage::LinkOnceODR));
 
         let entry = self.context.append_basic_block(init_fn, "entry");
         self.builder.position_at_end(entry);

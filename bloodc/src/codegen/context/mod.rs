@@ -2201,8 +2201,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             let fn_type = self.context.i32_type().fn_type(&param_types, false);
             ("blood_main".to_string(), fn_type)
         } else {
-            // Mangle name with parameter types to support multiple dispatch
-            let llvm_name = Self::mangle_function_name(name, &fn_def.sig);
+            // Mangle name with DefId and parameter types to ensure uniqueness
+            let llvm_name = Self::mangle_function_name(def_id, name, &fn_def.sig);
             let fn_type = self.fn_type_from_sig(&fn_def.sig);
             (llvm_name, fn_type)
         };
@@ -2211,18 +2211,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(())
     }
 
-    /// Mangle a function name with its parameter types for multiple dispatch.
+    /// Mangle a function name with DefId and parameter types to ensure uniqueness.
     ///
-    /// This generates unique symbol names for overloaded functions.
-    /// For example: `add(i32, i32)` becomes `add$i32$i32`
-    fn mangle_function_name(name: &str, sig: &hir::FnSig) -> String {
+    /// This generates unique symbol names for all functions, avoiding collisions
+    /// when different modules have private helper functions with the same name
+    /// and signature. The DefId ensures global uniqueness.
+    ///
+    /// For example: `add(i32, i32)` in module with DefId(42) becomes `def42$add$i32$i32`
+    fn mangle_function_name(def_id: DefId, name: &str, sig: &hir::FnSig) -> String {
         if sig.inputs.is_empty() {
-            name.to_string()
+            format!("def{}${}", def_id.index(), name)
         } else {
             let param_mangles: Vec<String> = sig.inputs.iter()
                 .map(|ty| Self::mangle_type(ty))
                 .collect();
-            format!("{}${}", name, param_mangles.join("$"))
+            format!("def{}${}${}", def_id.index(), name, param_mangles.join("$"))
         }
     }
 
@@ -2970,6 +2973,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // println() -> void
         let println_type = void_type.fn_type(&[], false);
         self.module.add_function("println", println_type, None);
+
+        // print_newline() -> void
+        self.module.add_function("print_newline", println_type, None);
 
         // === Size Functions ===
 

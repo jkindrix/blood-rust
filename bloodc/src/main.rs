@@ -1425,17 +1425,21 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
     }
 
-    // Generate handler registration object (needed for effect handlers)
-    // This creates the global constructor that registers all handlers with the runtime
-    let handler_reg_path = obj_dir.join("handler_registration.o");
-    if let Err(errors) = codegen::compile_handler_registration_to_object(&hir_crate, &handler_reg_path, builtin_def_ids) {
-        for error in &errors {
-            emitter.emit(error);
+    // Generate handler registration object (needed for effect handlers in debug mode)
+    // In release mode, handler registration is included in whole_module.o via
+    // compile_mir_to_object, so we skip generating a separate object file.
+    // In debug mode, we need a separate object for per-definition compilation.
+    if !args.release {
+        let handler_reg_path = obj_dir.join("handler_registration.o");
+        if let Err(errors) = codegen::compile_handler_registration_to_object(&hir_crate, &handler_reg_path, builtin_def_ids) {
+            for error in &errors {
+                emitter.emit(error);
+            }
+            eprintln!("Build failed: handler registration codegen error.");
+            return ExitCode::from(1);
         }
-        eprintln!("Build failed: handler registration codegen error.");
-        return ExitCode::from(1);
+        object_files.push(handler_reg_path);
     }
-    object_files.push(handler_reg_path);
 
     // Link with runtimes (for both cached and freshly compiled objects)
     // C runtime is required (provides main entry point and string utilities)
