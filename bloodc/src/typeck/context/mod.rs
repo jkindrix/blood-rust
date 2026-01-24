@@ -163,6 +163,10 @@ pub struct TypeContext<'a> {
     pub(crate) loop_stack: Vec<hir::LoopId>,
     /// Mapping from label names to LoopIds for labeled loops.
     pub(crate) loop_labels: HashMap<String, hir::LoopId>,
+    /// Mapping from LoopId to break value types, used to compute loop result type.
+    /// If a loop has any breaks, its type is the unified break value types.
+    /// If a loop has no breaks, its type is Never.
+    pub(crate) loop_break_types: HashMap<hir::LoopId, Vec<Type>>,
     /// Pending derive macro requests to expand during into_hir().
     pub(crate) pending_derives: Vec<crate::derive::DeriveRequest>,
     /// Stack of item DefIds for the current module being collected.
@@ -727,6 +731,7 @@ impl<'a> TypeContext<'a> {
             next_loop_id: 0,
             loop_stack: Vec::new(),
             loop_labels: HashMap::new(),
+            loop_break_types: HashMap::new(),
             pending_derives: Vec::new(),
             current_module_items: Vec::new(),
             current_module_reexports: Vec::new(),
@@ -789,17 +794,45 @@ impl<'a> TypeContext<'a> {
     pub(crate) fn enter_loop(&mut self, label: Option<&str>) -> hir::LoopId {
         let loop_id = self.fresh_loop_id();
         self.loop_stack.push(loop_id);
+        self.loop_break_types.insert(loop_id, Vec::new());
         if let Some(name) = label {
             self.loop_labels.insert(name.to_string(), loop_id);
         }
         loop_id
     }
 
-    /// Exit the current loop.
-    pub(crate) fn exit_loop(&mut self, label: Option<&str>) {
-        self.loop_stack.pop();
+    /// Exit the current loop and compute the loop's result type.
+    /// Returns the loop type: Never if no breaks, or the unified break value types.
+    pub(crate) fn exit_loop(&mut self, label: Option<&str>) -> Type {
+        let loop_id = self.loop_stack.pop();
         if let Some(name) = label {
             self.loop_labels.remove(name);
+        }
+
+        // Compute loop type from break types
+        if let Some(loop_id) = loop_id {
+            if let Some(break_types) = self.loop_break_types.remove(&loop_id) {
+                if break_types.is_empty() {
+                    // No breaks - loop never exits, type is Never
+                    Type::never()
+                } else {
+                    // Has breaks - loop type is the break value type
+                    // For now, assume all breaks have unit type (break with no value)
+                    // TODO: unify break types if there are multiple with values
+                    Type::unit()
+                }
+            } else {
+                Type::never()
+            }
+        } else {
+            Type::never()
+        }
+    }
+
+    /// Record a break's value type for computing loop result type.
+    pub(crate) fn record_break_type(&mut self, loop_id: hir::LoopId, ty: Type) {
+        if let Some(types) = self.loop_break_types.get_mut(&loop_id) {
+            types.push(ty);
         }
     }
 

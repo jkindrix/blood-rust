@@ -2609,20 +2609,21 @@ impl<'a> TypeContext<'a> {
         let receiver_expr = self.infer_expr(receiver)?;
         let method_name = self.symbol_to_string(*method);
 
-        // Type-check arguments
-        let mut hir_args = Vec::with_capacity(args.len());
+        // First do a preliminary inference of arguments for special handling
+        // (closure desugaring, etc.) - these will be re-checked with proper types later
+        let mut preliminary_args = Vec::with_capacity(args.len());
         for arg in args {
             let arg_expr = self.infer_expr(&arg.value)?;
-            hir_args.push(arg_expr);
+            preliminary_args.push(arg_expr);
         }
 
-        // Try to desugar closure-accepting methods
-        if let Some(desugared) = self.try_desugar_closure_method(&receiver_expr, &method_name, &hir_args, span)? {
+        // Try to desugar closure-accepting methods (needs preliminary args)
+        if let Some(desugared) = self.try_desugar_closure_method(&receiver_expr, &method_name, &preliminary_args, span)? {
             return Ok(desugared);
         }
 
         // Special handling for .len() on arrays and slices
-        if method_name == "len" && hir_args.is_empty() {
+        if method_name == "len" && preliminary_args.is_empty() {
             // Get the underlying type (auto-deref if needed)
             let underlying_ty = match receiver_expr.ty.kind() {
                 TypeKind::Ref { inner, .. } => inner,
@@ -2653,7 +2654,7 @@ impl<'a> TypeContext<'a> {
 
         // Try to find method signature
         let (method_def_id, return_ty, first_param, impl_generics, method_generics, needs_auto_ref) =
-            self.resolve_method(&receiver_expr.ty, &method_name, &hir_args, span)?;
+            self.resolve_method(&receiver_expr.ty, &method_name, &preliminary_args, span)?;
 
         // Build substitution from impl generics to concrete types from receiver
         let mut substitution: HashMap<TyVarId, Type> = HashMap::new();
@@ -2688,6 +2689,34 @@ impl<'a> TypeContext<'a> {
         for &tyvar in &method_generics {
             substitution.insert(tyvar, self.unifier.fresh_var());
         }
+
+        // Now that we know the method signature, re-check arguments with expected parameter types.
+        // This allows integer literals to be inferred as the correct type (e.g., u8 instead of i32).
+        let hir_args = if let Some(sig) = self.fn_sigs.get(&method_def_id).cloned() {
+            // Apply substitution to get concrete parameter types
+            let subst_inputs: Vec<Type> = sig.inputs.iter()
+                .map(|ty| self.substitute_type_vars(ty, &substitution))
+                .collect();
+
+            // Re-check each argument with the expected parameter type
+            // subst_inputs[0] is the receiver, subst_inputs[1..] are the method parameters
+            let mut checked_args = Vec::with_capacity(args.len());
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(param_ty) = subst_inputs.get(i + 1) {
+                    // Use check_expr to infer literals with the expected type
+                    let checked_arg = self.check_expr(&arg.value, param_ty)?;
+                    checked_args.push(checked_arg);
+                } else {
+                    // Fallback to inference if no param type (shouldn't happen)
+                    let inferred_arg = self.infer_expr(&arg.value)?;
+                    checked_args.push(inferred_arg);
+                }
+            }
+            checked_args
+        } else {
+            // No signature available, use preliminary args
+            preliminary_args
+        };
 
         // Build the callee type by substituting in the stored signature
         // Also compute the final return type with method generics substituted
@@ -5738,14 +5767,15 @@ impl<'a> TypeContext<'a> {
         let body_expr = self.check_block(body, &Type::unit())?;
         self.resolver.pop_scope();
 
-        self.exit_loop(label_str.as_deref());
+        // exit_loop computes the loop's result type based on break types
+        let loop_ty = self.exit_loop(label_str.as_deref());
 
         Ok(hir::Expr::new(
             hir::ExprKind::Loop {
                 body: Box::new(body_expr),
                 label: Some(loop_id),
             },
-            Type::never(),
+            loop_ty,
             span,
         ))
     }
@@ -6806,11 +6836,18 @@ impl<'a> TypeContext<'a> {
             ));
         }
 
-        let value_expr = if let Some(value) = value {
-            Some(Box::new(self.infer_expr(value)?))
+        let (value_expr, break_ty) = if let Some(value) = value {
+            let expr = self.infer_expr(value)?;
+            let ty = expr.ty.clone();
+            (Some(Box::new(expr)), ty)
         } else {
-            None
+            (None, Type::unit())
         };
+
+        // Record the break type for computing the loop's result type
+        if let Some(loop_id) = loop_id {
+            self.record_break_type(loop_id, break_ty);
+        }
 
         Ok(hir::Expr::new(
             hir::ExprKind::Break {

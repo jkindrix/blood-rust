@@ -1307,6 +1307,21 @@ impl<'a> TypeContext<'a> {
             "string_chars",
         );
 
+        // String.substring(&self, start: usize, end: usize) -> String
+        // Extracts a substring from byte indices [start, end)
+        self.register_builtin_method(
+            BuiltinMethodType::String,
+            "substring",
+            false,
+            vec![
+                Type::reference(string_ty.clone(), false),
+                usize_ty.clone(),
+                usize_ty.clone(),
+            ],
+            string_ty.clone(),
+            "string_substring",
+        );
+
         // String.bytes(&self) -> Vec<u8>
         // Returns bytes as a Vec
         let vec_u8 = Type::adt(vec_def_id_early, vec![Type::u8()]);
