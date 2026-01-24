@@ -610,22 +610,25 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
-                                let elem_ptr = self.builder.build_in_bounds_gep(
-                                    data_ptr,
-                                    &[idx_val.into_int_value()],
-                                    "vec_idx_gep"
-                                ).map_err(|e| vec![Diagnostic::error(
-                                    format!("LLVM GEP error: {}", e), body.span
-                                )])?;
 
-                                // Cast to proper element type pointer for subsequent Field projections
-                                // current_ty has already been updated to the element type
+                                // Cast data_ptr to element pointer type BEFORE GEP
+                                // so LLVM uses sizeof(element) for index calculation.
+                                // current_ty has already been updated to the element type.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
-                                self.builder.build_pointer_cast(elem_ptr, elem_ptr_ty, "vec_elem_ptr")
+                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "vec_typed_data_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM pointer cast error: {}", e), body.span
-                                    )])?
+                                    )])?;
+
+                                // Now GEP with the typed pointer - LLVM will multiply index by sizeof(element)
+                                self.builder.build_in_bounds_gep(
+                                    typed_data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "vec_elem_ptr"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
                             }
                             IndexKind::RefToVec => {
                                 // Reference to Vec<T>: current_ptr is Vec** (pointer to the ref)
@@ -646,21 +649,24 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
-                                let elem_ptr = self.builder.build_in_bounds_gep(
-                                    data_ptr,
-                                    &[idx_val.into_int_value()],
-                                    "ref_vec_idx_gep"
-                                ).map_err(|e| vec![Diagnostic::error(
-                                    format!("LLVM GEP error: {}", e), body.span
-                                )])?;
 
-                                // Cast to proper element type pointer for subsequent Field projections
+                                // Cast data_ptr to element pointer type BEFORE GEP
+                                // so LLVM uses sizeof(element) for index calculation.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
-                                self.builder.build_pointer_cast(elem_ptr, elem_ptr_ty, "ref_vec_elem_ptr")
+                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ref_vec_typed_data_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM pointer cast error: {}", e), body.span
-                                    )])?
+                                    )])?;
+
+                                // Now GEP with the typed pointer - LLVM will multiply index by sizeof(element)
+                                self.builder.build_in_bounds_gep(
+                                    typed_data_ptr,
+                                    &[idx_val.into_int_value()],
+                                    "ref_vec_elem_ptr"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM GEP error: {}", e), body.span
+                                )])?
                             }
                             IndexKind::Other => {
                                 // Other pointer type: single-index GEP
