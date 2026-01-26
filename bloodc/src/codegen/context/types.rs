@@ -315,14 +315,51 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     /// Get approximate size of an LLVM type (for choosing union variant).
+    /// This computes actual sizes by recursively examining struct fields.
     fn get_type_size_approx(&self, ty: BasicTypeEnum<'ctx>) -> usize {
         match ty {
-            BasicTypeEnum::IntType(t) => t.get_bit_width() as usize / 8,
-            BasicTypeEnum::FloatType(_) => 8, // Assume 64-bit floats
+            BasicTypeEnum::IntType(t) => {
+                let bits = t.get_bit_width() as usize;
+                // Round up to byte boundary
+                (bits + 7) / 8
+            }
+            BasicTypeEnum::FloatType(t) => {
+                if t == self.context.f32_type() { 4 } else { 8 }
+            }
             BasicTypeEnum::PointerType(_) => 8, // 64-bit pointers
-            BasicTypeEnum::StructType(t) => t.count_fields() as usize * 8, // Approximation
-            BasicTypeEnum::ArrayType(t) => t.len() as usize * 8, // Approximation
-            BasicTypeEnum::VectorType(_) => 16, // Assume 128-bit vectors
+            BasicTypeEnum::StructType(st) => {
+                // Compute actual struct size by summing field sizes with alignment
+                let mut size: usize = 0;
+                let mut max_align: usize = 1;
+
+                for i in 0..st.count_fields() {
+                    if let Some(field_ty) = st.get_field_type_at_index(i) {
+                        let field_size = self.get_type_size_approx(field_ty);
+                        let field_align = self.get_type_alignment(field_ty) as usize;
+
+                        // Align current offset
+                        let padding = (field_align - (size % field_align)) % field_align;
+                        size += padding + field_size;
+
+                        if field_align > max_align {
+                            max_align = field_align;
+                        }
+                    }
+                }
+
+                // Final alignment padding
+                let final_padding = (max_align - (size % max_align)) % max_align;
+                size + final_padding
+            }
+            BasicTypeEnum::ArrayType(at) => {
+                let elem_size = self.get_type_size_approx(at.get_element_type());
+                elem_size * at.len() as usize
+            }
+            BasicTypeEnum::VectorType(vt) => {
+                // SIMD vectors - compute based on element type and size
+                let elem_size = self.get_type_size_approx(vt.get_element_type());
+                elem_size * vt.get_size() as usize
+            }
         }
     }
 

@@ -225,6 +225,8 @@ pub(super) struct LoopContext {
     pub continue_block: BasicBlockId,
     /// Label for labeled breaks.
     pub label: Option<hir::LoopId>,
+    /// LocalId to store break value (if any).
+    pub result_local: Option<hir::LocalId>,
 }
 
 // ============================================================================

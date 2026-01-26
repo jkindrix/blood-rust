@@ -1244,8 +1244,14 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        let mut operands = Vec::with_capacity(fields.len());
-        for field in fields {
+        // Sort fields by their definition index to ensure correct struct layout.
+        // Source code may have fields in arbitrary order (e.g., `Foo { b: 1, a: 2 }`),
+        // but the LLVM struct expects fields in definition order.
+        let mut sorted_fields: Vec<_> = fields.iter().collect();
+        sorted_fields.sort_by_key(|f| f.field_idx);
+
+        let mut operands = Vec::with_capacity(sorted_fields.len());
+        for field in sorted_fields {
             operands.push(self.lower_expr(&field.value)?);
         }
 

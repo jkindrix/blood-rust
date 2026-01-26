@@ -816,10 +816,15 @@ impl<'a> TypeContext<'a> {
                     // No breaks - loop never exits, type is Never
                     Type::never()
                 } else {
-                    // Has breaks - loop type is the break value type
-                    // For now, assume all breaks have unit type (break with no value)
-                    // TODO: unify break types if there are multiple with values
-                    Type::unit()
+                    // Has breaks - loop type is the unified break value type
+                    // Start with the first break type and unify with all others
+                    let mut result_ty = break_types[0].clone();
+                    for ty in break_types.iter().skip(1) {
+                        // Unify with dummy span - errors will be caught at break sites
+                        let _ = self.unifier.unify(&result_ty, ty, Span::dummy());
+                    }
+                    // Resolve the unified type
+                    self.unifier.resolve(&result_ty)
                 }
             } else {
                 Type::never()

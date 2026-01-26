@@ -13,6 +13,9 @@ use super::CodegenContext;
 pub trait MirTypesCodegen<'ctx, 'a> {
     /// Get the size of an LLVM type in bytes.
     fn get_type_size_in_bytes(&self, ty: BasicTypeEnum<'ctx>) -> u64;
+
+    /// Get the alignment of an LLVM type in bytes.
+    fn get_type_alignment_for_size(&self, ty: BasicTypeEnum<'ctx>) -> u64;
 }
 
 impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
@@ -47,19 +50,72 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 elem_size * t.len() as u64
             }
             BasicTypeEnum::StructType(t) => {
-                // Sum of field sizes (simplified - doesn't account for padding)
-                let mut size = 0u64;
+                // Compute struct size with proper alignment padding
+                let mut offset = 0u64;
+                let mut max_align = 1u64;
+
                 for i in 0..t.count_fields() {
                     if let Some(field_ty) = t.get_field_type_at_index(i) {
-                        size += self.get_type_size_in_bytes(field_ty);
+                        let field_size = self.get_type_size_in_bytes(field_ty);
+                        let field_align = self.get_type_alignment_for_size(field_ty) as u64;
+
+                        // Update max alignment
+                        if field_align > max_align {
+                            max_align = field_align;
+                        }
+
+                        // Add padding to align this field
+                        let padding = (field_align - (offset % field_align)) % field_align;
+                        offset += padding + field_size;
                     }
                 }
-                size.max(1) // At least 1 byte for empty struct
+
+                // Add final padding to round up to struct alignment
+                let final_padding = (max_align - (offset % max_align)) % max_align;
+                (offset + final_padding).max(1)
             }
             BasicTypeEnum::VectorType(t) => {
                 let elem_size = self.get_type_size_in_bytes(t.get_element_type());
                 elem_size * t.get_size() as u64
             }
+        }
+    }
+
+    fn get_type_alignment_for_size(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        match ty {
+            BasicTypeEnum::IntType(int_ty) => {
+                let bits = int_ty.get_bit_width();
+                // Alignment is min(size, 8) bytes
+                std::cmp::min((bits as u64 + 7) / 8, 8).max(1)
+            }
+            BasicTypeEnum::FloatType(float_ty) => {
+                if float_ty == self.context.f32_type() {
+                    4
+                } else if float_ty == self.context.f16_type() {
+                    2
+                } else {
+                    8
+                }
+            }
+            BasicTypeEnum::PointerType(_) => 8,
+            BasicTypeEnum::ArrayType(arr_ty) => {
+                // Array alignment is the alignment of its element type
+                self.get_type_alignment_for_size(arr_ty.get_element_type())
+            }
+            BasicTypeEnum::StructType(st) => {
+                // Struct alignment is the max alignment of any field
+                let mut max_align = 1u64;
+                for i in 0..st.count_fields() {
+                    if let Some(field_ty) = st.get_field_type_at_index(i) {
+                        let field_align = self.get_type_alignment_for_size(field_ty);
+                        if field_align > max_align {
+                            max_align = field_align;
+                        }
+                    }
+                }
+                max_align
+            }
+            BasicTypeEnum::VectorType(_) => 16,
         }
     }
 }

@@ -1664,14 +1664,20 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         let loop_block = self.builder.new_block();
         let exit_block = self.builder.new_block();
 
-        // Result for break values
+        // Result for break values (only if loop has non-unit/non-never type)
         let result = self.new_temp(ty.clone(), span);
+        let result_local = if !matches!(ty.kind(), TypeKind::Never) {
+            Some(result)
+        } else {
+            None
+        };
 
         // Push loop context
         self.loop_stack.push(LoopContext {
             break_block: exit_block,
             continue_block: loop_block,
             label,
+            result_local,
         });
 
         // Jump to loop
@@ -1711,12 +1717,18 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         let exit_block = self.builder.new_block();
 
         let result = self.new_temp(ty.clone(), span);
+        let result_local = if !matches!(ty.kind(), TypeKind::Never) {
+            Some(result)
+        } else {
+            None
+        };
 
         // Push loop context
         self.loop_stack.push(LoopContext {
             break_block: exit_block,
             continue_block: cond_block,
             label,
+            result_local,
         });
 
         // Jump to condition
@@ -1763,8 +1775,12 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         };
 
         if let Some(ctx) = ctx.cloned() {
+            // If break has a value, assign it to the loop's result place
             if let Some(value) = value {
-                let _ = self.lower_expr(value)?;
+                let val_operand = self.lower_expr(value)?;
+                if let Some(result_local) = ctx.result_local {
+                    self.push_assign(Place::local(result_local), Rvalue::Use(val_operand));
+                }
             }
             self.terminate(TerminatorKind::Goto { target: ctx.break_block });
         } else {
@@ -1933,8 +1949,14 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        let mut operands = Vec::with_capacity(fields.len());
-        for field in fields {
+        // Sort fields by their definition index to ensure correct struct layout.
+        // Source code may have fields in arbitrary order (e.g., `Foo { b: 1, a: 2 }`),
+        // but the LLVM struct expects fields in definition order.
+        let mut sorted_fields: Vec<_> = fields.iter().collect();
+        sorted_fields.sort_by_key(|f| f.field_idx);
+
+        let mut operands = Vec::with_capacity(sorted_fields.len());
+        for field in sorted_fields {
             operands.push(self.lower_expr(&field.value)?);
         }
 
@@ -2347,6 +2369,7 @@ impl<'hir, 'ctx> ExprLowering for FunctionLowering<'hir, 'ctx> {
             break_block: ctx.break_block,
             continue_block: ctx.continue_block,
             label,
+            result_local: ctx.result_place.map(|p| p.local),
         });
     }
 
@@ -2364,7 +2387,7 @@ impl<'hir, 'ctx> ExprLowering for FunctionLowering<'hir, 'ctx> {
         ctx.map(|c| LoopContextInfo {
             break_block: c.break_block,
             continue_block: c.continue_block,
-            result_place: None, // FunctionLowering doesn't track result place in LoopContext
+            result_place: c.result_local.map(Place::local),
         })
     }
 
