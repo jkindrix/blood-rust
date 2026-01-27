@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use inkwell::basic_block::BasicBlock;
 use inkwell::intrinsics::Intrinsic;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
+use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum};
 use inkwell::{AddressSpace, IntPredicate};
 
 use super::types::MirTypesCodegen;
@@ -91,6 +91,11 @@ impl<'ctx, 'a> MirTerminatorCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM load error: {}", e), term.span
                             )])?;
+                        // Set proper alignment for return value load
+                        let alignment = self.get_type_alignment_for_value(ret_val);
+                        if let Some(inst) = ret_val.as_instruction_value() {
+                            let _ = inst.set_alignment(alignment);
+                        }
                         self.builder.build_return(Some(&ret_val))
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM return error: {}", e), term.span
@@ -145,10 +150,13 @@ impl<'ctx, 'a> MirTerminatorCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // Then store the new value
                 let new_val = self.compile_mir_operand(value, body, escape_results)?;
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
-                self.builder.build_store(ptr, new_val)
+                let store_inst = self.builder.build_store(ptr, new_val)
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM store error: {}", e), term.span
                     )])?;
+                // Set proper alignment for DropAndReplace store
+                let alignment = self.get_type_alignment_for_value(new_val);
+                let _ = store_inst.set_alignment(alignment);
 
                 // Continue to target
                 let target_bb = llvm_blocks.get(target).ok_or_else(|| {
@@ -416,10 +424,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                         // Store result to destination
                         let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;
-                        self.builder.build_store(dest_ptr, loaded_val)
+                        let store_inst = self.builder.build_store(dest_ptr, loaded_val)
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM store error: {}", e), span
                             )])?;
+                        // Set proper alignment for ptr_read result store
+                        let alignment = self.get_type_alignment_for_value(loaded_val);
+                        let _ = store_inst.set_alignment(alignment);
 
                         // Branch to continuation
                         if let Some(target_bb_id) = target {
@@ -1551,10 +1562,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 )])?;
                             // Convert result to match destination type if needed
                             let converted_result = self.convert_value_for_store(result, dest_ptr, span)?;
-                            self.builder.build_store(dest_ptr, converted_result)
+                            let store_inst = self.builder.build_store(dest_ptr, converted_result)
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM store error: {}", e), span
                                 )])?;
+                            // Set proper alignment for output buffer result store
+                            let alignment = self.get_type_alignment_for_value(converted_result);
+                            let _ = store_inst.set_alignment(alignment);
 
                             // Branch to continuation
                             if let Some(target_bb_id) = target {
@@ -1793,10 +1807,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         if let Some(ret_val) = call_result.try_as_basic_value().left() {
             // Convert return value to destination type if needed
             let converted_val = self.convert_value_for_store(ret_val, dest_ptr, span)?;
-            self.builder.build_store(dest_ptr, converted_val)
+            let store_inst = self.builder.build_store(dest_ptr, converted_val)
                 .map_err(|e| vec![Diagnostic::error(
                     format!("LLVM store error: {}", e), span
                 )])?;
+            // Set proper alignment based on the value type to avoid LLVM optimization issues
+            // with pointers created via inttoptr (which don't carry alignment info)
+            let alignment = self.get_type_alignment_for_value(converted_val);
+            let _ = store_inst.set_alignment(alignment);
         }
 
         // Branch to continuation
@@ -2247,8 +2265,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 result_val
             };
 
-            self.builder.build_store(dest_ptr, converted_result)
+            let store_inst = self.builder.build_store(dest_ptr, converted_result)
                 .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), span)])?;
+            // Set proper alignment for Perform result store
+            let alignment = self.get_type_alignment_for_value(converted_result);
+            let _ = store_inst.set_alignment(alignment);
         }
 
         // Validate snapshot on return from effect

@@ -3,7 +3,7 @@
 //! This module handles compilation of MIR places (memory locations) to LLVM IR.
 //! Places represent lvalues - locations that can be read from or written to.
 
-use inkwell::values::{BasicValueEnum, PointerValue};
+use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
 use inkwell::types::BasicType;
 
 use crate::diagnostics::Diagnostic;
@@ -13,6 +13,7 @@ use crate::mir::types::{Place, PlaceElem};
 use crate::mir::{EscapeResults, EscapeState};
 
 use super::CodegenContext;
+use super::types::MirTypesCodegen;
 
 /// Extension trait for MIR place compilation.
 pub trait MirPlaceCodegen<'ctx, 'a> {
@@ -109,6 +110,11 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM load error: {}", e), body.span
                         )])?;
+                    // Set proper alignment for the deref load
+                    let deref_alignment = self.get_type_alignment_for_value(loaded);
+                    if let Some(inst) = loaded.as_instruction_value() {
+                        let _ = inst.set_alignment(deref_alignment);
+                    }
 
                     // Handle different loaded value types:
                     // - PointerValue: thin reference (normal case)
@@ -381,6 +387,11 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM load error: {}", e), body.span
                             )])?;
+                        // Set proper alignment for struct pointer load
+                        let struct_ptr_alignment = self.get_type_alignment_for_value(loaded_val);
+                        if let Some(inst) = loaded_val.as_instruction_value() {
+                            let _ = inst.set_alignment(struct_ptr_alignment);
+                        }
 
                         // Handle different loaded value types:
                         // - PointerValue: thin reference, use directly for struct_gep
@@ -862,12 +873,17 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         // compile_mir_place which checks escape state before emitting gen checks.
 
         // Load value from pointer
-        let loaded = self.builder.build_load(ptr, "load")
+        let load_inst = self.builder.build_load(ptr, "load")
             .map_err(|e| vec![Diagnostic::error(
                 format!("LLVM load error: {}", e), body.span
             )])?;
+        // Set proper alignment based on the loaded type
+        let alignment = self.get_type_alignment_for_value(load_inst);
+        if let Some(inst) = load_inst.as_instruction_value() {
+            let _ = inst.set_alignment(alignment);
+        }
 
-        Ok(loaded)
+        Ok(load_inst)
     }
 
     fn compute_place_type(&self, base_ty: &Type, projections: &[PlaceElem]) -> Type {

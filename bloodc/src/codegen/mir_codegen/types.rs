@@ -4,6 +4,7 @@
 //! used in MIR code generation.
 
 use inkwell::types::BasicTypeEnum;
+use inkwell::values::BasicValueEnum;
 
 use crate::hir::{Type, TypeKind};
 
@@ -16,6 +17,10 @@ pub trait MirTypesCodegen<'ctx, 'a> {
 
     /// Get the alignment of an LLVM type in bytes.
     fn get_type_alignment_for_size(&self, ty: BasicTypeEnum<'ctx>) -> u64;
+
+    /// Get the alignment of a value based on its type.
+    /// Returns alignment suitable for store/load instructions.
+    fn get_type_alignment_for_value(&self, val: BasicValueEnum<'ctx>) -> u32;
 }
 
 impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
@@ -85,8 +90,13 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         match ty {
             BasicTypeEnum::IntType(int_ty) => {
                 let bits = int_ty.get_bit_width();
-                // Alignment is min(size, 8) bytes
-                std::cmp::min((bits as u64 + 7) / 8, 8).max(1)
+                // i128 requires 16-byte alignment on x86-64 ABI
+                if bits == 128 {
+                    16
+                } else {
+                    // Alignment is min(size, 8) bytes for smaller types
+                    std::cmp::min((bits as u64 + 7) / 8, 8).max(1)
+                }
             }
             BasicTypeEnum::FloatType(float_ty) => {
                 if float_ty == self.context.f32_type() {
@@ -117,6 +127,19 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
             BasicTypeEnum::VectorType(_) => 16,
         }
+    }
+
+    fn get_type_alignment_for_value(&self, val: BasicValueEnum<'ctx>) -> u32 {
+        // Get the type of the value and compute alignment
+        let ty = match val {
+            BasicValueEnum::IntValue(v) => BasicTypeEnum::IntType(v.get_type()),
+            BasicValueEnum::FloatValue(v) => BasicTypeEnum::FloatType(v.get_type()),
+            BasicValueEnum::PointerValue(v) => BasicTypeEnum::PointerType(v.get_type()),
+            BasicValueEnum::StructValue(v) => BasicTypeEnum::StructType(v.get_type()),
+            BasicValueEnum::ArrayValue(v) => BasicTypeEnum::ArrayType(v.get_type()),
+            BasicValueEnum::VectorValue(v) => BasicTypeEnum::VectorType(v.get_type()),
+        };
+        self.get_type_alignment_for_size(ty) as u32
     }
 }
 

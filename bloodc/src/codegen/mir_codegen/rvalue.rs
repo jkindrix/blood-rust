@@ -4,7 +4,7 @@
 //! to LLVM IR.
 
 use inkwell::intrinsics::Intrinsic;
-use inkwell::values::BasicValueEnum;
+use inkwell::values::{BasicValue, BasicValueEnum};
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::{AddressSpace, IntPredicate};
 
@@ -20,6 +20,7 @@ use crate::span::Span;
 use crate::ice_err;
 
 use super::place::MirPlaceCodegen;
+use super::types::MirTypesCodegen;
 use super::CodegenContext;
 
 /// Extension trait for MIR rvalue compilation.
@@ -141,6 +142,10 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM load error: {}", e), Span::dummy()
                         )])?;
+                    // Set proper alignment for discriminant load (i32 = 4 bytes)
+                    if let Some(inst) = discr.as_instruction_value() {
+                        let _ = inst.set_alignment(4);
+                    }
                     Ok(discr)
                 } else {
                     // Tag-only enum: represented as bare i32
@@ -155,6 +160,10 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         .map_err(|e| vec![Diagnostic::error(
                             format!("LLVM load error: {}", e), Span::dummy()
                         )])?;
+                    // Set proper alignment for discriminant load (i32 = 4 bytes)
+                    if let Some(inst) = discr.as_instruction_value() {
+                        let _ = inst.set_alignment(4);
+                    }
                     Ok(discr)
                 }
             }
@@ -1322,10 +1331,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), Span::dummy()
                                 )])?;
-                            self.builder.build_store(tag_ptr, tag)
+                            let tag_store = self.builder.build_store(tag_ptr, tag)
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM store error: {}", e), Span::dummy()
                                 )])?;
+                            let _ = tag_store.set_alignment(4); // i32 tag alignment
 
                             // Get pointer to payload area (field 1)
                             let payload_ptr = self.builder.build_struct_gep(alloca, 1, "payload_ptr")
@@ -1352,10 +1362,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM GEP error: {}", e), Span::dummy()
                                     )])?;
-                                self.builder.build_store(field_ptr, *val)
+                                let field_store = self.builder.build_store(field_ptr, *val)
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), Span::dummy()
                                     )])?;
+                                let alignment = self.get_type_alignment_for_value(*val);
+                                let _ = field_store.set_alignment(alignment);
                             }
 
                             // Load and return the full enum struct
@@ -1363,6 +1375,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM load error: {}", e), Span::dummy()
                                 )])?;
+                            // Set proper alignment for the load
+                            let alignment = self.get_type_alignment_for_value(result);
+                            if let Some(inst) = result.as_instruction_value() {
+                                let _ = inst.set_alignment(alignment);
+                            }
                             Ok(result)
                         }
                     } else {

@@ -272,10 +272,13 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     .ok_or_else(|| vec![Diagnostic::error(
                         format!("Parameter {} not found", i), body.span
                     )])?;
-                self.builder.build_store(alloca, param_value)
+                let param_store = self.builder.build_store(alloca, param_value)
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM store error: {}", e), body.span
                     )])?;
+                // Set proper alignment for parameter store
+                let param_alignment = self.get_type_alignment_for_value(param_value);
+                let _ = param_store.set_alignment(param_alignment);
             }
         }
 

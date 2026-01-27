@@ -17,6 +17,7 @@ use crate::mir::EscapeResults;
 
 use super::rvalue::MirRvalueCodegen;
 use super::place::MirPlaceCodegen;
+use super::types::MirTypesCodegen;
 use super::CodegenContext;
 
 /// Extension trait for MIR statement compilation.
@@ -74,10 +75,13 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
                 // Convert value to match destination type if needed
                 let converted_value = self.convert_value_for_store(value, ptr, stmt.span)?;
-                self.builder.build_store(ptr, converted_value)
+                let store_inst = self.builder.build_store(ptr, converted_value)
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM store error: {}", e), stmt.span
                     )])?;
+                // Set proper alignment for pointers created via inttoptr
+                let alignment = self.get_type_alignment_for_value(converted_value);
+                let _ = store_inst.set_alignment(alignment);
             }
 
             StatementKind::StorageLive(_local) => {
