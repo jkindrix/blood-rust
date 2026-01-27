@@ -684,8 +684,9 @@ pub fn compile_mir_to_ir(
     hir_crate: &hir::Crate,
     mir_bodies: &MirBodiesMap,
     escape_analysis: &EscapeAnalysisMap,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<String, Vec<Diagnostic>> {
-    compile_mir_to_ir_with_opt(hir_crate, mir_bodies, escape_analysis, BloodOptLevel::Aggressive)
+    compile_mir_to_ir_with_opt(hir_crate, mir_bodies, escape_analysis, BloodOptLevel::Aggressive, builtin_def_ids)
 }
 
 /// Compile MIR bodies to LLVM IR text with specified optimization level.
@@ -694,6 +695,7 @@ pub fn compile_mir_to_ir_with_opt(
     mir_bodies: &MirBodiesMap,
     escape_analysis: &EscapeAnalysisMap,
     opt_level: BloodOptLevel,
+    builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
 ) -> Result<String, Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_program");
@@ -701,6 +703,13 @@ pub fn compile_mir_to_ir_with_opt(
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
+    // Set builtin def IDs so Vec, Box, Option, Result get correct type representations
+    codegen.set_builtin_def_ids(
+        builtin_def_ids.0,
+        builtin_def_ids.1,
+        builtin_def_ids.2,
+        builtin_def_ids.3,
+    );
 
     // First pass: declare types and functions from HIR
     codegen.compile_crate_declarations(hir_crate)?;

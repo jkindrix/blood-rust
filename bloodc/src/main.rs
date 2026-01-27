@@ -1419,7 +1419,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Debug: show LLVM IR if requested
     if args.debug {
-        let ir_result = codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map);
+        let ir_result = codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids);
         if let Ok(ir) = ir_result {
             println!("{}", ir);
         }
