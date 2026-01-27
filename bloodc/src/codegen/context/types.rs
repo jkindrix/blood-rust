@@ -192,6 +192,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     }
                 } else {
                     // Unknown ADT - use pointer placeholder
+                    // DEBUG: This is likely a bug if we hit this for a known type
+                    if std::env::var("BLOOD_DEBUG_TYPE").is_ok() {
+                        eprintln!("[lower_type] WARNING: Unknown ADT def_id={:?}, using pointer placeholder!", def_id);
+                    }
                     self.context.i8_type().ptr_type(AddressSpace::default()).into()
                 }
             }

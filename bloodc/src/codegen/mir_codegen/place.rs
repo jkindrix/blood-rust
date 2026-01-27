@@ -663,10 +663,10 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // current_ty has already been updated to the element type.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
 
-                                // Debug: print GEP type/size for VecIndex
+                                // Debug: print GEP type/size
                                 if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
                                     let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
-                                    eprintln!("[GEP VecIndex] HIR type: {:?}, LLVM type: {:?}, size: {}",
+                                    eprintln!("[GEP VecIndex] HIR: {:?}, LLVM: {:?}, size: {}",
                                         current_ty, elem_llvm_ty, gep_size);
                                 }
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());

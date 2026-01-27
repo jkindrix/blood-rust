@@ -723,9 +723,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         let llvm_ty = self.lower_type(&elem_ty);
                                         let size = self.get_type_size_in_bytes(llvm_ty);
 
-                                        // Debug: print size calculation for enum types
+                                        // Debug: print size calculation
                                         if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
-                                            eprintln!("[vec_push size] HIR type: {:?}, LLVM type: {:?}, size: {}",
+                                            eprintln!("[vec_push size] HIR: {:?}, LLVM: {:?}, size: {}",
                                                 elem_ty, llvm_ty, size);
                                         }
                                         size
