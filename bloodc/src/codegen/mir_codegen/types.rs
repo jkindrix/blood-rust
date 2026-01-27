@@ -25,6 +25,24 @@ pub trait MirTypesCodegen<'ctx, 'a> {
 
 impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
     fn get_type_size_in_bytes(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
+        // Use LLVM's size_of() when available - this ensures we match LLVM's actual layout
+        // which is critical for operations like memcpy in vec_push
+        let size_opt: Option<inkwell::values::IntValue<'ctx>> = match ty {
+            BasicTypeEnum::ArrayType(t) => t.size_of(),
+            BasicTypeEnum::FloatType(t) => Some(t.size_of()),
+            BasicTypeEnum::IntType(t) => Some(t.size_of()),
+            BasicTypeEnum::PointerType(t) => Some(t.size_of()),
+            BasicTypeEnum::StructType(t) => t.size_of(),
+            BasicTypeEnum::VectorType(t) => t.size_of(),
+        };
+        if let Some(size_val) = size_opt {
+            // LLVM's size_of returns a constant IntValue - extract the constant
+            if let Some(size) = size_val.get_zero_extended_constant() {
+                return size;
+            }
+        }
+
+        // Fallback to manual calculation if LLVM size_of isn't available
         match ty {
             BasicTypeEnum::IntType(t) => (t.get_bit_width() as u64).div_ceil(8),
             BasicTypeEnum::FloatType(t) => {

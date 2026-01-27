@@ -599,8 +599,18 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
+
+                                // Cast to typed pointer for correct GEP calculation.
+                                // This ensures LLVM uses sizeof(element) for index calculation.
+                                let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ptr_typed_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?;
+
                                 self.builder.build_in_bounds_gep(
-                                    data_ptr,
+                                    typed_data_ptr,
                                     &[idx_val.into_int_value()],
                                     "ptr_idx_gep"
                                 ).map_err(|e| vec![Diagnostic::error(

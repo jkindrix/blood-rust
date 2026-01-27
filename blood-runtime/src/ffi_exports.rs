@@ -3983,9 +3983,11 @@ pub unsafe extern "C" fn vec_new(elem_size: i64, out: *mut BloodVec) {
 #[no_mangle]
 pub unsafe extern "C" fn vec_with_capacity(elem_size: i64, capacity: i64, out: *mut BloodVec) {
     let ptr = if capacity > 0 {
+        // Use 16-byte alignment to support enums with i128 payloads
+        // which require 16-byte alignment for correct memory access
         let layout = std::alloc::Layout::from_size_align(
             (capacity * elem_size) as usize,
-            8, // Default alignment
+            16,
         ).unwrap();
         std::alloc::alloc(layout)
     } else {
@@ -4007,6 +4009,33 @@ pub unsafe extern "C" fn vec_len(vec: *const BloodVec) -> i64 {
         return 0;
     }
     (*vec).len
+}
+
+/// DEBUG: Dump Vec element discriminants for debugging enum corruption.
+///
+/// # Safety
+/// `vec` must be a valid pointer to a BloodVec.
+#[no_mangle]
+pub unsafe extern "C" fn vec_debug_dump(vec: *const BloodVec, elem_size: i64, label: *const u8) {
+    if vec.is_null() {
+        eprintln!("[DEBUG vec_dump] null vec");
+        return;
+    }
+    let v = &*vec;
+    let label_str = if label.is_null() {
+        "unnamed"
+    } else {
+        std::ffi::CStr::from_ptr(label as *const i8).to_str().unwrap_or("invalid")
+    };
+    eprintln!("[DEBUG vec_dump] {} ptr={:p} len={} cap={} elem_size={}",
+        label_str, v.ptr, v.len, v.capacity, elem_size);
+    if !v.ptr.is_null() && v.len > 0 && elem_size >= 4 {
+        for i in 0..v.len.min(10) {
+            let elem_ptr = v.ptr.add((i * elem_size) as usize);
+            let tag = std::ptr::read(elem_ptr as *const i32);
+            eprintln!("  [{}] tag={} addr={:p}", i, tag, elem_ptr);
+        }
+    }
 }
 
 /// Check if a Vec is empty.
@@ -4056,13 +4085,14 @@ pub unsafe extern "C" fn vec_push(vec: *mut BloodVec, elem: *const u8, elem_size
         let new_capacity = if v.capacity == 0 { 4 } else { v.capacity * 2 };
         let new_size = (new_capacity * elem_size) as usize;
 
+        // Use 16-byte alignment to support enums with i128 payloads
         let new_ptr = if v.ptr.is_null() {
-            let layout = std::alloc::Layout::from_size_align(new_size, 8).unwrap();
+            let layout = std::alloc::Layout::from_size_align(new_size, 16).unwrap();
             std::alloc::alloc(layout)
         } else {
             let old_layout = std::alloc::Layout::from_size_align(
                 (v.capacity * elem_size) as usize,
-                8,
+                16,
             ).unwrap();
             std::alloc::realloc(v.ptr, old_layout, new_size)
         };
@@ -4075,6 +4105,12 @@ pub unsafe extern "C" fn vec_push(vec: *mut BloodVec, elem: *const u8, elem_size
     let dest = v.ptr.add((v.len * elem_size) as usize);
     std::ptr::copy_nonoverlapping(elem, dest, elem_size as usize);
     v.len += 1;
+
+    // Minimal debug: print only when self-hosted compiler is running to identify crash point
+    if std::env::var("BLOOD_DEBUG_VEC").is_ok() {
+        let tag = std::ptr::read(elem as *const i32);
+        eprintln!("[vec_push] elem_size={} len={} tag={}", elem_size, v.len, tag);
+    }
 }
 
 /// Pop an element from the Vec.
@@ -4285,25 +4321,34 @@ pub unsafe extern "C" fn vec_clear(vec: *mut BloodVec) {
     (*vec).len = 0;
 }
 
-/// Free a Vec and its backing memory.
+/// Free a Vec's backing memory (but not the Vec struct itself).
 ///
 /// # Safety
-/// `vec` must be a valid pointer that was returned by vec_new or vec_with_capacity.
+/// `vec` must be a valid pointer to a BloodVec struct.
+/// The Vec struct itself is typically stack-allocated, so we only free the backing buffer.
 #[no_mangle]
 pub unsafe extern "C" fn vec_free(vec: *mut BloodVec, elem_size: i64) {
     if vec.is_null() {
         return;
     }
 
-    let v = Box::from_raw(vec);
+    // Read the Vec struct WITHOUT taking ownership - the struct is stack-allocated
+    let v = std::ptr::read(vec);
 
+    // Only free the backing buffer, not the Vec struct itself
+    // Use 16-byte alignment to match vec_push allocation
     if !v.ptr.is_null() && v.capacity > 0 {
         let layout = std::alloc::Layout::from_size_align(
             (v.capacity * elem_size) as usize,
-            8,
+            16,
         ).unwrap();
         std::alloc::dealloc(v.ptr, layout);
     }
+
+    // Zero out the Vec to prevent double-free if called again
+    (*vec).ptr = std::ptr::null_mut();
+    (*vec).len = 0;
+    (*vec).capacity = 0;
 }
 
 /// Get a pointer to the first element of a Vec.
@@ -4617,9 +4662,10 @@ pub unsafe extern "C" fn vec_reserve(vec: *mut BloodVec, additional: i64, elem_s
     // Calculate new capacity (at least double, or required)
     let new_capacity = std::cmp::max(v.capacity * 2, required);
 
+    // Use 16-byte alignment to support enums with i128 payloads
     let new_layout = std::alloc::Layout::from_size_align(
         (new_capacity * elem_size) as usize,
-        8,
+        16,
     ).unwrap();
 
     let new_ptr = if v.ptr.is_null() || v.capacity == 0 {
@@ -4627,7 +4673,7 @@ pub unsafe extern "C" fn vec_reserve(vec: *mut BloodVec, additional: i64, elem_s
     } else {
         let old_layout = std::alloc::Layout::from_size_align(
             (v.capacity * elem_size) as usize,
-            8,
+            16,
         ).unwrap();
         std::alloc::realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize)
     };
@@ -4656,9 +4702,10 @@ pub unsafe extern "C" fn vec_shrink_to_fit(vec: *mut BloodVec, elem_size: i64) {
     }
 
     let new_capacity = v.len;
+    // Use 16-byte alignment to match vec_push allocation
     let old_layout = std::alloc::Layout::from_size_align(
         (v.capacity * elem_size) as usize,
-        8,
+        16,
     ).unwrap();
 
     let new_ptr = std::alloc::realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize);

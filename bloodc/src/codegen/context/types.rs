@@ -318,9 +318,32 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         }
     }
 
-    /// Get approximate size of an LLVM type (for choosing union variant).
-    /// This computes actual sizes by recursively examining struct fields.
+    /// Get the size of an LLVM type in bytes.
+    ///
+    /// CRITICAL: This function uses LLVM's native size_of() to ensure we get
+    /// the exact same size that LLVM will use for memory operations. This is
+    /// essential for enum payload sizing - if we underestimate the size, the
+    /// payload array will be too small, causing memory corruption when storing
+    /// larger variants.
     fn get_type_size_approx(&self, ty: BasicTypeEnum<'ctx>) -> usize {
+        // Use LLVM's size_of() when available - this ensures we match LLVM's actual layout
+        // which is critical for enum payload sizing and Vec element sizing
+        let size_opt: Option<inkwell::values::IntValue<'ctx>> = match ty {
+            BasicTypeEnum::ArrayType(t) => t.size_of(),
+            BasicTypeEnum::FloatType(t) => Some(t.size_of()),
+            BasicTypeEnum::IntType(t) => Some(t.size_of()),
+            BasicTypeEnum::PointerType(t) => Some(t.size_of()),
+            BasicTypeEnum::StructType(t) => t.size_of(),
+            BasicTypeEnum::VectorType(t) => t.size_of(),
+        };
+        if let Some(size_val) = size_opt {
+            // LLVM's size_of returns a constant IntValue - extract the constant
+            if let Some(size) = size_val.get_zero_extended_constant() {
+                return size as usize;
+            }
+        }
+
+        // Fallback to manual calculation if LLVM size_of isn't available
         match ty {
             BasicTypeEnum::IntType(t) => {
                 let bits = t.get_bit_width() as usize;

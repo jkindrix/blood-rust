@@ -714,13 +714,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 },
                                 "vec_push" | "vec_contains" => {
                                     // Second arg is the element
-                                    if args.len() >= 2 {
+                                    // CRITICAL: Use the ACTUAL LLVM type of the value being pushed,
+                                    // not the re-lowered HIR type. This ensures elem_size matches
+                                    // what LLVM's GEP will use when accessing Vec elements.
+                                    // The HIR type and local's LLVM type should be the same, but
+                                    // using the actual value's type guarantees consistency.
+                                    let size = if arg_vals.len() >= 2 {
+                                        self.get_type_size_in_bytes(arg_vals[1].get_type())
+                                    } else if args.len() >= 2 {
+                                        // Fallback to HIR type if arg_vals not available
                                         let elem_ty = self.get_operand_type(&args[1], body);
                                         let llvm_ty = self.lower_type(&elem_ty);
                                         self.get_type_size_in_bytes(llvm_ty)
                                     } else {
                                         8 // Default size
-                                    }
+                                    };
+                                    size
                                 },
                                 "vec_pop" | "vec_reverse" | "vec_get" | "vec_get_ptr" | "vec_free" |
                                 "vec_first" | "vec_last" => {
