@@ -460,6 +460,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     // - Ptr to elements *T: current_ptr is **T (e.g., Vec.data), load then single-index GEP
                     // - Vec<T>: current_ptr is Vec*, extract data ptr (field 0), load, then single-index GEP
                     // - Ref to Vec<T>: current_ptr is Vec**, load to get Vec*, then like VecIndex
+                    #[derive(Debug)]
                     enum IndexKind {
                         DirectArray,
                         DirectSlice,
@@ -496,6 +497,12 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     };
 
                     // Update current_ty to element type
+                    // Debug: trace type extraction for Vec indexing
+                    let debug_vec = std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok();
+                    if debug_vec {
+                        eprintln!("[Index] Before type update: {:?}, index_kind: {:?}", current_ty.kind(), index_kind);
+                    }
+
                     current_ty = match current_ty.kind() {
                         TypeKind::Array { element, .. } => element.clone(),
                         TypeKind::Slice { element } => element.clone(),
@@ -505,7 +512,11 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 TypeKind::Slice { element } => element.clone(),
                                 // Reference to Vec<T>: indexing gives element type T
                                 TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
-                                    args.first().cloned().unwrap_or(inner.clone())
+                                    let elem = args.first().cloned().unwrap_or(inner.clone());
+                                    if debug_vec {
+                                        eprintln!("[Index] RefToVec: Vec def_id={:?}, elem type={:?}", def_id, elem.kind());
+                                    }
+                                    elem
                                 }
                                 // For Ptr { inner: T } where T is not array/slice,
                                 // indexing into *T gives T (the element type)
@@ -514,10 +525,18 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         }
                         // Vec<T> indexing gives element type T
                         TypeKind::Adt { def_id, args } if Some(*def_id) == self.vec_def_id => {
-                            args.first().cloned().unwrap_or(current_ty.clone())
+                            let elem = args.first().cloned().unwrap_or(current_ty.clone());
+                            if debug_vec {
+                                eprintln!("[Index] VecIndex: Vec def_id={:?}, elem type={:?}", def_id, elem.kind());
+                            }
+                            elem
                         }
                         _ => current_ty.clone(),
                     };
+
+                    if debug_vec {
+                        eprintln!("[Index] After type update: {:?}", current_ty.kind());
+                    }
 
                     unsafe {
                         match index_kind {
@@ -663,11 +682,12 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // current_ty has already been updated to the element type.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
 
-                                // Debug: print GEP type/size
+                                // Debug: print GEP type/size with full LLVM type string
                                 if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
                                     let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
-                                    eprintln!("[GEP VecIndex] HIR: {:?}, LLVM: {:?}, size: {}",
-                                        current_ty, elem_llvm_ty, gep_size);
+                                    let llvm_str = elem_llvm_ty.print_to_string().to_string();
+                                    eprintln!("[GEP VecIndex] HIR: {:?}, LLVM: {}, size: {}",
+                                        current_ty, llvm_str, gep_size);
                                 }
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
                                 let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "vec_typed_data_ptr")
@@ -708,11 +728,12 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // so LLVM uses sizeof(element) for index calculation.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
 
-                                // Debug: print GEP type/size for RefToVec
+                                // Debug: print GEP type/size for RefToVec with full LLVM type string
                                 if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
                                     let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
-                                    eprintln!("[GEP RefToVec] HIR type: {:?}, LLVM type: {:?}, size: {}",
-                                        current_ty, elem_llvm_ty, gep_size);
+                                    let llvm_str = elem_llvm_ty.print_to_string().to_string();
+                                    eprintln!("[GEP RefToVec] HIR: {:?}, LLVM: {}, size: {}",
+                                        current_ty, llvm_str, gep_size);
                                 }
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
                                 let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ref_vec_typed_data_ptr")

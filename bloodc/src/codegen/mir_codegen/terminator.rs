@@ -723,10 +723,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         let llvm_ty = self.lower_type(&elem_ty);
                                         let size = self.get_type_size_in_bytes(llvm_ty);
 
-                                        // Debug: print size calculation
+                                        // Debug: print size calculation with full LLVM type string
                                         if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
-                                            eprintln!("[vec_push size] HIR: {:?}, LLVM: {:?}, size: {}",
-                                                elem_ty, llvm_ty, size);
+                                            let llvm_str = llvm_ty.print_to_string().to_string();
+                                            eprintln!("[vec_push size] HIR: {:?}, LLVM: {}, size: {}",
+                                                elem_ty, llvm_str, size);
                                         }
                                         size
                                     } else {
