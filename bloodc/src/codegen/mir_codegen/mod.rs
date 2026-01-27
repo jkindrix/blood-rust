@@ -237,12 +237,19 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 MemoryTier::Stack => {
                     // Stack allocation - thin pointer, no generation check needed
                     // This is the fast path for non-escaping values
-                    self.builder.build_alloca(
+                    let alloca_ptr = self.builder.build_alloca(
                         llvm_ty,
                         &format!("_{}_{}", local.id.index, tier_name(tier))
                     ).map_err(|e| vec![Diagnostic::error(
                         format!("LLVM alloca error: {}", e), body.span
-                    )])?
+                    )])?;
+                    // Set explicit alignment on alloca to ensure correct ABI handling
+                    // for struct returns and complex types
+                    let alignment = self.get_type_alignment_for_size(llvm_ty) as u32;
+                    if let Some(inst) = alloca_ptr.as_instruction() {
+                        let _ = inst.set_alignment(alignment);
+                    }
+                    alloca_ptr
                 }
                 MemoryTier::Region | MemoryTier::Persistent => {
                     // Region allocation - use blood_alloc for generational tracking

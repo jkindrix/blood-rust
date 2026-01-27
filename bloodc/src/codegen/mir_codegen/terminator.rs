@@ -305,10 +305,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM alloca error: {}", e), span
                                     )])?;
-                                self.builder.build_store(alloca, struct_val)
+                                // Set alignment on alloca
+                                let alignment = self.get_type_alignment_for_value(struct_val.into());
+                                if let Some(inst) = alloca.as_instruction() {
+                                    let _ = inst.set_alignment(alignment);
+                                }
+                                let store_inst = self.builder.build_store(alloca, struct_val)
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), span
                                     )])?;
+                                let _ = store_inst.set_alignment(alignment);
                                 // Bitcast to expected pointer type if needed
                                 let expected_ptr_type = param_type.into_pointer_type();
                                 if alloca.get_type() != expected_ptr_type {
@@ -337,10 +343,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM alloca error: {}", e), span
                                     )])?;
-                                self.builder.build_store(alloca, int_val)
+                                // Set alignment on alloca
+                                let alignment = self.get_type_alignment_for_value(int_val.into());
+                                if let Some(inst) = alloca.as_instruction() {
+                                    let _ = inst.set_alignment(alignment);
+                                }
+                                let store_inst = self.builder.build_store(alloca, int_val)
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), span
                                     )])?;
+                                let _ = store_inst.set_alignment(alignment);
                                 let expected_ptr_type = param_type.into_pointer_type();
                                 if alloca.get_type() != expected_ptr_type {
                                     self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
@@ -357,10 +369,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM alloca error: {}", e), span
                                     )])?;
-                                self.builder.build_store(alloca, array_val)
+                                // Set alignment on alloca
+                                let alignment = self.get_type_alignment_for_value(array_val.into());
+                                if let Some(inst) = alloca.as_instruction() {
+                                    let _ = inst.set_alignment(alignment);
+                                }
+                                let store_inst = self.builder.build_store(alloca, array_val)
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), span
                                     )])?;
+                                let _ = store_inst.set_alignment(alignment);
                                 let expected_ptr_type = param_type.into_pointer_type();
                                 if alloca.get_type() != expected_ptr_type {
                                     self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
@@ -590,10 +608,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         .map_err(|e| vec![Diagnostic::error(
                                             format!("LLVM alloca error: {}", e), span
                                         )])?;
-                                    self.builder.build_store(alloca, struct_val)
+                                    // Set alignment on alloca
+                                    let alignment = self.get_type_alignment_for_value(struct_val.into());
+                                    if let Some(inst) = alloca.as_instruction() {
+                                        let _ = inst.set_alignment(alignment);
+                                    }
+                                    let store_inst = self.builder.build_store(alloca, struct_val)
                                         .map_err(|e| vec![Diagnostic::error(
                                             format!("LLVM store error: {}", e), span
                                         )])?;
+                                    let _ = store_inst.set_alignment(alignment);
                                     // Bitcast to expected pointer type (e.g., i8* for void*)
                                     let expected_ptr_type = param_type.into_pointer_type();
                                     if alloca.get_type() != expected_ptr_type {
@@ -623,10 +647,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         .map_err(|e| vec![Diagnostic::error(
                                             format!("LLVM alloca error: {}", e), span
                                         )])?;
-                                    self.builder.build_store(alloca, int_val)
+                                    // Set alignment on alloca
+                                    let alignment = self.get_type_alignment_for_value(int_val.into());
+                                    if let Some(inst) = alloca.as_instruction() {
+                                        let _ = inst.set_alignment(alignment);
+                                    }
+                                    let store_inst = self.builder.build_store(alloca, int_val)
                                         .map_err(|e| vec![Diagnostic::error(
                                             format!("LLVM store error: {}", e), span
                                         )])?;
+                                    let _ = store_inst.set_alignment(alignment);
                                     // Bitcast to expected pointer type (e.g., i8* for void*)
                                     let expected_ptr_type = param_type.into_pointer_type();
                                     if alloca.get_type() != expected_ptr_type {
@@ -1473,6 +1503,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM alloca error: {}", e), span
                                 )])?;
+                            // Set explicit 8-byte alignment for Vec struct (contains pointers and i64s)
+                            if let Some(inst) = out_alloca.as_instruction() {
+                                let _ = inst.set_alignment(8);
+                            }
 
                             // Save for later use after call
                             output_buffer_alloca = Some(out_alloca);
@@ -1518,6 +1552,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM alloca error: {}", e), span
                                 )])?;
+                            // Set explicit 8-byte alignment for Vec struct (contains pointers and i64s)
+                            if let Some(inst) = out_alloca.as_instruction() {
+                                let _ = inst.set_alignment(8);
+                            }
 
                             // Save for later use after call
                             output_buffer_alloca = Some(out_alloca);
