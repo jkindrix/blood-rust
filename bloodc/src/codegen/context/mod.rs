@@ -1187,7 +1187,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         match ty {
             BasicTypeEnum::IntType(int_ty) => {
                 let bits = int_ty.get_bit_width();
-                std::cmp::min(bits / 8, 8).max(1)
+                // i128 requires 16-byte alignment on x86-64 ABI
+                if bits == 128 {
+                    16
+                } else {
+                    std::cmp::min(bits / 8, 8).max(1)
+                }
             }
             BasicTypeEnum::FloatType(float_ty) => {
                 if float_ty == self.context.f32_type() {
@@ -1197,8 +1202,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
             BasicTypeEnum::PointerType(_) => 8,
-            BasicTypeEnum::StructType(_) => 8, // Conservative alignment for structs
-            BasicTypeEnum::ArrayType(_) => 8,
+            BasicTypeEnum::StructType(st) => {
+                // Struct alignment is the max alignment of any field
+                let mut max_align: u32 = 1;
+                for i in 0..st.count_fields() {
+                    if let Some(field_ty) = st.get_field_type_at_index(i) {
+                        let field_align = self.get_type_alignment(field_ty);
+                        if field_align > max_align {
+                            max_align = field_align;
+                        }
+                    }
+                }
+                max_align
+            }
+            BasicTypeEnum::ArrayType(arr_ty) => {
+                // Array alignment is the alignment of its element type
+                self.get_type_alignment(arr_ty.get_element_type())
+            }
             BasicTypeEnum::VectorType(_) => 16,
         }
     }

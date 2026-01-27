@@ -168,7 +168,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Use an array of the appropriately-aligned type to ensure
                         // proper alignment for all variant payloads.
                         let tag_type = self.context.i32_type();
-                        let payload_type = if max_alignment >= 8 {
+                        let payload_type = if max_alignment >= 16 {
+                            // Need 16-byte alignment: use [i128 x N] for i128 fields
+                            let num_i128s = (max_payload_size + 15) / 16;
+                            self.context.i128_type().array_type(num_i128s as u32).into()
+                        } else if max_alignment >= 8 {
                             // Need 8-byte alignment: use [i64 x N]
                             let num_i64s = (max_payload_size + 7) / 8;
                             self.context.i64_type().array_type(num_i64s as u32).into()
