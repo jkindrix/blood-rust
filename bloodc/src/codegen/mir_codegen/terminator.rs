@@ -714,18 +714,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 },
                                 "vec_push" | "vec_contains" => {
                                     // Second arg is the element
-                                    // CRITICAL: Use the ACTUAL LLVM type of the value being pushed,
-                                    // not the re-lowered HIR type. This ensures elem_size matches
-                                    // what LLVM's GEP will use when accessing Vec elements.
-                                    // The HIR type and local's LLVM type should be the same, but
-                                    // using the actual value's type guarantees consistency.
-                                    let size = if arg_vals.len() >= 2 {
-                                        self.get_type_size_in_bytes(arg_vals[1].get_type())
-                                    } else if args.len() >= 2 {
-                                        // Fallback to HIR type if arg_vals not available
+                                    // CRITICAL: Use the HIR type to compute elem_size, which will
+                                    // be consistent with what GEP uses when reading elements back.
+                                    // We must use lower_type() here to match the GEP path in place.rs
+                                    // which also uses lower_type() for the element type.
+                                    let size = if args.len() >= 2 {
                                         let elem_ty = self.get_operand_type(&args[1], body);
                                         let llvm_ty = self.lower_type(&elem_ty);
-                                        self.get_type_size_in_bytes(llvm_ty)
+                                        let size = self.get_type_size_in_bytes(llvm_ty);
+
+                                        // Debug: print size calculation for enum types
+                                        if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
+                                            eprintln!("[vec_push size] HIR type: {:?}, LLVM type: {:?}, size: {}",
+                                                elem_ty, llvm_ty, size);
+                                        }
+                                        size
                                     } else {
                                         8 // Default size
                                     };

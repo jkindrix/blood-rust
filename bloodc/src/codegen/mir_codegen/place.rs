@@ -534,7 +534,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             }
                             IndexKind::DirectSlice => {
                                 // Direct slice (fat pointer): current_ptr is {T*, i64}*
-                                // Extract the data pointer (field 0), then single-index GEP
+                                // Extract the data pointer (field 0), cast to element type, then single-index GEP
                                 let data_ptr_ptr = self.builder.build_struct_gep(
                                     current_ptr,
                                     0,
@@ -546,8 +546,17 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
+
+                                // Cast to typed pointer for correct GEP calculation
+                                let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "slice_typed_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?;
+
                                 self.builder.build_in_bounds_gep(
-                                    data_ptr,
+                                    typed_data_ptr,
                                     &[idx_val.into_int_value()],
                                     "idx_gep"
                                 ).map_err(|e| vec![Diagnostic::error(
@@ -571,7 +580,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             }
                             IndexKind::SliceRef => {
                                 // Slice reference (fat pointer): current_ptr is {T*, i64}*
-                                // Load the fat pointer struct, extract data pointer (field 0), single-index GEP
+                                // Load the fat pointer struct, extract data pointer (field 0), cast to element type, single-index GEP
                                 let data_ptr_ptr = self.builder.build_struct_gep(
                                     current_ptr,
                                     0,
@@ -583,8 +592,17 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
+
+                                // Cast to typed pointer for correct GEP calculation
+                                let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "sliceref_typed_data_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?;
+
                                 self.builder.build_in_bounds_gep(
-                                    data_ptr,
+                                    typed_data_ptr,
                                     &[idx_val.into_int_value()],
                                     "idx_gep"
                                 ).map_err(|e| vec![Diagnostic::error(
@@ -603,6 +621,14 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // Cast to typed pointer for correct GEP calculation.
                                 // This ensures LLVM uses sizeof(element) for index calculation.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
+
+                                // Debug: print GEP type/size for enum types
+                                if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
+                                    let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
+                                    eprintln!("[GEP PtrToElements] HIR type: {:?}, LLVM type: {:?}, size: {}",
+                                        current_ty, elem_llvm_ty, gep_size);
+                                }
+
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
                                 let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ptr_typed_data_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
@@ -636,6 +662,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // so LLVM uses sizeof(element) for index calculation.
                                 // current_ty has already been updated to the element type.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
+
+                                // Debug: print GEP type/size for VecIndex
+                                if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
+                                    let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
+                                    eprintln!("[GEP VecIndex] HIR type: {:?}, LLVM type: {:?}, size: {}",
+                                        current_ty, elem_llvm_ty, gep_size);
+                                }
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
                                 let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "vec_typed_data_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
@@ -674,6 +707,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // Cast data_ptr to element pointer type BEFORE GEP
                                 // so LLVM uses sizeof(element) for index calculation.
                                 let elem_llvm_ty = self.lower_type(&current_ty);
+
+                                // Debug: print GEP type/size for RefToVec
+                                if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
+                                    let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
+                                    eprintln!("[GEP RefToVec] HIR type: {:?}, LLVM type: {:?}, size: {}",
+                                        current_ty, elem_llvm_ty, gep_size);
+                                }
                                 let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
                                 let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ref_vec_typed_data_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
