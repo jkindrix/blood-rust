@@ -85,7 +85,23 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 )])?;
         }
 
-        for elem in &place.projection {
+        // Debug: trace full place access
+        if std::env::var("BLOOD_DEBUG_PLACE").is_ok() {
+            eprintln!("[compile_mir_place] ===== PLACE ACCESS =====");
+            eprintln!("[compile_mir_place] local: _{}, base_ty: {:?}", place.local.index, base_ty);
+            eprintln!("[compile_mir_place] projections: {:?}", place.projection);
+            eprintln!("[compile_mir_place] base_ptr type: {:?}", base_ptr.get_type().print_to_string());
+        }
+
+        for (proj_idx, elem) in place.projection.iter().enumerate() {
+            // Debug: trace each projection step
+            if std::env::var("BLOOD_DEBUG_PLACE").is_ok() {
+                eprintln!("[compile_mir_place] --- projection {} ---", proj_idx);
+                eprintln!("[compile_mir_place] elem: {:?}", elem);
+                eprintln!("[compile_mir_place] current_ty: {:?}", current_ty);
+                eprintln!("[compile_mir_place] current_ptr type: {:?}", current_ptr.get_type().print_to_string());
+            }
+
             current_ptr = match elem {
                 PlaceElem::Deref => {
                     // Save original type to check if this is a fat pointer (slice reference)
@@ -280,6 +296,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                             format!("LLVM GEP error: {}", e), body.span
                                         )])?;
 
+                                    // Debug: print current_ptr type
+                                    if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                                        eprintln!("[Variant Field] current_ptr type: {:?}, payload_ptr type: {:?}",
+                                            current_ptr.get_type().print_to_string(),
+                                            payload_ptr.get_type().print_to_string());
+                                    }
+
                                     // Build the variant's actual payload struct type
                                     let variant_field_types: Vec<inkwell::types::BasicTypeEnum> = variant_fields.iter()
                                         .map(|f| {
@@ -304,6 +327,14 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                             format!("LLVM GEP error: {}", e), body.span
                                         )])?;
 
+                                    // Debug: print variant_ptr and field_ptr types
+                                    if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                                        eprintln!("[Variant Field] variant_ptr type: {:?}, field_ptr type: {:?}, idx: {}",
+                                            variant_ptr.get_type().print_to_string(),
+                                            field_ptr.get_type().print_to_string(),
+                                            idx);
+                                    }
+
                                     // Clear variant context since we've accessed the field
                                     variant_ctx = None;
                                     current_ty = actual_field_ty;
@@ -321,6 +352,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     } else {
                         *idx
                     };
+
+                    // Debug: trace nested field access
+                    if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                        eprintln!("[Field] ===== FIELD ACCESS idx={}, actual_idx={} =====", idx, actual_idx);
+                        eprintln!("[Field] current_ty: {:?}", current_ty);
+                        eprintln!("[Field] current_ptr type: {:?}", current_ptr.get_type().print_to_string());
+                    }
 
                     // Check if this is a reference to a struct (MIR may not emit explicit Deref)
                     let is_ref_to_struct = matches!(
@@ -380,6 +418,23 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         _ => current_ty.clone(),
                     };
 
+                    // Debug: trace type update results
+                    if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                        eprintln!("[Field] is_ref_to_struct: {}", is_ref_to_struct);
+                        eprintln!("[Field] effective_ty: {:?}", effective_ty);
+                        eprintln!("[Field] NEW current_ty: {:?}", current_ty);
+                        if let TypeKind::Adt { def_id, .. } = effective_ty.kind() {
+                            if let Some(fields) = self.struct_defs.get(def_id) {
+                                eprintln!("[Field] struct_defs for def_id {:?} has {} fields", def_id, fields.len());
+                                for (i, f) in fields.iter().enumerate() {
+                                    eprintln!("[Field]   field {}: {:?}", i, f);
+                                }
+                            } else {
+                                eprintln!("[Field] WARNING: def_id {:?} NOT found in struct_defs!", def_id);
+                            }
+                        }
+                    }
+
                     // Get struct element pointer
                     if is_ref_to_struct {
                         // Reference to struct: load pointer then struct_gep
@@ -422,21 +477,39 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 )]);
                             }
                         };
-                        self.builder.build_struct_gep(
+                        // Debug: show GEP input
+                        if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                            eprintln!("[Field] GEP (ref path): struct_ptr type = {:?}, actual_idx = {}",
+                                struct_ptr.get_type().print_to_string(), actual_idx);
+                        }
+                        let gep_result = self.builder.build_struct_gep(
                             struct_ptr,
                             actual_idx,
                             &format!("field_{}", idx)
                         ).map_err(|e| vec![Diagnostic::error(
                             format!("LLVM GEP error: {} (place={:?}, ty={:?})", e, place, effective_ty), body.span
-                        )])?
+                        )])?;
+                        if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                            eprintln!("[Field] GEP (ref path) result: {:?}", gep_result.get_type().print_to_string());
+                        }
+                        gep_result
                     } else {
-                        self.builder.build_struct_gep(
+                        // Debug: show GEP input
+                        if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                            eprintln!("[Field] GEP (direct path): current_ptr type = {:?}, actual_idx = {}",
+                                current_ptr.get_type().print_to_string(), actual_idx);
+                        }
+                        let gep_result = self.builder.build_struct_gep(
                             current_ptr,
                             actual_idx,
                             &format!("field_{}", idx)
                         ).map_err(|e| vec![Diagnostic::error(
                             format!("LLVM GEP error: {} (place={:?}, ty={:?})", e, place, current_ty), body.span
-                        )])?
+                        )])?;
+                        if std::env::var("BLOOD_DEBUG_FIELD").is_ok() {
+                            eprintln!("[Field] GEP (direct path) result: {:?}", gep_result.get_type().print_to_string());
+                        }
+                        gep_result
                     }
                 }
 
@@ -495,6 +568,13 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         }
                         _ => IndexKind::Other,
                     };
+
+                    // Debug: trace IndexKind
+                    if std::env::var("BLOOD_DEBUG_PLACE").is_ok() {
+                        eprintln!("[compile_mir_place] IndexKind determined: {:?}", index_kind);
+                        eprintln!("[compile_mir_place] current_ty for IndexKind: {:?}", current_ty);
+                        eprintln!("[compile_mir_place] vec_def_id: {:?}", self.vec_def_id);
+                    }
 
                     // Update current_ty to element type
                     // Debug: trace type extraction for Vec indexing
@@ -666,8 +746,9 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 // Vec<T> direct indexing: current_ptr is Vec*, need to:
                                 // 1. GEP to field 0 (data pointer field)
                                 // 2. Load the data pointer (*T)
-                                // 3. Index into the data with single-index GEP
-                                // 4. Cast result to proper element type pointer for subsequent projections
+                                // 3. Calculate byte offset manually (index * elem_size)
+                                // 4. Use i8* GEP for exact byte addressing
+                                // 5. Cast result to element type pointer
                                 let data_ptr_ptr = self.builder.build_struct_gep(current_ptr, 0, "vec_data_ptr_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM GEP error for Vec data pointer: {}", e), body.span
@@ -677,40 +758,116 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
 
-                                // Cast data_ptr to element pointer type BEFORE GEP
-                                // so LLVM uses sizeof(element) for index calculation.
-                                // current_ty has already been updated to the element type.
+                                // Get element type and size
                                 let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_size = self.get_type_size_in_bytes(elem_llvm_ty);
 
                                 // Debug: print GEP type/size with full LLVM type string
                                 if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
-                                    let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
                                     let llvm_str = elem_llvm_ty.print_to_string().to_string();
                                     eprintln!("[GEP VecIndex] HIR: {:?}, LLVM: {}, size: {}",
-                                        current_ty, llvm_str, gep_size);
+                                        current_ty, llvm_str, elem_size);
                                 }
-                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
-                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "vec_typed_data_ptr")
+
+                                // FIX: Use explicit byte offset calculation instead of relying on
+                                // typed pointer GEP. This fixes corruption with 16-byte aligned types
+                                // where build_in_bounds_gep may miscalculate offsets.
+                                //
+                                // Calculate: byte_offset = index * elem_size
+                                // Ensure index is i64 for consistent arithmetic
+                                let idx_int = idx_val.into_int_value();
+                                let i64_type = self.context.i64_type();
+                                let idx_i64 = if idx_int.get_type().get_bit_width() < 64 {
+                                    self.builder.build_int_z_extend(idx_int, i64_type, "idx_i64")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM zext error: {}", e), body.span
+                                        )])?
+                                } else if idx_int.get_type().get_bit_width() > 64 {
+                                    self.builder.build_int_truncate(idx_int, i64_type, "idx_i64")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM trunc error: {}", e), body.span
+                                        )])?
+                                } else {
+                                    idx_int
+                                };
+
+                                let elem_size_val = i64_type.const_int(elem_size as u64, false);
+                                let byte_offset = self.builder.build_int_mul(
+                                    idx_i64,
+                                    elem_size_val,
+                                    "byte_offset"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM mul error: {}", e), body.span
+                                )])?;
+
+                                // Debug: print idx and byte_offset at runtime
+                                if std::env::var("BLOOD_DEBUG_GEP_ADDR").is_ok() {
+                                    if let Some(debug_fn) = self.module.get_function("debug_vec_index") {
+                                        let _ = self.builder.build_call(
+                                            debug_fn,
+                                            &[idx_i64.into(), byte_offset.into()],
+                                            ""
+                                        );
+                                    }
+                                }
+
+                                // Cast data_ptr to i8* for byte-level addressing
+                                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                let data_ptr_i8 = self.builder.build_pointer_cast(data_ptr, i8_ptr_ty, "data_ptr_i8")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM pointer cast error: {}", e), body.span
                                     )])?;
 
-                                // Now GEP with the typed pointer - LLVM will multiply index by sizeof(element)
-                                self.builder.build_in_bounds_gep(
-                                    typed_data_ptr,
-                                    &[idx_val.into_int_value()],
-                                    "vec_elem_ptr"
+                                // GEP with byte offset (i8* + byte_offset gives exact address)
+                                let elem_ptr_i8 = self.builder.build_in_bounds_gep(
+                                    data_ptr_i8,
+                                    &[byte_offset],
+                                    "elem_ptr_i8"
                                 ).map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
-                                )])?
+                                )])?;
+
+                                // Debug: emit runtime print of computed address and read contents
+                                if std::env::var("BLOOD_DEBUG_GEP_ADDR").is_ok() {
+                                    if let Some(debug_fn) = self.module.get_function("debug_vec_ptrs") {
+                                        let _ = self.builder.build_call(
+                                            debug_fn,
+                                            &[data_ptr_i8.into(), elem_ptr_i8.into()],
+                                            ""
+                                        );
+                                    }
+                                    // Read and print what's actually at elem_ptr
+                                    if let Some(read_fn) = self.module.get_function("debug_read_enum_at") {
+                                        let _ = self.builder.build_call(
+                                            read_fn,
+                                            &[elem_ptr_i8.into()],
+                                            ""
+                                        );
+                                    }
+                                }
+
+                                // Cast back to element type pointer
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+
+                                // Debug: print the types involved
+                                if std::env::var("BLOOD_DEBUG_GEP_ADDR").is_ok() {
+                                    eprintln!("[VecIndex cast] elem_llvm_ty: {:?}", elem_llvm_ty.print_to_string());
+                                    eprintln!("[VecIndex cast] elem_ptr_ty: {:?}", elem_ptr_ty.print_to_string());
+                                }
+
+                                self.builder.build_pointer_cast(elem_ptr_i8, elem_ptr_ty, "vec_elem_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?
                             }
                             IndexKind::RefToVec => {
                                 // Reference to Vec<T>: current_ptr is Vec** (pointer to the ref)
                                 // 1. Load to get Vec* (the reference value)
                                 // 2. GEP to field 0 (data pointer field)
                                 // 3. Load the data pointer (*T)
-                                // 4. GEP with index to get element pointer
-                                // 5. Cast to proper element type pointer
+                                // 4. Calculate byte offset manually (index * elem_size)
+                                // 5. Use i8* GEP for exact byte addressing
+                                // 6. Cast result to element type pointer
                                 let vec_ptr = self.builder.build_load(current_ptr, "vec_ref")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
@@ -724,31 +881,99 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
 
-                                // Cast data_ptr to element pointer type BEFORE GEP
-                                // so LLVM uses sizeof(element) for index calculation.
+                                // Get element type and size
                                 let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_size = self.get_type_size_in_bytes(elem_llvm_ty);
 
                                 // Debug: print GEP type/size for RefToVec with full LLVM type string
                                 if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
-                                    let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
                                     let llvm_str = elem_llvm_ty.print_to_string().to_string();
                                     eprintln!("[GEP RefToVec] HIR: {:?}, LLVM: {}, size: {}",
-                                        current_ty, llvm_str, gep_size);
+                                        current_ty, llvm_str, elem_size);
                                 }
-                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
-                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ref_vec_typed_data_ptr")
+
+                                // FIX: Use explicit byte offset calculation instead of relying on
+                                // typed pointer GEP. This fixes corruption with 16-byte aligned types
+                                // where build_in_bounds_gep may miscalculate offsets.
+                                //
+                                // Calculate: byte_offset = index * elem_size
+                                // Ensure index is i64 for consistent arithmetic
+                                let idx_int = idx_val.into_int_value();
+                                let i64_type = self.context.i64_type();
+                                let idx_i64 = if idx_int.get_type().get_bit_width() < 64 {
+                                    self.builder.build_int_z_extend(idx_int, i64_type, "idx_i64")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM zext error: {}", e), body.span
+                                        )])?
+                                } else if idx_int.get_type().get_bit_width() > 64 {
+                                    self.builder.build_int_truncate(idx_int, i64_type, "idx_i64")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM trunc error: {}", e), body.span
+                                        )])?
+                                } else {
+                                    idx_int
+                                };
+                                let elem_size_val = i64_type.const_int(elem_size as u64, false);
+                                let byte_offset = self.builder.build_int_mul(
+                                    idx_i64,
+                                    elem_size_val,
+                                    "byte_offset"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM mul error: {}", e), body.span
+                                )])?;
+
+                                // Cast data_ptr to i8* for byte-level addressing
+                                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                let data_ptr_i8 = self.builder.build_pointer_cast(data_ptr, i8_ptr_ty, "data_ptr_i8")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM pointer cast error: {}", e), body.span
                                     )])?;
 
-                                // Now GEP with the typed pointer - LLVM will multiply index by sizeof(element)
-                                self.builder.build_in_bounds_gep(
-                                    typed_data_ptr,
-                                    &[idx_val.into_int_value()],
-                                    "ref_vec_elem_ptr"
+                                // Debug: print idx and byte_offset at runtime
+                                if std::env::var("BLOOD_DEBUG_GEP_ADDR").is_ok() {
+                                    if let Some(debug_fn) = self.module.get_function("debug_vec_index") {
+                                        let _ = self.builder.build_call(
+                                            debug_fn,
+                                            &[idx_i64.into(), byte_offset.into()],
+                                            ""
+                                        );
+                                    }
+                                }
+
+                                // GEP with byte offset (i8* + byte_offset gives exact address)
+                                let elem_ptr_i8 = self.builder.build_in_bounds_gep(
+                                    data_ptr_i8,
+                                    &[byte_offset],
+                                    "elem_ptr_i8"
                                 ).map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
-                                )])?
+                                )])?;
+
+                                // Debug: print data_ptr and elem_ptr at runtime
+                                if std::env::var("BLOOD_DEBUG_GEP_ADDR").is_ok() {
+                                    if let Some(debug_fn) = self.module.get_function("debug_vec_ptrs") {
+                                        let _ = self.builder.build_call(
+                                            debug_fn,
+                                            &[data_ptr_i8.into(), elem_ptr_i8.into()],
+                                            ""
+                                        );
+                                    }
+                                    // Read and print what's actually at elem_ptr
+                                    if let Some(read_fn) = self.module.get_function("debug_read_enum_at") {
+                                        let _ = self.builder.build_call(
+                                            read_fn,
+                                            &[elem_ptr_i8.into()],
+                                            ""
+                                        );
+                                    }
+                                }
+
+                                // Cast back to element type pointer
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                self.builder.build_pointer_cast(elem_ptr_i8, elem_ptr_ty, "ref_vec_elem_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?
                             }
                             IndexKind::Other => {
                                 // Other pointer type: single-index GEP
@@ -948,6 +1173,14 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             .map_err(|e| vec![Diagnostic::error(
                 format!("LLVM load error: {}", e), body.span
             )])?;
+
+        // Debug: print pointer element type
+        if std::env::var("BLOOD_DEBUG_LOAD").is_ok() {
+            let elem_ty = ptr.get_type().get_element_type();
+            eprintln!("[compile_mir_place_load] ptr_elem_type: {:?}, loaded_type: {:?}",
+                elem_ty.print_to_string(), load_inst.get_type().print_to_string());
+        }
+
         // Set proper alignment based on the loaded type
         let alignment = self.get_type_alignment_for_value(load_inst);
         if let Some(inst) = load_inst.as_instruction_value() {

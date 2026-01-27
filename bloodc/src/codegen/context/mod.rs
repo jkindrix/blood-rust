@@ -2757,6 +2757,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // println_i64(i64) -> void
         self.module.add_function("println_i64", print_i64_type, None);
 
+        // debug_vec_index(i64, i64) -> void - for debugging VecIndex GEP
+        let debug_vec_index_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("debug_vec_index", debug_vec_index_type, None);
+
+        // debug_vec_ptrs(*i8, *i8) -> void - for debugging VecIndex pointers
+        let debug_vec_ptrs_type = void_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+        self.module.add_function("debug_vec_ptrs", debug_vec_ptrs_type, None);
+
+        // debug_read_enum_at(*i8) -> void - read and print enum at pointer
+        let debug_read_enum_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+        self.module.add_function("debug_read_enum_at", debug_read_enum_type, None);
+
         // str slice type: { ptr: *i8, len: i64 }
         let str_slice_type = self.context.struct_type(
             &[i8_ptr_type.into(), i64_type.into()],

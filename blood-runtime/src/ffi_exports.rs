@@ -4109,7 +4109,14 @@ pub unsafe extern "C" fn vec_push(vec: *mut BloodVec, elem: *const u8, elem_size
     // Minimal debug: print only when self-hosted compiler is running to identify crash point
     if std::env::var("BLOOD_DEBUG_VEC").is_ok() {
         let tag = std::ptr::read(elem as *const i32);
-        eprintln!("[vec_push] elem_size={} len={} tag={}", elem_size, v.len, tag);
+        // Also read payload if we have enough size (assuming { i32, payload } layout)
+        let payload = if elem_size >= 16 {
+            std::ptr::read((elem as *const u8).add(8) as *const i64)
+        } else {
+            -1
+        };
+        eprintln!("[vec_push] elem_size={} len={} tag={} payload={} dest={:p} src={:p} base={:p}",
+            elem_size, v.len, tag, payload, dest, elem, v.ptr);
     }
 }
 
@@ -7569,4 +7576,35 @@ mod tests {
         // Region should have been destroyed by take_suspended_regions
         // since it was pending deallocation
     }
+}
+
+/// Debug function to print vec index information
+#[no_mangle]
+pub unsafe extern "C" fn debug_vec_index(idx: i64, byte_offset: i64) {
+    eprintln!("[debug_vec_index] idx={} byte_offset={}", idx, byte_offset);
+}
+
+/// Debug function to print data ptr and element ptr
+#[no_mangle]
+pub unsafe extern "C" fn debug_vec_ptrs(data_ptr: *const u8, elem_ptr: *const u8) {
+    eprintln!("[debug_vec_ptrs] data_ptr={:p} elem_ptr={:p} offset={}", 
+        data_ptr, elem_ptr, elem_ptr as usize - data_ptr as usize);
+}
+
+/// Debug function to read enum at pointer and print its contents
+#[no_mangle]
+pub unsafe extern "C" fn debug_read_enum_at(ptr: *const u8) {
+    let tag = std::ptr::read(ptr as *const i32);
+    let payload = std::ptr::read(ptr.add(8) as *const i64);
+    eprintln!("[debug_read_enum_at] ptr={:p} tag={} payload={}", ptr, tag, payload);
+}
+
+/// Debug function to read and print enum at local storage
+#[no_mangle]
+pub unsafe extern "C" fn debug_local_enum(ptr: *const u8, name: *const u8, name_len: i64) {
+    let name_slice = std::slice::from_raw_parts(name, name_len as usize);
+    let name_str = std::str::from_utf8_unchecked(name_slice);
+    let tag = std::ptr::read(ptr as *const i32);
+    let payload = std::ptr::read(ptr.add(8) as *const i64);
+    eprintln!("[debug_local_enum] {} at {:p}: tag={} payload={}", name_str, ptr, tag, payload);
 }
