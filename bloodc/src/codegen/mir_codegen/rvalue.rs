@@ -1321,10 +1321,55 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         } else {
                             // Slow path: variant field types don't match struct field types
                             // Use alloca + GEP + bitcast to store fields in the payload area
-                            let alloca = self.builder.build_alloca(struct_ty, "enum_tmp")
-                                .map_err(|e| vec![Diagnostic::error(
-                                    format!("LLVM alloca error: {}", e), Span::dummy()
-                                )])?;
+                            //
+                            // IMPORTANT: The alloca MUST be placed in the entry block of the function.
+                            // Allocas in non-entry blocks may not get proper stack alignment (the stack
+                            // pointer may not be 16-byte aligned when execution reaches that point).
+                            // This caused SIGSEGV when storing i128 values that require 16-byte alignment.
+                            let alloca = {
+                                // Save current insertion point
+                                let current_block = self.builder.get_insert_block()
+                                    .ok_or_else(|| vec![Diagnostic::error(
+                                        "No current block for alloca".to_string(), Span::dummy()
+                                    )])?;
+
+                                // Get the entry block of the current function
+                                let function = current_block.get_parent()
+                                    .ok_or_else(|| vec![Diagnostic::error(
+                                        "No parent function for current block".to_string(), Span::dummy()
+                                    )])?;
+                                let entry_block = function.get_first_basic_block()
+                                    .ok_or_else(|| vec![Diagnostic::error(
+                                        "No entry block in function".to_string(), Span::dummy()
+                                    )])?;
+
+                                // Position at the start of entry block for the alloca
+                                // We insert after any existing instructions (other allocas)
+                                if let Some(first_inst) = entry_block.get_first_instruction() {
+                                    self.builder.position_before(&first_inst);
+                                } else {
+                                    self.builder.position_at_end(entry_block);
+                                }
+
+                                // Build the alloca in the entry block
+                                let alloca = self.builder.build_alloca(struct_ty, "enum_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), Span::dummy()
+                                    )])?;
+
+                                // Set proper alignment for the alloca based on struct type.
+                                // This is critical for types containing i128/u128 which require
+                                // 16-byte alignment.
+                                let alloca_alignment = self.get_type_alignment_for_size(struct_ty.into()) as u32;
+                                if let Some(inst) = alloca.as_instruction() {
+                                    let _ = inst.set_alignment(alloca_alignment);
+                                }
+
+                                // Restore the original insertion point
+                                self.builder.position_at_end(current_block);
+
+                                alloca
+                            };
 
                             // Store tag at field 0
                             let tag_ptr = self.builder.build_struct_gep(alloca, 0, "tag_ptr")
@@ -1366,8 +1411,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), Span::dummy()
                                     )])?;
-                                let alignment = self.get_type_alignment_for_value(*val);
-                                let _ = field_store.set_alignment(alignment);
+                                // IMPORTANT: Cap alignment at 8 bytes for stores to enum_tmp alloca.
+                                // LLVM's stack frame allocator doesn't always respect `align 16` on allocas,
+                                // and using align 16 for i128 fields causes aligned vector instructions
+                                // (vmovaps) that crash if the actual address isn't 16-byte aligned.
+                                // Using align 8 forces scalar/unaligned instructions which work correctly.
+                                let natural_alignment = self.get_type_alignment_for_value(*val);
+                                let safe_alignment = natural_alignment.min(8);
+                                let _ = field_store.set_alignment(safe_alignment);
                             }
 
                             // Load and return the full enum struct
@@ -1375,10 +1426,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM load error: {}", e), Span::dummy()
                                 )])?;
-                            // Set proper alignment for the load
-                            let alignment = self.get_type_alignment_for_value(result);
+                            // IMPORTANT: Use conservative alignment (8 bytes) for the aggregate load.
+                            // Although the type may require 16-byte alignment for i128 fields,
+                            // LLVM's stack frame allocator sometimes places allocas at 8-byte aligned
+                            // offsets despite the `align 16` attribute. Using align 16 here causes
+                            // LLVM to generate aligned vector instructions (vmovaps) that crash
+                            // if the actual address isn't 16-byte aligned.
+                            // Individual field stores already use proper alignment, so the data
+                            // is correctly laid out - we just need to avoid aligned aggregate ops.
                             if let Some(inst) = result.as_instruction_value() {
-                                let _ = inst.set_alignment(alignment);
+                                let _ = inst.set_alignment(8);
                             }
                             Ok(result)
                         }
