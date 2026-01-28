@@ -1102,7 +1102,7 @@ pub trait ExprLowering {
         let index_op = self.lower_expr(index)?;
 
         let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-            p.local
+            p.local_unchecked()
         } else {
             let temp = self.new_temp(Type::u64(), span);
             self.push_assign(Place::local(temp), Rvalue::Use(index_op));
@@ -1353,7 +1353,7 @@ pub trait ExprLowering {
                     // Extract from base using field projection
                     let field_ty = self.get_struct_field_type(def_id, idx as u32, &type_args);
                     let field_place = Place {
-                        local: base_temp.local,
+                        base: base_temp.base.clone(),
                         projection: {
                             let mut proj = base_temp.projection.clone();
                             proj.push(PlaceElem::Field(idx as u32));
@@ -1826,7 +1826,7 @@ pub trait ExprLowering {
                 let base_place = self.lower_place(base)?;
                 let index_op = self.lower_expr(index)?;
                 let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-                    p.local
+                    p.local_unchecked()
                 } else {
                     let temp = self.new_temp(Type::u64(), expr.span);
                     self.push_assign(Place::local(temp), Rvalue::Use(index_op));
@@ -2338,28 +2338,17 @@ pub trait ExprLowering {
             PatternKind::Wildcard => {
                 // Nothing to bind
             }
-            PatternKind::Binding { local_id, mutable, subpattern } => {
+            PatternKind::Binding { local_id, mutable: _, subpattern } => {
                 let mir_local = self.map_local(*local_id);
 
-                // Check if this is a ref binding (pattern type is a reference)
-                // In that case, we need to create a reference to the place instead of copying
-                if pattern.ty.is_ref() {
-                    // This is a ref binding (e.g., ref x or ref rest @ ..)
-                    // Create a reference to the place
-                    self.push_assign(
-                        Place::local(mir_local),
-                        Rvalue::Ref {
-                            place: place.clone(),
-                            mutable: *mutable,
-                        },
-                    );
-                } else {
-                    // Regular binding - copy the value
-                    self.push_assign(
-                        Place::local(mir_local),
-                        Rvalue::Use(Operand::Copy(place.clone())),
-                    );
-                }
+                // Always copy the value from the place into the binding.
+                // Even if the pattern type is a reference (e.g., binding `x` where x: &T),
+                // we copy the reference VALUE from the place, not create a new reference.
+                // Ref patterns (like Rust's `ref x`) would need a separate PatternKind or flag.
+                self.push_assign(
+                    Place::local(mir_local),
+                    Rvalue::Use(Operand::Copy(place.clone())),
+                );
 
                 if let Some(sub) = subpattern {
                     self.bind_pattern(sub, &Place::local(mir_local))?;
@@ -2896,25 +2885,18 @@ pub trait ExprLowering {
     /// which is needed for proper pattern binding in match arms.
     fn bind_pattern_cf(&mut self, pattern: &Pattern, place: &Place) -> Result<(), Vec<Diagnostic>> {
         match &pattern.kind {
-            PatternKind::Binding { local_id, mutable, subpattern } => {
+            PatternKind::Binding { local_id, mutable: _, subpattern } => {
                 let mir_local = self.new_temp(pattern.ty.clone(), pattern.span);
                 self.local_map_mut().insert(*local_id, mir_local);
 
-                // Check if this is a ref binding
-                if pattern.ty.is_ref() {
-                    self.push_assign(
-                        Place::local(mir_local),
-                        Rvalue::Ref {
-                            place: place.clone(),
-                            mutable: *mutable,
-                        },
-                    );
-                } else {
-                    self.push_assign(
-                        Place::local(mir_local),
-                        Rvalue::Use(Operand::Copy(place.clone())),
-                    );
-                }
+                // Always copy the value from the place into the binding.
+                // Even if the pattern type is a reference (e.g., binding `x` where x: &T),
+                // we copy the reference VALUE from the place, not create a new reference.
+                // Ref patterns (like Rust's `ref x`) would need a separate PatternKind or flag.
+                self.push_assign(
+                    Place::local(mir_local),
+                    Rvalue::Use(Operand::Copy(place.clone())),
+                );
 
                 if let Some(subpat) = subpattern {
                     self.bind_pattern_cf(subpat, &Place::local(mir_local))?;

@@ -1463,9 +1463,11 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                         // If init is a closure, propagate the Closure type to the target local
                         // The init_val will be Copy/Move of a temp with Closure type
                         if let Operand::Copy(place) | Operand::Move(place) = &init_val {
-                            if let Some(temp_ty) = self.builder.get_local_type(place.local) {
-                                if matches!(temp_ty.kind(), TypeKind::Closure { .. }) {
-                                    self.builder.set_local_type(mir_local, temp_ty.clone());
+                            if let Some(local_id) = place.as_local() {
+                                if let Some(temp_ty) = self.builder.get_local_type(local_id) {
+                                    if matches!(temp_ty.kind(), TypeKind::Closure { .. }) {
+                                        self.builder.set_local_type(mir_local, temp_ty.clone());
+                                    }
                                 }
                             }
                         }
@@ -2037,7 +2039,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
 
             // Index needs to be a local
             let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-                p.local
+                p.local_unchecked()
             } else {
                 // Use the actual type of the index expression, not hardcoded u64
                 let temp = self.new_temp(index.ty.clone(), span);
@@ -2158,6 +2160,23 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 let mir_local = self.map_local(*local_id);
                 Ok(Place::local(mir_local))
             }
+            ExprKind::Def(def_id) => {
+                // Check if this is a static - if so, return a static place
+                if let Some(item) = self.hir.get_item(*def_id) {
+                    if matches!(item.kind, hir::ItemKind::Static { .. }) {
+                        return Ok(Place::static_item(*def_id));
+                    }
+                }
+                // For non-static defs (functions, consts), fall through to default handling
+                let val = self.lower_expr(expr)?;
+                if let Some(place) = val.place() {
+                    Ok(place.clone())
+                } else {
+                    let temp = self.new_temp(expr.ty.clone(), expr.span);
+                    self.push_assign(Place::local(temp), Rvalue::Use(val));
+                    Ok(Place::local(temp))
+                }
+            }
             ExprKind::Field { base, field_idx } => {
                 let base_place = self.lower_place(base)?;
                 Ok(base_place.project(PlaceElem::Field(*field_idx)))
@@ -2166,7 +2185,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 let base_place = self.lower_place(base)?;
                 let index_op = self.lower_expr(index)?;
                 let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-                    p.local
+                    p.local_unchecked()
                 } else {
                     // Use the actual type of the index expression, not hardcoded u64
                     let temp = self.new_temp(index.ty.clone(), expr.span);
@@ -2369,7 +2388,7 @@ impl<'hir, 'ctx> ExprLowering for FunctionLowering<'hir, 'ctx> {
             break_block: ctx.break_block,
             continue_block: ctx.continue_block,
             label,
-            result_local: ctx.result_place.map(|p| p.local),
+            result_local: ctx.result_place.map(|p| p.local_unchecked()),
         });
     }
 

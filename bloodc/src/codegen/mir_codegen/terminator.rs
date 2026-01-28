@@ -276,7 +276,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Helper to extract closure DefId from a place's type
         let get_closure_def_id = |place: &Place, body: &MirBody| -> Option<crate::hir::DefId> {
-            let local = body.locals.get(place.local.index() as usize)?;
+            let local = body.locals.get(place.local_unchecked().index() as usize)?;
             match local.ty.kind() {
                 crate::hir::TypeKind::Closure { def_id, .. } => Some(*def_id),
                 _ => None,
@@ -1549,8 +1549,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             output_buffer_alloca = Some(out_alloca);
 
                             // Get element type from destination (Vec<T> -> T)
-                            let dest_local = &body.locals[destination.local.index() as usize];
-                            let elem_size: u64 = if let crate::hir::TypeKind::Adt { args: type_args, .. } = dest_local.ty.kind() {
+                            let dest_ty = self.get_place_base_type(destination, body)?;
+                            let elem_size: u64 = if let crate::hir::TypeKind::Adt { args: type_args, .. } = dest_ty.kind() {
                                 if let Some(elem_ty) = type_args.first() {
                                     let llvm_ty = self.lower_type(elem_ty);
                                     self.get_type_size_in_bytes(llvm_ty)
@@ -1598,8 +1598,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             output_buffer_alloca = Some(out_alloca);
 
                             // Get element type from destination (Vec<T> -> T)
-                            let dest_local = &body.locals[destination.local.index() as usize];
-                            let elem_size: u64 = if let crate::hir::TypeKind::Adt { args: type_args, .. } = dest_local.ty.kind() {
+                            let dest_ty = self.get_place_base_type(destination, body)?;
+                            let elem_size: u64 = if let crate::hir::TypeKind::Adt { args: type_args, .. } = dest_ty.kind() {
                                 if let Some(elem_ty) = type_args.first() {
                                     let llvm_ty = self.lower_type(elem_ty);
                                     self.get_type_size_in_bytes(llvm_ty)
@@ -2266,11 +2266,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Store result to destination with type conversion
         // blood_perform returns i64, but destination may be a different type.
         // Get the destination type and convert accordingly.
-        let dest_local = &body.locals[destination.local.index() as usize];
-        let dest_llvm_ty = self.lower_type(&dest_local.ty);
+        let dest_ty = self.get_place_base_type(destination, body)?;
+        let dest_llvm_ty = self.lower_type(&dest_ty);
 
         // Skip storing for unit type (empty struct) - there's no actual value to store
-        let is_unit_type = dest_local.ty.is_unit();
+        let is_unit_type = dest_ty.is_unit();
 
         if !is_unit_type {
             let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;

@@ -639,6 +639,8 @@ pub struct CodegenContext<'ctx, 'a> {
     pub(super) const_globals: HashMap<DefId, inkwell::values::GlobalValue<'ctx>>,
     /// Global statics: maps DefId to LLVM global value.
     pub(super) static_globals: HashMap<DefId, inkwell::values::GlobalValue<'ctx>>,
+    /// Static types: maps DefId to the Blood type of the static.
+    pub(super) static_types: HashMap<DefId, Type>,
     /// Current continuation pointer for deep handler operations.
     /// When set, compile_resume calls the continuation instead of returning.
     pub(super) current_continuation: Option<PointerValue<'ctx>>,
@@ -718,6 +720,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             wasm_imports: HashMap::new(),
             const_globals: HashMap::new(),
             static_globals: HashMap::new(),
+            static_types: HashMap::new(),
             current_continuation: None,
             is_multishot_handler: false,
             main_fn_def_id: None,
@@ -1300,9 +1303,36 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                 // Store for later reference
                 self.static_globals.insert(*def_id, global);
+                self.static_types.insert(*def_id, ty.clone());
             }
         }
         Ok(())
+    }
+
+    /// Get the type of a static item.
+    pub fn get_static_type(&self, def_id: DefId) -> Option<Type> {
+        self.static_types.get(&def_id).cloned()
+    }
+
+    /// Get the base type of a place (either from a local or a static).
+    pub fn get_place_base_type(&self, place: &crate::mir::Place, body: &crate::mir::MirBody) -> Result<Type, Vec<Diagnostic>> {
+        use crate::mir::types::PlaceBase;
+        match &place.base {
+            PlaceBase::Local(local_id) => {
+                let local_info = body.locals.get(local_id.index as usize)
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        format!("Local _{} not found in MIR body", local_id.index),
+                        body.span,
+                    )])?;
+                Ok(local_info.ty.clone())
+            }
+            PlaceBase::Static(def_id) => {
+                self.get_static_type(*def_id).ok_or_else(|| vec![Diagnostic::error(
+                    format!("Static {:?} type not found", def_id),
+                    body.span,
+                )])
+            }
+        }
     }
 
     /// Evaluate a const expression at compile time.

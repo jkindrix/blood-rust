@@ -44,17 +44,37 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         body: &MirBody,
         escape_results: Option<&EscapeResults>,
     ) -> Result<PointerValue<'ctx>, Vec<Diagnostic>> {
-        let base_ptr = *self.locals.get(&place.local).ok_or_else(|| {
-            vec![Diagnostic::error(
-                format!("Local _{} not found", place.local.index),
-                body.span,
-            )]
-        })?;
+        use crate::mir::types::PlaceBase;
 
-        // Track the current type as we process projections
-        let local_info = body.locals.get(place.local.index as usize)
-            .expect("ICE: MIR local not found in body during codegen");
-        let base_ty = local_info.ty.clone();
+        // Get base pointer and type based on whether this is a local or static
+        let (base_ptr, base_ty, local_info_opt) = match &place.base {
+            PlaceBase::Local(local_id) => {
+                let ptr = *self.locals.get(local_id).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        format!("Local _{} not found", local_id.index),
+                        body.span,
+                    )]
+                })?;
+                let local_info = body.locals.get(local_id.index as usize)
+                    .expect("ICE: MIR local not found in body during codegen");
+                (ptr, local_info.ty.clone(), Some(local_info))
+            }
+            PlaceBase::Static(def_id) => {
+                let global = self.static_globals.get(def_id).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        format!("Static {:?} not found in globals", def_id),
+                        body.span,
+                    )]
+                })?;
+                let static_ty = self.get_static_type(*def_id).ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        format!("Static {:?} type not found", def_id),
+                        body.span,
+                    )]
+                })?;
+                (global.as_pointer_value(), static_ty, None)
+            }
+        };
         let mut current_ty = base_ty.clone();
 
         let mut current_ptr = base_ptr;
@@ -64,7 +84,8 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
         // Check if this is a closure __env local with Field projections.
         // If so, we need to cast the i8* to the captures struct type first.
-        let is_closure_env = local_info.name.as_deref() == Some("__env");
+        // (Only applies to local-based places, not statics)
+        let is_closure_env = local_info_opt.map(|li| li.name.as_deref() == Some("__env")).unwrap_or(false);
         let has_field_projections = place.projection.iter().any(|p| matches!(p, PlaceElem::Field(_)));
 
         if is_closure_env && has_field_projections {
@@ -88,7 +109,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         // Debug: trace full place access
         if std::env::var("BLOOD_DEBUG_PLACE").is_ok() {
             eprintln!("[compile_mir_place] ===== PLACE ACCESS =====");
-            eprintln!("[compile_mir_place] local: _{}, base_ty: {:?}", place.local.index, base_ty);
+            eprintln!("[compile_mir_place] place: {:?}, base_ty: {:?}", place, base_ty);
             eprintln!("[compile_mir_place] projections: {:?}", place.projection);
             eprintln!("[compile_mir_place] base_ptr type: {:?}", base_ptr.get_type().print_to_string());
         }
@@ -183,14 +204,16 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
                     // Check if we should skip generation checks for this local.
                     // NoEscape locals are stack-allocated and safe by lexical scoping.
-                    let should_skip_gen_check = escape_results
-                        .map(|er| er.get(place.local) == EscapeState::NoEscape)
+                    // Static places never need generation checks - they're in global memory.
+                    let should_skip_gen_check = place.is_static() || escape_results
+                        .and_then(|er| place.as_local().map(|l| er.get(l) == EscapeState::NoEscape))
                         .unwrap_or(false);
 
                     // If this is a region-allocated pointer and the local escapes,
                     // validate generation before use
                     if !should_skip_gen_check {
-                    if let Some(&gen_alloca) = self.local_generations.get(&place.local) {
+                    if let Some(local_id) = place.as_local() {
+                    if let Some(&gen_alloca) = self.local_generations.get(&local_id) {
                         let i32_ty = self.context.i32_type();
                         let i64_ty = self.context.i64_type();
 
@@ -267,7 +290,8 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         // Continue on valid path
                         self.builder.position_at_end(valid_bb);
                     }
-                    }
+                    } // if let Some(local_id)
+                    } // if !should_skip_gen_check
 
                     ptr_val
                 }

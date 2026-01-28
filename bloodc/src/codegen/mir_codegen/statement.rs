@@ -47,8 +47,8 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // but destination might be a complex ADT).
                 let is_never_source = match rvalue {
                     Rvalue::Use(Operand::Copy(src_place)) | Rvalue::Use(Operand::Move(src_place)) => {
-                        let src_ty = &body.locals[src_place.local.index() as usize].ty;
-                        let src_effective_ty = self.compute_place_type(src_ty, &src_place.projection);
+                        let src_ty = self.get_place_base_type(src_place, body)?;
+                        let src_effective_ty = self.compute_place_type(&src_ty, &src_place.projection);
                         matches!(src_effective_ty.kind(), TypeKind::Never)
                     }
                     _ => false,
@@ -69,9 +69,16 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     rvalue,
                     body,
                     escape_results,
-                    Some(place.local),
+                    place.as_local(),
                 )?;
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
+
+                // Debug: trace assignment
+                if std::env::var("BLOOD_DEBUG_ASSIGN").is_ok() {
+                    eprintln!("[Assign] rvalue: {:?}", rvalue);
+                    eprintln!("[Assign] value type: {:?}", value.get_type().print_to_string());
+                    eprintln!("[Assign] dest ptr elem type: {:?}", ptr.get_type().get_element_type().print_to_string());
+                }
 
                 // Convert value to match destination type if needed
                 let converted_value = self.convert_value_for_store(value, ptr, stmt.span)?;
@@ -167,7 +174,7 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 let ptr = self.compile_mir_place(place, body, escape_results)?;
 
                 // Get the type to determine size
-                let place_ty = &body.locals[place.local.index as usize].ty;
+                let place_ty = &body.locals[place.local_unchecked().index as usize].ty;
                 let llvm_ty = self.lower_type(place_ty);
                 let size = llvm_ty.size_of()
                     .map(|s| s.const_cast(self.context.i64_type(), false))
@@ -263,9 +270,8 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // Check if generation validation can be skipped based on escape analysis.
                 // For stack-allocated values (NoEscape), generation checks are unnecessary
                 // because the reference is guaranteed valid within the scope.
-                let should_skip = if let Some(results) = escape_results {
-                    // Get the base local from the place
-                    let local = ptr.local;
+                // Static places never need generation checks.
+                let should_skip = ptr.is_static() || if let (Some(results), Some(local)) = (escape_results, ptr.as_local()) {
                     // Check if this local is stack-promotable (NoEscape and not effect-captured)
                     results.stack_promotable.contains(&local)
                 } else {
@@ -360,9 +366,12 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
                 // Get the state pointer from state_place
                 // state_place is a simple local (no projections), so we look it up directly
-                let state_ptr = *self.locals.get(&state_place.local).ok_or_else(|| {
+                let state_local = state_place.as_local().ok_or_else(|| {
+                    vec![Diagnostic::error("Handler state must be a local", stmt.span)]
+                })?;
+                let state_ptr = *self.locals.get(&state_local).ok_or_else(|| {
                     vec![Diagnostic::error(
-                        format!("Local _{} not found for handler state", state_place.local.index),
+                        format!("Local _{} not found for handler state", state_local.index),
                         stmt.span,
                     )]
                 })?;
@@ -1092,7 +1101,8 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;
 
                 // Get destination type and convert i64 result if needed
-                let dest_ty = &body.locals[destination.local.index as usize].ty;
+                let dest_ty = self.get_place_base_type(destination, body)?;
+                let dest_ty = &dest_ty;
                 let dest_llvm_ty = self.lower_type(dest_ty);
 
                 let converted_result = if dest_llvm_ty.is_int_type() {

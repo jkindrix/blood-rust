@@ -118,7 +118,7 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
                 // Get the Blood type of the enum to determine its LLVM representation
                 // Must compute the type AFTER applying projections (e.g., Deref for &Option<T>)
-                let base_ty = &body.locals[place.local.index() as usize].ty;
+                let base_ty = &body.locals[place.local_unchecked().index() as usize].ty;
                 let place_ty = self.compute_place_type(base_ty, &place.projection);
                 let llvm_ty = self.lower_type(&place_ty);
 
@@ -406,7 +406,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // For slices, we load the length from the fat pointer (field 1 of slice struct)
 
         // Get the base type from the local
-        let base_ty = body.locals[place.local.index() as usize].ty.clone();
+        let base_ty = body.locals[place.local_unchecked().index() as usize].ty.clone();
 
         // Compute the effective type after applying projections
         let effective_ty = self.compute_place_type(&base_ty, &place.projection);
@@ -1287,11 +1287,21 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Check if we can use direct insertvalue (types match) or need alloca approach
                         let types_match = vals.iter().enumerate().all(|(i, val)| {
                             if let Some(field_ty) = struct_ty.get_field_type_at_index((i + 1) as u32) {
-                                val.get_type() == field_ty
+                                let matches = val.get_type() == field_ty;
+                                if std::env::var("BLOOD_DEBUG_ENUM").is_ok() {
+                                    eprintln!("[Enum] Field {}: val_ty={:?} field_ty={:?} matches={}",
+                                        i, val.get_type().print_to_string(), field_ty.print_to_string(), matches);
+                                }
+                                matches
                             } else {
                                 false
                             }
                         });
+
+                        if std::env::var("BLOOD_DEBUG_ENUM").is_ok() {
+                            eprintln!("[Enum] variant_index={}, types_match={}, vals.len()={}, struct_ty={:?}",
+                                variant_index, types_match, vals.len(), struct_ty.print_to_string());
+                        }
 
                         if types_match && !vals.is_empty() {
                             // Fast path: variant field types match struct field types
@@ -1827,7 +1837,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     pub(super) fn get_operand_type(&self, operand: &Operand, body: &MirBody) -> Type {
         match operand {
             Operand::Copy(place) | Operand::Move(place) => {
-                let base_ty = &body.locals[place.local.index() as usize].ty;
+                let base_ty = &body.locals[place.local_unchecked().index() as usize].ty;
                 if place.projection.is_empty() {
                     base_ty.clone()
                 } else {

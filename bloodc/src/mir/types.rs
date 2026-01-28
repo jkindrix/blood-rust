@@ -505,14 +505,23 @@ impl SwitchTargets {
 // Places and Operands
 // ============================================================================
 
+/// The base of a place - either a local variable or a static item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PlaceBase {
+    /// A local variable.
+    Local(LocalId),
+    /// A static item (global variable).
+    Static(DefId),
+}
+
 /// A place (memory location) that can be read or written.
 ///
 /// Based on [RFC 1211](https://rust-lang.github.io/rfcs/1211-mir.html):
 /// "Places represent paths to memory locations."
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Place {
-    /// The base local variable.
-    pub local: LocalId,
+    /// The base of the place (local or static).
+    pub base: PlaceBase,
     /// Projections applied to the base.
     pub projection: Vec<PlaceElem>,
 }
@@ -521,14 +530,25 @@ impl Place {
     /// Create a place from just a local.
     pub fn local(id: LocalId) -> Self {
         Self {
-            local: id,
+            base: PlaceBase::Local(id),
             projection: vec![],
         }
     }
 
-    /// Create a place with projections.
+    /// Create a place from a static.
+    pub fn static_item(def_id: DefId) -> Self {
+        Self {
+            base: PlaceBase::Static(def_id),
+            projection: vec![],
+        }
+    }
+
+    /// Create a place with projections from a local.
     pub fn projected(local: LocalId, projection: Vec<PlaceElem>) -> Self {
-        Self { local, projection }
+        Self {
+            base: PlaceBase::Local(local),
+            projection,
+        }
     }
 
     /// Add a projection element.
@@ -536,20 +556,45 @@ impl Place {
         let mut proj = self.projection.clone();
         proj.push(elem);
         Self {
-            local: self.local,
+            base: self.base.clone(),
             projection: proj,
         }
     }
 
     /// Check if this is just a local (no projections).
     pub fn is_local(&self) -> bool {
-        self.projection.is_empty()
+        matches!(self.base, PlaceBase::Local(_)) && self.projection.is_empty()
+    }
+
+    /// Check if this is a static place.
+    pub fn is_static(&self) -> bool {
+        matches!(self.base, PlaceBase::Static(_))
+    }
+
+    /// Get the local ID if this is a local-based place.
+    pub fn as_local(&self) -> Option<LocalId> {
+        match self.base {
+            PlaceBase::Local(id) => Some(id),
+            PlaceBase::Static(_) => None,
+        }
+    }
+
+    /// Get the local ID, panicking if this is not a local-based place.
+    /// Use only when you're certain the place is local-based.
+    pub fn local_unchecked(&self) -> LocalId {
+        match self.base {
+            PlaceBase::Local(id) => id,
+            PlaceBase::Static(_) => panic!("called local_unchecked on a static place"),
+        }
     }
 }
 
 impl fmt::Display for Place {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "_{}", self.local.index)?;
+        match &self.base {
+            PlaceBase::Local(id) => write!(f, "_{}", id.index)?,
+            PlaceBase::Static(def_id) => write!(f, "static({:?})", def_id)?,
+        }
         for elem in &self.projection {
             match elem {
                 PlaceElem::Deref => write!(f, ".*")?,
@@ -881,7 +926,7 @@ mod tests {
     fn test_place_local() {
         let place = Place::local(LocalId::new(5));
         assert!(place.is_local());
-        assert_eq!(place.local.index, 5);
+        assert_eq!(place.local_unchecked().index, 5);
     }
 
     #[test]

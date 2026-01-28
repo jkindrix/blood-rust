@@ -655,13 +655,17 @@ impl EscapeAnalyzer {
     /// Collect closure capture information from an assignment.
     fn collect_closure_captures(&mut self, place: &Place, rvalue: &Rvalue) {
         if let Rvalue::Aggregate { kind: AggregateKind::Closure { .. }, operands } = rvalue {
-            let closure_local = place.local;
+            // Only track closure captures for local-based places
+            let Some(closure_local) = place.as_local() else { return };
             let mut captures = Vec::with_capacity(operands.len());
 
             for operand in operands {
                 if let Operand::Copy(p) | Operand::Move(p) = operand {
-                    captures.push(p.local);
-                    self.captured_by_closure.insert(p.local);
+                    // Only track local captures, not statics
+                    if let Some(local) = p.as_local() {
+                        captures.push(local);
+                        self.captured_by_closure.insert(local);
+                    }
                 }
             }
 
@@ -712,7 +716,10 @@ impl EscapeAnalyzer {
             }
             Rvalue::Ref { place: ref_place, .. } | Rvalue::AddressOf { place: ref_place, .. } => {
                 // Creating a reference: if the reference escapes, the referent escapes
-                changed |= self.update_state(ref_place.local, target_state);
+                // Only track escape state for locals, not statics
+                if let Some(local) = ref_place.as_local() {
+                    changed |= self.update_state(local, target_state);
+                }
             }
             Rvalue::BinaryOp { left, right, .. } | Rvalue::CheckedBinaryOp { left, right, .. } => {
                 changed |= self.propagate_to_operand(left, target_state);
@@ -773,8 +780,11 @@ impl EscapeAnalyzer {
                 // Effect operations may capture values
                 for arg in args {
                     if let Some(place) = arg.place() {
-                        self.effect_captured.insert(place.local);
-                        changed |= self.update_state(place.local, EscapeState::ArgEscape);
+                        // Only track locals, not statics
+                        if let Some(local) = place.as_local() {
+                            self.effect_captured.insert(local);
+                            changed |= self.update_state(local, EscapeState::ArgEscape);
+                        }
                     }
                 }
             }
@@ -798,7 +808,11 @@ impl EscapeAnalyzer {
 
     /// Get the escape state of a place.
     fn place_escape_state(&self, place: &Place) -> EscapeState {
-        let base_state = self.states.get(&place.local).copied().unwrap_or(EscapeState::NoEscape);
+        // Statics are global by definition
+        let Some(local) = place.as_local() else {
+            return EscapeState::GlobalEscape;
+        };
+        let base_state = self.states.get(&local).copied().unwrap_or(EscapeState::NoEscape);
 
         // If we're dereferencing, the target might have different escape properties
         for elem in &place.projection {
@@ -815,7 +829,12 @@ impl EscapeAnalyzer {
     fn propagate_to_operand(&mut self, operand: &Operand, state: EscapeState) -> bool {
         match operand {
             Operand::Copy(place) | Operand::Move(place) => {
-                self.update_state(place.local, state)
+                // Only track escape for locals
+                if let Some(local) = place.as_local() {
+                    self.update_state(local, state)
+                } else {
+                    false
+                }
             }
             Operand::Constant(_) => false,
         }

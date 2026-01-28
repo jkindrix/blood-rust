@@ -281,7 +281,7 @@ impl ClosureAnalyzer {
                 // Get the type of the captured value
                 let ty = match operand {
                     super::types::Operand::Copy(place) | super::types::Operand::Move(place) => {
-                        body.locals.get(place.local.index as usize)
+                        body.locals.get(place.local_unchecked().index as usize)
                             .map(|local| local.ty.clone())
                             .unwrap_or_else(Type::error)
                     }

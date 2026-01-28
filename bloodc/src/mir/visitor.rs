@@ -325,7 +325,10 @@ pub trait Visitor: Sized {
 
     /// Default implementation: visit place components.
     fn super_place(&mut self, place: &Place, context: PlaceContext, location: Location) {
-        self.visit_local(place.local, context, location);
+        // Only visit local if this is a local-based place (not a static)
+        if let Some(local) = place.as_local() {
+            self.visit_local(local, context, location);
+        }
         for elem in &place.projection {
             self.visit_projection_elem(elem, location);
         }

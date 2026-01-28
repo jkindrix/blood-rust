@@ -1408,9 +1408,11 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
 
                     // If init is a closure, propagate the Closure type to the target local
                     if let Operand::Copy(place) | Operand::Move(place) = &init_val {
-                        if let Some(temp_ty) = self.builder.get_local_type(place.local) {
-                            if matches!(temp_ty.kind(), TypeKind::Closure { .. }) {
-                                self.builder.set_local_type(mir_local, temp_ty.clone());
+                        if let Some(local_id) = place.as_local() {
+                            if let Some(temp_ty) = self.builder.get_local_type(local_id) {
+                                if matches!(temp_ty.kind(), TypeKind::Closure { .. }) {
+                                    self.builder.set_local_type(mir_local, temp_ty.clone());
+                                }
                             }
                         }
                     }
@@ -1581,7 +1583,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
         let index_op = self.lower_expr(index)?;
 
         let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-            p.local
+            p.local_unchecked()
         } else {
             let temp = self.new_temp(Type::u64(), span);
             self.push_assign(Place::local(temp), Rvalue::Use(index_op));
@@ -1794,7 +1796,7 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 let base_place = self.lower_place(base)?;
                 let index_op = self.lower_expr(index)?;
                 let index_local = if let Operand::Copy(p) | Operand::Move(p) = &index_op {
-                    p.local
+                    p.local_unchecked()
                 } else {
                     let temp = self.new_temp(Type::u64(), expr.span);
                     self.push_assign(Place::local(temp), Rvalue::Use(index_op));

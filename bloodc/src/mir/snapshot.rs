@@ -1012,16 +1012,24 @@ impl LivenessAnalysis {
                 StatementKind::Assign(place, rvalue) => {
                     // Collect uses from rvalue
                     Self::collect_rvalue_uses(rvalue, &mut uses);
-                    // Place is a def
-                    defs.insert(place.local);
+                    // Place is a def (only track locals, not statics)
+                    if let Some(local) = place.as_local() {
+                        defs.insert(local);
+                    }
                 }
                 StatementKind::Drop(place) | StatementKind::IncrementGeneration(place) => {
-                    uses.insert(place.local);
+                    if let Some(local) = place.as_local() {
+                        uses.insert(local);
+                    }
                 }
                 StatementKind::ValidateGeneration { ptr, expected_gen } => {
-                    uses.insert(ptr.local);
+                    if let Some(local) = ptr.as_local() {
+                        uses.insert(local);
+                    }
                     if let Operand::Copy(p) | Operand::Move(p) = expected_gen {
-                        uses.insert(p.local);
+                        if let Some(local) = p.as_local() {
+                            uses.insert(local);
+                        }
                     }
                 }
                 StatementKind::CaptureSnapshot(local) => {
@@ -1038,9 +1046,13 @@ impl LivenessAnalysis {
                     // body_result is used, state_place is used, destination is defined
                     Self::collect_operand_uses(body_result, &mut uses);
                     // state_place is used (read)
-                    uses.insert(state_place.local);
+                    if let Some(local) = state_place.as_local() {
+                        uses.insert(local);
+                    }
                     // destination is defined (written)
-                    defs.insert(destination.local);
+                    if let Some(local) = destination.as_local() {
+                        defs.insert(local);
+                    }
                 }
             }
         }
@@ -1058,7 +1070,9 @@ impl LivenessAnalysis {
         match rvalue {
             Rvalue::Use(op) => Self::collect_operand_uses(op, uses),
             Rvalue::Ref { place, .. } | Rvalue::AddressOf { place, .. } => {
-                uses.insert(place.local);
+                if let Some(local) = place.as_local() {
+                    uses.insert(local);
+                }
             }
             Rvalue::BinaryOp { left, right, .. } | Rvalue::CheckedBinaryOp { left, right, .. } => {
                 Self::collect_operand_uses(left, uses);
@@ -1073,7 +1087,9 @@ impl LivenessAnalysis {
                 }
             }
             Rvalue::Discriminant(place) | Rvalue::Len(place) | Rvalue::VecLen(place) | Rvalue::ReadGeneration(place) => {
-                uses.insert(place.local);
+                if let Some(local) = place.as_local() {
+                    uses.insert(local);
+                }
             }
             Rvalue::NullCheck(op) => {
                 Self::collect_operand_uses(op, uses);
@@ -1099,7 +1115,9 @@ impl LivenessAnalysis {
     /// Collect uses from an operand.
     fn collect_operand_uses(op: &Operand, uses: &mut HashSet<LocalId>) {
         if let Operand::Copy(place) | Operand::Move(place) = op {
-            uses.insert(place.local);
+            if let Some(local) = place.as_local() {
+                uses.insert(local);
+            }
         }
     }
 
@@ -1119,7 +1137,9 @@ impl LivenessAnalysis {
                 Self::collect_operand_uses(cond, uses);
             }
             TerminatorKind::DropAndReplace { place, value, .. } => {
-                uses.insert(place.local);
+                if let Some(local) = place.as_local() {
+                    uses.insert(local);
+                }
                 Self::collect_operand_uses(value, uses);
             }
             TerminatorKind::Perform { args, .. } => {
@@ -1134,7 +1154,9 @@ impl LivenessAnalysis {
                 // Resume with no value - no uses to collect
             }
             TerminatorKind::StaleReference { ptr, .. } => {
-                uses.insert(ptr.local);
+                if let Some(local) = ptr.as_local() {
+                    uses.insert(local);
+                }
             }
             // Terminators with no operand uses
             TerminatorKind::Goto { .. } => {
