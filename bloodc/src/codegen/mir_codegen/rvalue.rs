@@ -109,8 +109,9 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             Rvalue::Cast { operand, target_ty } => {
+                let source_ty = self.get_operand_type(operand, body);
                 let val = self.compile_mir_operand(operand, body, escape_results)?;
-                self.compile_mir_cast(val, target_ty)
+                self.compile_mir_cast(val, &source_ty, target_ty)
             }
 
             Rvalue::Discriminant(place) => {
@@ -1048,6 +1049,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     pub(super) fn compile_mir_cast(
         &mut self,
         val: BasicValueEnum<'ctx>,
+        source_ty: &Type,
         target_ty: &Type,
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         let target_llvm = self.lower_type(target_ty);
@@ -1061,19 +1063,20 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 if src_bits == dst_bits {
                     Ok(int_val.into())
                 } else if src_bits < dst_bits {
-                    // Extending: use zero-extend for bools (i1), sign-extend for other ints
-                    if src_bits == 1 {
-                        // Bool to larger int: zero extend
-                        let cast = self.builder.build_int_z_extend(int_val, int_ty, "zext")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM zext error: {}", e), Span::dummy()
-                            )])?;
-                        Ok(cast.into())
-                    } else {
-                        // Regular signed int: sign extend
+                    // Extending: choose sign-extend vs zero-extend based on source type signedness
+                    let is_signed = self.is_signed_type(source_ty);
+                    if is_signed {
+                        // Signed int: sign extend (i32 -> i64)
                         let cast = self.builder.build_int_s_extend(int_val, int_ty, "sext")
                             .map_err(|e| vec![Diagnostic::error(
                                 format!("LLVM sext error: {}", e), Span::dummy()
+                            )])?;
+                        Ok(cast.into())
+                    } else {
+                        // Unsigned int or bool: zero extend (u32 -> u64)
+                        let cast = self.builder.build_int_z_extend(int_val, int_ty, "zext")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM zext error: {}", e), Span::dummy()
                             )])?;
                         Ok(cast.into())
                     }

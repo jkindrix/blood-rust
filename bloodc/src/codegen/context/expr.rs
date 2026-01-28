@@ -1370,9 +1370,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let target_bits = target_int.get_bit_width();
 
                 let result = if target_bits > source_bits {
-                    // Extend
-                    self.builder.build_int_s_extend(int_val, target_int, "sext")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    // Extend: use sign-extend for signed types, zero-extend for unsigned
+                    let is_signed = matches!(expr.ty.kind(), TypeKind::Primitive(PrimitiveTy::Int(_)));
+                    if is_signed {
+                        self.builder.build_int_s_extend(int_val, target_int, "sext")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    } else {
+                        self.builder.build_int_z_extend(int_val, target_int, "zext")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    }
                 } else if target_bits < source_bits {
                     // Truncate
                     self.builder.build_int_truncate(int_val, target_int, "trunc")
