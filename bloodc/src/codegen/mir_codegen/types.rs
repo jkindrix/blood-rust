@@ -108,13 +108,17 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         match ty {
             BasicTypeEnum::IntType(int_ty) => {
                 let bits = int_ty.get_bit_width();
-                // i128 requires 16-byte alignment on x86-64 ABI
-                if bits == 128 {
-                    16
-                } else {
-                    // Alignment is min(size, 8) bytes for smaller types
-                    std::cmp::min((bits as u64 + 7) / 8, 8).max(1)
-                }
+                // LLVM 14's default x86_64 data layout does NOT include i128:128,
+                // so i128 has ABI alignment of 8 bytes (same as i64).
+                // We MUST match this because:
+                //   1. LLVM 14's C API resets the module data layout to the
+                //      TargetMachine's default during LLVMTargetMachineEmitToFile
+                //   2. GEP offsets are computed using the TargetMachine's layout
+                //   3. If we annotate loads/stores with align 16 but GEP computes
+                //      offset 8 for i128 in a struct, the actual address is only
+                //      8-byte aligned, causing SIGSEGV from aligned SSE/AVX moves
+                // Alignment is min(size, 8) bytes for all integer types.
+                std::cmp::min((bits as u64 + 7) / 8, 8).max(1)
             }
             BasicTypeEnum::FloatType(float_ty) => {
                 if float_ty == self.context.f32_type() {

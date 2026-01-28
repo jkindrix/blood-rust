@@ -92,13 +92,8 @@ impl<'ctx, 'a> MirTerminatorCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 format!("LLVM load error: {}", e), term.span
                             )])?;
                         // Set proper alignment for return value load.
-                        // Cap alignment at 8 for aggregates to avoid aligned vector instructions.
-                        let natural_alignment = self.get_type_alignment_for_value(ret_val);
-                        let alignment = if ret_val.is_struct_value() || ret_val.is_array_value() {
-                            natural_alignment.min(8)
-                        } else {
-                            natural_alignment
-                        };
+                        // Use natural alignment — allocas have correct alignment set.
+                        let alignment = self.get_type_alignment_for_value(ret_val);
                         if let Some(inst) = ret_val.as_instruction_value() {
                             let _ = inst.set_alignment(alignment);
                         }
@@ -161,13 +156,8 @@ impl<'ctx, 'a> MirTerminatorCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         format!("LLVM store error: {}", e), term.span
                     )])?;
                 // Set proper alignment for DropAndReplace store.
-                // Cap at 8 for aggregates to avoid aligned vector instructions.
-                let natural_alignment = self.get_type_alignment_for_value(new_val);
-                let alignment = if new_val.is_struct_value() || new_val.is_array_value() {
-                    natural_alignment.min(8)
-                } else {
-                    natural_alignment
-                };
+                // Use natural alignment — allocas have correct alignment set.
+                let alignment = self.get_type_alignment_for_value(new_val);
                 let _ = store_inst.set_alignment(alignment);
 
                 // Continue to target
@@ -326,9 +316,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), span
                                     )])?;
-                                // Cap store alignment at 8 to avoid aligned vector instructions
-                                let store_alignment = natural_alignment.min(8);
-                                let _ = store_inst.set_alignment(store_alignment);
+                                // Use natural alignment — alloca has correct alignment set.
+                                let _ = store_inst.set_alignment(natural_alignment);
                                 // Bitcast to expected pointer type if needed
                                 let expected_ptr_type = param_type.into_pointer_type();
                                 if alloca.get_type() != expected_ptr_type {
@@ -392,9 +381,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), span
                                     )])?;
-                                // Cap store alignment at 8 to avoid aligned vector instructions
-                                let store_alignment = natural_alignment.min(8);
-                                let _ = store_inst.set_alignment(store_alignment);
+                                // Use natural alignment — alloca has correct alignment set.
+                                let _ = store_inst.set_alignment(natural_alignment);
                                 let expected_ptr_type = param_type.into_pointer_type();
                                 if alloca.get_type() != expected_ptr_type {
                                     self.builder.build_pointer_cast(alloca, expected_ptr_type, "ptr_cast")
@@ -463,13 +451,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 format!("LLVM store error: {}", e), span
                             )])?;
                         // Set proper alignment for ptr_read result store.
-                        // Cap at 8 for aggregates to avoid aligned vector instructions.
-                        let natural_alignment = self.get_type_alignment_for_value(loaded_val);
-                        let alignment = if loaded_val.is_struct_value() || loaded_val.is_array_value() {
-                            natural_alignment.min(8)
-                        } else {
-                            natural_alignment
-                        };
+                        // Use natural alignment — memory is properly aligned.
+                        let alignment = self.get_type_alignment_for_value(loaded_val);
                         let _ = store_inst.set_alignment(alignment);
 
                         // Branch to continuation
@@ -639,9 +622,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         .map_err(|e| vec![Diagnostic::error(
                                             format!("LLVM store error: {}", e), span
                                         )])?;
-                                    // Cap store alignment at 8 to avoid aligned vector instructions
-                                    let store_alignment = natural_alignment.min(8);
-                                    let _ = store_inst.set_alignment(store_alignment);
+                                    // Use natural alignment — alloca has correct alignment set.
+                                    let _ = store_inst.set_alignment(natural_alignment);
                                     // Bitcast to expected pointer type (e.g., i8* for void*)
                                     let expected_ptr_type = param_type.into_pointer_type();
                                     if alloca.get_type() != expected_ptr_type {
@@ -1642,13 +1624,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     format!("LLVM store error: {}", e), span
                                 )])?;
                             // Set proper alignment for output buffer result store.
-                            // Cap at 8 for aggregates to avoid aligned vector instructions.
-                            let natural_alignment = self.get_type_alignment_for_value(converted_result);
-                            let alignment = if converted_result.is_struct_value() || converted_result.is_array_value() {
-                                natural_alignment.min(8)
-                            } else {
-                                natural_alignment
-                            };
+                            // Use natural alignment — memory is properly aligned.
+                            let alignment = self.get_type_alignment_for_value(converted_result);
                             let _ = store_inst.set_alignment(alignment);
 
                             // Branch to continuation
@@ -1892,15 +1869,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 .map_err(|e| vec![Diagnostic::error(
                     format!("LLVM store error: {}", e), span
                 )])?;
-            // Set proper alignment based on the value type to avoid LLVM optimization issues
-            // with pointers created via inttoptr (which don't carry alignment info).
-            // Cap at 8 for aggregates to avoid aligned vector instructions.
-            let natural_alignment = self.get_type_alignment_for_value(converted_val);
-            let alignment = if converted_val.is_struct_value() || converted_val.is_array_value() {
-                natural_alignment.min(8)
-            } else {
-                natural_alignment
-            };
+            // Set proper alignment based on the value type.
+            // Use natural alignment — allocas and heap allocations are properly aligned.
+            let alignment = self.get_type_alignment_for_value(converted_val);
             let _ = store_inst.set_alignment(alignment);
         }
 
@@ -2355,13 +2326,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             let store_inst = self.builder.build_store(dest_ptr, converted_result)
                 .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), span)])?;
             // Set proper alignment for Perform result store.
-            // Cap at 8 for aggregates to avoid aligned vector instructions.
-            let natural_alignment = self.get_type_alignment_for_value(converted_result);
-            let alignment = if converted_result.is_struct_value() || converted_result.is_array_value() {
-                natural_alignment.min(8)
-            } else {
-                natural_alignment
-            };
+            // Use natural alignment — memory is properly aligned.
+            let alignment = self.get_type_alignment_for_value(converted_result);
             let _ = store_inst.set_alignment(alignment);
         }
 

@@ -1424,14 +1424,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM store error: {}", e), Span::dummy()
                                     )])?;
-                                // IMPORTANT: Cap alignment at 8 bytes for stores to enum_tmp alloca.
-                                // LLVM's stack frame allocator doesn't always respect `align 16` on allocas,
-                                // and using align 16 for i128 fields causes aligned vector instructions
-                                // (vmovaps) that crash if the actual address isn't 16-byte aligned.
-                                // Using align 8 forces scalar/unaligned instructions which work correctly.
-                                let natural_alignment = self.get_type_alignment_for_value(*val);
-                                let safe_alignment = natural_alignment.min(8);
-                                let _ = field_store.set_alignment(safe_alignment);
+                                // Set proper alignment for enum field store.
+                                // Use natural alignment — the alloca has correct alignment set.
+                                let alignment = self.get_type_alignment_for_value(*val);
+                                let _ = field_store.set_alignment(alignment);
                             }
 
                             // Load and return the full enum struct
@@ -1439,16 +1435,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM load error: {}", e), Span::dummy()
                                 )])?;
-                            // IMPORTANT: Use conservative alignment (8 bytes) for the aggregate load.
-                            // Although the type may require 16-byte alignment for i128 fields,
-                            // LLVM's stack frame allocator sometimes places allocas at 8-byte aligned
-                            // offsets despite the `align 16` attribute. Using align 16 here causes
-                            // LLVM to generate aligned vector instructions (vmovaps) that crash
-                            // if the actual address isn't 16-byte aligned.
-                            // Individual field stores already use proper alignment, so the data
-                            // is correctly laid out - we just need to avoid aligned aggregate ops.
+                            // Set proper alignment for the aggregate load.
+                            // Use natural alignment — the alloca has correct alignment set.
                             if let Some(inst) = result.as_instruction_value() {
-                                let _ = inst.set_alignment(8);
+                                let alignment = self.get_type_alignment_for_value(result);
+                                let _ = inst.set_alignment(alignment);
                             }
                             Ok(result)
                         }

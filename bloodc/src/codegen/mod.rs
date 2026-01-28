@@ -320,6 +320,27 @@ fn get_native_target_machine() -> Result<TargetMachine, String> {
     get_native_target_machine_with_opt(BloodOptLevel::Default)
 }
 
+/// Configure a module with the correct target data layout and triple.
+///
+/// Sets the module's data layout to match the TargetMachine's default.
+/// This ensures LLVM's struct layout (GEP offsets, sizeof) matches our
+/// alignment calculations during IR construction.
+fn configure_module_target(module: &Module, target_machine: &TargetMachine) {
+    // Set module data layout and triple from the TargetMachine.
+    //
+    // NOTE: We use the TargetMachine's default data layout WITHOUT modification.
+    // LLVM 14's default x86_64 data layout uses 8-byte ABI alignment for i128.
+    // We previously attempted to inject i128:128 (16-byte alignment) into the
+    // data layout string, but this is ineffective because LLVM 14's C API
+    // (LLVMTargetMachineEmitToFile) resets the module's data layout to the
+    // TargetMachine's default during code emission. Instead, all Blood codegen
+    // alignment calculations match LLVM 14's actual defaults.
+    let target_data = target_machine.get_target_data();
+    let data_layout = target_data.get_data_layout();
+    module.set_data_layout(&data_layout);
+    module.set_triple(&target_machine.get_triple());
+}
+
 /// Type alias for MIR bodies per function.
 pub type MirBodiesMap = HashMap<DefId, MirBody>;
 
@@ -344,6 +365,12 @@ pub fn compile_mir_to_object(
     let context = Context::create();
     let module = context.create_module("blood_program");
     let builder = context.create_builder();
+
+    // Configure module with target data layout BEFORE compilation.
+    // This is critical for correct type layout (e.g., i128 alignment).
+    let target_machine = get_native_target_machine_with_opt(BloodOptLevel::Default)
+        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
+    configure_module_target(&module, &target_machine);
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
@@ -397,11 +424,6 @@ pub fn compile_mir_to_object(
         optimize_module(&module, BloodOptLevel::Aggressive);
     }
 
-    // Get target machine with default optimization
-    // (we control passes via optimize_module_safe, so target machine level is less important)
-    let target_machine = get_native_target_machine_with_opt(BloodOptLevel::Default)
-        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
-
     // Write object file
     target_machine
         .write_to_file(&module, FileType::Object, output_path)
@@ -426,6 +448,11 @@ pub fn compile_mir_to_object_with_opt(
     let context = Context::create();
     let module = context.create_module("blood_program");
     let builder = context.create_builder();
+
+    // Configure module with target data layout BEFORE compilation.
+    let target_machine = get_native_target_machine_with_opt(opt_level)
+        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
+    configure_module_target(&module, &target_machine);
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
@@ -472,10 +499,6 @@ pub fn compile_mir_to_object_with_opt(
     // Run LLVM optimization passes
     optimize_module(&module, opt_level);
 
-    // Get target machine with matching optimization level
-    let target_machine = get_native_target_machine_with_opt(opt_level)
-        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
-
     // Write object file
     target_machine
         .write_to_file(&module, FileType::Object, output_path)
@@ -516,6 +539,11 @@ pub fn compile_definition_to_object(
     let module_name = format!("blood_def_{}", def_id.index());
     let module = context.create_module(&module_name);
     let builder = context.create_builder();
+
+    // Configure module with target data layout BEFORE compilation.
+    let target_machine = get_native_target_machine_with_opt(BloodOptLevel::Default)
+        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
+    configure_module_target(&module, &target_machine);
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
@@ -607,12 +635,7 @@ pub fn compile_definition_to_object(
         }
     }
 
-    // Get target machine with default optimization
-    // (we control passes via optimize_module_safe, so target machine level is less important)
-    let target_machine = get_native_target_machine_with_opt(BloodOptLevel::Default)
-        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
-
-    // Write object file
+    // Write object file (target_machine created earlier for data layout)
     target_machine
         .write_to_file(&module, FileType::Object, output_path)
         .map_err(|e| vec![Diagnostic::error(
@@ -642,6 +665,11 @@ pub fn compile_handler_registration_to_object(
     let module = context.create_module("blood_handler_registration");
     let builder = context.create_builder();
 
+    // Configure module with target data layout BEFORE compilation.
+    let target_machine = get_native_target_machine_with_opt(BloodOptLevel::Default)
+        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
+    configure_module_target(&module, &target_machine);
+
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
@@ -664,11 +692,6 @@ pub fn compile_handler_registration_to_object(
 
     // Run LLVM optimization passes
     optimize_module(&module, BloodOptLevel::Aggressive);
-
-    // Get target machine with default optimization
-    // (we control passes via optimize_module_safe, so target machine level is less important)
-    let target_machine = get_native_target_machine_with_opt(BloodOptLevel::Default)
-        .map_err(|e| vec![Diagnostic::error(e, crate::span::Span::dummy())])?;
 
     // Write object file
     target_machine
@@ -784,6 +807,11 @@ pub fn compile_mir_to_ir_with_opt(
     let context = Context::create();
     let module = context.create_module("blood_program");
     let builder = context.create_builder();
+
+    // Configure module with target data layout BEFORE compilation.
+    if let Ok(tm) = get_native_target_machine_with_opt(BloodOptLevel::Default) {
+        configure_module_target(&module, &tm);
+    }
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());

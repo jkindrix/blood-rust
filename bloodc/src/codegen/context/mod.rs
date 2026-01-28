@@ -1186,16 +1186,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
     /// Get the alignment of an LLVM type in bytes.
     fn get_type_alignment(&self, ty: BasicTypeEnum<'ctx>) -> u32 {
-        // Return conservative alignments based on type
+        // Return alignments matching LLVM 14's default x86_64 data layout.
+        // LLVM 14 uses 8-byte ABI alignment for i128 (no i128:128 in default layout).
+        // We MUST match this because LLVM 14's C API resets the module's data layout
+        // to the TargetMachine's default during code emission.
         match ty {
             BasicTypeEnum::IntType(int_ty) => {
                 let bits = int_ty.get_bit_width();
-                // i128 requires 16-byte alignment on x86-64 ABI
-                if bits == 128 {
-                    16
-                } else {
-                    std::cmp::min(bits / 8, 8).max(1)
-                }
+                std::cmp::min(bits / 8, 8).max(1)
             }
             BasicTypeEnum::FloatType(float_ty) => {
                 if float_ty == self.context.f32_type() {
