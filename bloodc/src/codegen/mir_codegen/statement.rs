@@ -79,8 +79,21 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM store error: {}", e), stmt.span
                     )])?;
-                // Set proper alignment for pointers created via inttoptr
-                let alignment = self.get_type_alignment_for_value(converted_value);
+                // Set proper alignment for the store.
+                // IMPORTANT: Cap alignment at 8 bytes for aggregate (struct/array) stores.
+                // Although the type may require 16-byte alignment for nested i128 fields,
+                // LLVM may generate aligned vector instructions (vmovaps) that crash if
+                // the actual address isn't 16-byte aligned. This can happen when:
+                // - The struct is stored through a Vec element pointer
+                // - The struct is a field of another struct with different alignment
+                // - Stack allocations don't respect requested alignment
+                // Using align 8 forces scalar/unaligned store instructions which work correctly.
+                let natural_alignment = self.get_type_alignment_for_value(converted_value);
+                let alignment = if converted_value.is_struct_value() || converted_value.is_array_value() {
+                    natural_alignment.min(8)
+                } else {
+                    natural_alignment
+                };
                 let _ = store_inst.set_alignment(alignment);
             }
 

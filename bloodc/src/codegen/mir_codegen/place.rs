@@ -1181,8 +1181,22 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 elem_ty.print_to_string(), load_inst.get_type().print_to_string());
         }
 
-        // Set proper alignment based on the loaded type
-        let alignment = self.get_type_alignment_for_value(load_inst);
+        // Set proper alignment based on the loaded type.
+        // IMPORTANT: Cap alignment at 8 bytes for aggregate (struct/array) loads.
+        // Although the type may require 16-byte alignment for nested i128 fields,
+        // LLVM may generate aligned vector instructions (vmovaps) that crash if
+        // the actual address isn't 16-byte aligned. This can happen when:
+        // - The struct is accessed through a Vec element pointer
+        // - The struct is a field of another struct with different alignment
+        // - Stack allocations don't respect requested alignment
+        // Using align 8 forces scalar/unaligned load instructions which work correctly.
+        // Individual field accesses still use proper alignment for their specific types.
+        let natural_alignment = self.get_type_alignment_for_value(load_inst);
+        let alignment = if load_inst.is_struct_value() || load_inst.is_array_value() {
+            natural_alignment.min(8)
+        } else {
+            natural_alignment
+        };
         if let Some(inst) = load_inst.as_instruction_value() {
             let _ = inst.set_alignment(alignment);
         }
