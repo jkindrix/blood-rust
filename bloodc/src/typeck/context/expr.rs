@@ -2789,7 +2789,7 @@ impl<'a> TypeContext<'a> {
             span,
         );
 
-        // Build receiver expression, auto-borrowing if needed
+        // Build receiver expression, auto-borrowing or auto-derefing if needed
         let final_receiver = if needs_auto_ref {
             // Get mutability from the first param type
             let mutable = if let Some(ref param_ty) = first_param {
@@ -2811,7 +2811,39 @@ impl<'a> TypeContext<'a> {
                 span,
             )
         } else {
-            receiver_expr
+            // Check if we need auto-deref: receiver is &T but method expects T (not &T)
+            // This happens when a method was found via auto-deref in resolve_method
+            let needs_auto_deref = if let TypeKind::Ref { inner: _, .. } = receiver_expr.ty.kind() {
+                if let Some(ref param_ty) = first_param {
+                    // Need auto-deref if first param is NOT a reference and matches the inner type
+                    !matches!(param_ty.kind(), TypeKind::Ref { .. })
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if needs_auto_deref {
+                // Insert a deref to convert &T to T
+                // Clone inner type before moving receiver_expr
+                let inner_ty = if let TypeKind::Ref { inner, .. } = receiver_expr.ty.kind() {
+                    Some(inner.clone())
+                } else {
+                    None
+                };
+                if let Some(derefed_ty) = inner_ty {
+                    hir::Expr::new(
+                        hir::ExprKind::Deref(Box::new(receiver_expr)),
+                        derefed_ty,
+                        span,
+                    )
+                } else {
+                    receiver_expr
+                }
+            } else {
+                receiver_expr
+            }
         };
 
         // Build args with receiver as first argument
