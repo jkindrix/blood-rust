@@ -1265,10 +1265,11 @@ impl<'a> TypeContext<'a> {
                     inclusive,
                 }
             }
-            hir::PatternKind::Binding { local_id, mutable, subpattern } => {
+            hir::PatternKind::Binding { local_id, mutable, by_ref, subpattern } => {
                 hir::PatternKind::Binding {
                     local_id,
                     mutable,
+                    by_ref,
                     subpattern: subpattern.map(|p| Box::new(Self::zonk_pattern_with_unifier(unifier, *p))),
                 }
             }

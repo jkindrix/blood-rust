@@ -1368,10 +1368,11 @@ fn hash_pattern(pattern: &hir::Pattern, items: &HashMap<DefId, hir::Item>, hashe
         hir::PatternKind::Wildcard => {
             hasher.update_u8(0x01);
         }
-        hir::PatternKind::Binding { local_id, mutable, subpattern } => {
+        hir::PatternKind::Binding { local_id, mutable, by_ref, subpattern } => {
             hasher.update_u8(0x02);
             hasher.update_u32(local_id.index);
             hasher.update_u8(if *mutable { 1 } else { 0 });
+            hasher.update_u8(if *by_ref { 1 } else { 0 });
             if let Some(sub) = subpattern {
                 hasher.update_u8(1);
                 hash_pattern(sub, items, hasher);

@@ -222,6 +222,7 @@ pub fn expand_enum(expander: &mut DeriveExpander, request: &DeriveRequest) {
                     kind: hir::PatternKind::Binding {
                         local_id: field_local_id,
                         mutable: false,
+                        by_ref: false,
                         subpattern: None,
                     },
                     ty: field.ty.clone(),

@@ -522,10 +522,12 @@ pub struct Pattern {
 pub enum PatternKind {
     /// Wildcard: `_`
     Wildcard,
-    /// Binding: `x` or `mut x`
+    /// Binding: `x` or `mut x` or `ref x`
     Binding {
         local_id: LocalId,
         mutable: bool,
+        /// Whether this is a `ref` binding (takes reference to the place)
+        by_ref: bool,
         /// Optional subpattern: `x @ pat`
         subpattern: Option<Box<Pattern>>,
     },

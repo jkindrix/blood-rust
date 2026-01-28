@@ -2338,17 +2338,28 @@ pub trait ExprLowering {
             PatternKind::Wildcard => {
                 // Nothing to bind
             }
-            PatternKind::Binding { local_id, mutable: _, subpattern } => {
+            PatternKind::Binding { local_id, mutable, by_ref, subpattern } => {
                 let mir_local = self.map_local(*local_id);
 
-                // Always copy the value from the place into the binding.
-                // Even if the pattern type is a reference (e.g., binding `x` where x: &T),
-                // we copy the reference VALUE from the place, not create a new reference.
-                // Ref patterns (like Rust's `ref x`) would need a separate PatternKind or flag.
-                self.push_assign(
-                    Place::local(mir_local),
-                    Rvalue::Use(Operand::Copy(place.clone())),
-                );
+                if *by_ref {
+                    // This is a `ref` binding (e.g., `ref x` or `ref mut x`).
+                    // Create a reference TO the place rather than copying from it.
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Ref {
+                            place: place.clone(),
+                            mutable: *mutable,
+                        },
+                    );
+                } else {
+                    // Regular binding - copy the value from the place.
+                    // Even if the pattern type is a reference (e.g., binding `x` where x: &T),
+                    // we copy the reference VALUE from the place, not create a new reference.
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Use(Operand::Copy(place.clone())),
+                    );
+                }
 
                 if let Some(sub) = subpattern {
                     self.bind_pattern(sub, &Place::local(mir_local))?;
@@ -2885,18 +2896,37 @@ pub trait ExprLowering {
     /// which is needed for proper pattern binding in match arms.
     fn bind_pattern_cf(&mut self, pattern: &Pattern, place: &Place) -> Result<(), Vec<Diagnostic>> {
         match &pattern.kind {
-            PatternKind::Binding { local_id, mutable: _, subpattern } => {
-                let mir_local = self.new_temp(pattern.ty.clone(), pattern.span);
+            PatternKind::Binding { local_id, mutable, by_ref, subpattern } => {
+                // For `ref` bindings, the local type is a reference to the pattern type.
+                // For regular bindings, the local type is the pattern type itself.
+                let local_ty = if *by_ref {
+                    Type::reference(pattern.ty.clone(), *mutable)
+                } else {
+                    pattern.ty.clone()
+                };
+
+                let mir_local = self.new_temp(local_ty, pattern.span);
                 self.local_map_mut().insert(*local_id, mir_local);
 
-                // Always copy the value from the place into the binding.
-                // Even if the pattern type is a reference (e.g., binding `x` where x: &T),
-                // we copy the reference VALUE from the place, not create a new reference.
-                // Ref patterns (like Rust's `ref x`) would need a separate PatternKind or flag.
-                self.push_assign(
-                    Place::local(mir_local),
-                    Rvalue::Use(Operand::Copy(place.clone())),
-                );
+                if *by_ref {
+                    // This is a `ref` binding (e.g., `ref x` or `ref mut x`).
+                    // Create a reference TO the place rather than copying from it.
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Ref {
+                            place: place.clone(),
+                            mutable: *mutable,
+                        },
+                    );
+                } else {
+                    // Regular binding - copy the value from the place.
+                    // Even if the pattern type is a reference (e.g., binding `x` where x: &T),
+                    // we copy the reference VALUE from the place, not create a new reference.
+                    self.push_assign(
+                        Place::local(mir_local),
+                        Rvalue::Use(Operand::Copy(place.clone())),
+                    );
+                }
 
                 if let Some(subpat) = subpattern {
                     self.bind_pattern_cf(subpat, &Place::local(mir_local))?;
@@ -3109,6 +3139,7 @@ mod tests {
         let pat = make_pattern(PatternKind::Binding {
             local_id: HirLocalId::new(1),
             mutable: false,
+            by_ref: false,
             subpattern: None,
         });
         assert!(is_irrefutable_pattern(&pat));
@@ -3118,6 +3149,7 @@ mod tests {
         let pat = make_pattern(PatternKind::Binding {
             local_id: HirLocalId::new(2),
             mutable: false,
+            by_ref: false,
             subpattern: Some(subpat),
         });
         assert!(is_irrefutable_pattern(&pat));
@@ -3127,6 +3159,7 @@ mod tests {
         let pat = make_pattern(PatternKind::Binding {
             local_id: HirLocalId::new(3),
             mutable: false,
+            by_ref: false,
             subpattern: Some(subpat),
         });
         assert!(!is_irrefutable_pattern(&pat));
@@ -3144,6 +3177,7 @@ mod tests {
             make_pattern(PatternKind::Binding {
                 local_id: HirLocalId::new(1),
                 mutable: false,
+                by_ref: false,
                 subpattern: None,
             }),
         ]));
@@ -3508,6 +3542,7 @@ mod tests {
             let pat = make_pattern(PatternKind::Binding {
                 local_id: HirLocalId::new(local_id),
                 mutable,
+                by_ref: false,
                 subpattern: None,
             });
             assert!(is_irrefutable_pattern(&pat), "Simple binding must be irrefutable");
@@ -3670,6 +3705,7 @@ mod tests {
                 make_pattern(PatternKind::Binding {
                     local_id: HirLocalId::new(1),
                     mutable: false,
+                    by_ref: false,
                     subpattern: None,
                 }),
             ],
@@ -3702,6 +3738,7 @@ mod tests {
         let irrefutable = make_pattern(PatternKind::Binding {
             local_id: HirLocalId::new(1),
             mutable: false,
+            by_ref: false,
             subpattern: Some(Box::new(make_pattern(PatternKind::Wildcard))),
         });
         assert!(is_irrefutable_pattern(&irrefutable), "Binding @ _ must be irrefutable");
@@ -3710,6 +3747,7 @@ mod tests {
         let refutable = make_pattern(PatternKind::Binding {
             local_id: HirLocalId::new(2),
             mutable: false,
+            by_ref: false,
             subpattern: Some(Box::new(make_pattern(PatternKind::Literal(LiteralValue::Int(0))))),
         });
         assert!(!is_irrefutable_pattern(&refutable), "Binding @ 0 must be refutable");

@@ -395,6 +395,7 @@ impl<'a> TypeContext<'a> {
                 hir::PatternKind::Binding {
                     local_id,
                     mutable: *mutable,
+                    by_ref: *by_ref,
                     subpattern: None,
                 }
             }
@@ -776,6 +777,7 @@ impl<'a> TypeContext<'a> {
                                 kind: hir::PatternKind::Binding {
                                     local_id,
                                     mutable: false,
+                                    by_ref: false,
                                     subpattern: None,
                                 },
                                 ty: field_ty,
@@ -870,6 +872,7 @@ impl<'a> TypeContext<'a> {
                             kind: hir::PatternKind::Binding {
                                 local_id,
                                 mutable: false,
+                                by_ref: false,
                                 subpattern: None,
                             },
                             ty: field_info.ty.clone(),
@@ -990,6 +993,7 @@ impl<'a> TypeContext<'a> {
                             kind: hir::PatternKind::Binding {
                                 local_id,
                                 mutable: *mutable,
+                                by_ref: *by_ref,
                                 subpattern: None,
                             },
                             ty: binding_ty,
