@@ -60,10 +60,10 @@
 //! |-------|-------------|--------|
 //! | 2.1 | Basic evidence passing | Complete |
 //! | 2.2 | Tail-resumptive optimization | Complete |
-//! | 2.3 | Segmented stack continuations | Pending |
-//! | 2.4 | Evidence fusion optimization | Pending |
-//! | 2.5 | Zero-overhead lexical handlers | Future |
-//! | 2.6 | Parallel effect handlers | Future |
+//! | 2.3 | Segmented stack continuations | Deferred — bootstrap compiler uses synchronous dispatch; full continuation capture requires self-hosted compiler |
+//! | 2.4 | Evidence fusion optimization | Deferred — self-hosted compiler optimization |
+//! | 2.5 | Zero-overhead lexical handlers | Deferred — self-hosted compiler optimization |
+//! | 2.6 | Parallel effect handlers | Deferred — self-hosted compiler feature |
 
 pub mod evidence;
 pub mod handler;

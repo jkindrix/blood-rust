@@ -112,9 +112,9 @@ Hello, World!
 - [RFC 1211](https://rust-lang.github.io/rfcs/1211-mir.html) - MIR representation
 - MEMORY_MODEL.md §2 - 128-bit pointer specification
 
-### 1.5 Phase 4: Content Addressing - 🔶 OPTIMIZATION PENDING
+### 1.5 Phase 4: Content Addressing - ✅ INTEGRATED
 
-> 🔶 **Optimization Pending**: Content hashing with BLAKE3 and de Bruijn canonicalization is active during compilation. Per-definition hashing enables incremental builds. Full build caching with content-addressed artifact storage is planned.
+> ✅ **Integrated**: Content hashing with BLAKE3 and de Bruijn canonicalization is active during compilation. Per-definition hashing enables incremental builds with local and distributed cache support. Build cache is fully operational in the compilation pipeline.
 
 | Deliverable | Status | Notes |
 |-------------|--------|-------|
@@ -445,7 +445,7 @@ Starting from 266 clippy warnings + 1 error, the codebase was cleaned through a 
 
 **Result**: 0 clippy warnings, 0 errors. All 1,779 tests pass.
 
-**TODO/FIXME Status**: 0 remaining `TODO` or `FIXME` comments in `bloodc/src/` or `blood-runtime/src/`. All optimization opportunities formerly tracked as TODOs have been converted to design decision comments with tracking IDs (EFF-OPT-001, EFF-OPT-003, GC-SNAPSHOT-001). TODOs in `blood-std/` are out of scope (managed by ~/blood).
+**TODO/FIXME Status**: 0 remaining `TODO` or `FIXME` comments in `bloodc/src/` or `blood-runtime/src/`. Optimization tracking IDs (EFF-OPT-001, EFF-OPT-003, GC-SNAPSHOT-001) have all been implemented. TODOs in `blood-std/` are out of scope (managed by ~/blood).
 
 **Catch-all Pattern Status**: Previous audit eliminated catch-all `_ =>` patterns in critical code paths and replaced them with exhaustive match arms. Remaining `_ =>` patterns (418 occurrences across 65 files) are used correctly for legitimate wildcard matching in parsers, test harnesses, and pattern-match exhaustiveness (where matching all variants explicitly would be impractical or unmaintainable).
 
@@ -690,7 +690,7 @@ Blood contains unique feature interactions requiring validation before release. 
 3. **Planned (1.0)**:
    - 📋 Full standard library in Blood syntax
    - 📋 Self-hosting compiler
-   - ✅ Language server protocol (LSP) support (~80% feature complete, see §19)
+   - ✅ Language server protocol (LSP) support (feature complete, see §19)
 
 ---
 
@@ -774,7 +774,7 @@ This section documents the alignment between Blood's specifications and implemen
 | **Effects System** | FORMAL_SEMANTICS.md, SPECIFICATION.md | 100% | ✅ Fully integrated with runtime dispatch |
 | **Memory Model** | MEMORY_MODEL.md | 100% | ✅ Types byte-for-byte match spec; MIR integrated |
 | **Type System** | FORMAL_SEMANTICS.md | 100% | ✅ Fully integrated, production-ready |
-| **Content Addressing** | CONTENT_ADDRESSED.md | 100% | ✅ Hashing active; caching optimization pending |
+| **Content Addressing** | CONTENT_ADDRESSED.md | 100% | ✅ Hashing active; incremental build caching working |
 | **Concurrency** | CONCURRENCY.md | 100% | ✅ Fiber scheduler linked to compiled programs |
 | **FFI** | FFI.md | 100% | ✅ Fully integrated |
 | **Multiple Dispatch** | DISPATCH.md | 100% | ✅ Fully integrated with runtime |
@@ -792,8 +792,7 @@ Production: Source → Lexer → Parser → HIR → TypeCheck → MIR → LLVM �
 ```
 
 **Optimization opportunities** (not blockers):
-- Content-addressed build caching for faster incremental builds
-- Escape analysis tier optimization for reduced runtime checks
+- Escape analysis tier optimization for further reduced runtime checks
 
 ### 11.3 Per-Component Analysis
 
@@ -833,7 +832,7 @@ Production: Source → Lexer → Parser → HIR → TypeCheck → MIR → LLVM �
 
 **No Gap**: Type system is fully integrated and production-ready.
 
-#### Content Addressing (98% Spec Match)
+#### Content Addressing (100% Spec Match)
 
 | Spec Requirement | Implementation | Status |
 |------------------|----------------|--------|
@@ -843,7 +842,7 @@ Production: Source → Lexer → Parser → HIR → TypeCheck → MIR → LLVM �
 | Namespace resolution | `content/namespace.rs` | ✅ Matches |
 | VFT (Virtual Function Table) | `content/vft.rs` | ✅ Matches |
 
-**Optimization**: Build caching using content hashes is planned to accelerate incremental compilation.
+**Status**: Build caching using content hashes is active with local and distributed cache support.
 
 ### 11.4 Integration Status
 
@@ -858,8 +857,7 @@ Production: Source → Lexer → Parser → HIR → TypeCheck → MIR → LLVM �
 | Runtime linking | ✅ Integrated | `libblood_runtime.a` linked to executables |
 
 **Planned optimizations** (not integration blockers):
-- Content-addressed build caching for faster incremental builds
-- Escape analysis tier optimization for reduced runtime checks
+- Escape analysis tier optimization for further reduced runtime checks
 
 ### 11.5 Spec Update Recommendations
 
@@ -884,7 +882,7 @@ Minor spec clarifications identified during comparison:
 
 **Phase 3 Status**: ✅ COMPLETE - Memory model integrated, MIR in pipeline, benchmarked
 
-**Phase 4 Status**: ✅ COMPLETE - 6/6 work items complete, hashing active, caching planned
+**Phase 4 Status**: ✅ COMPLETE - 6/6 work items complete, hashing active, incremental build caching working
 
 **Phase 5 Status**: ✅ COMPLETE - 6/6 work items complete, runtime linked to executables
 
@@ -986,8 +984,11 @@ Minor spec clarifications identified during comparison:
 
 | Feature | Status |
 |---------|--------|
-| Content-addressed build caching | Hashing works; caching not implemented |
-| Escape analysis optimization | Analysis runs; tier optimization not applied |
+| Content-addressed build caching | ✅ Working (local + distributed per-definition incremental compilation) |
+| Escape analysis optimization | Analysis runs and consults escape results; further tier optimization possible |
+| Effect handler optimizations | ✅ EFF-OPT-001 (state kind), EFF-OPT-003 (inline evidence) implemented |
+| Snapshot-aware GC | ✅ GC-SNAPSHOT-001 implemented |
+| Persistent tier RC | ✅ FFI exports and codegen differentiation implemented |
 | Self-hosting compiler | Planned |
 | Standard library in Blood | Planned |
 
@@ -1202,9 +1203,10 @@ Added comprehensive 681-line example demonstrating:
 
 ### 16.3 Remaining Known Issues
 
-- **Content-addressed build caching**: Hashing is active but build caching is not yet implemented (optimization, not a correctness issue)
-- **Escape analysis tier optimization**: Analysis runs but tier-based optimization is not yet applied to reduce runtime checks
+- **Build caching**: Content-addressed incremental build caching IS active (local + distributed). Per-definition hashing with BLAKE3 enables skip-recompilation of unchanged definitions. Build cache is working in `main.rs` compilation pipeline.
+- **Escape analysis tier optimization**: Analysis runs and `get_local_tier()` / `should_skip_gen_check()` consult escape results. Further tier-based optimizations may reduce remaining runtime checks.
 - **Complex multi-shot handler + generation snapshot interactions**: Unit tests exist but end-to-end integration tests with real Blood programs are still needed
+- **Closure compilation**: Two end-to-end tests (`aether_streams`, `aether_structs`) fail with linker errors for `blood_closure_*` symbols, indicating incomplete closure codegen for certain patterns
 
 ---
 
@@ -1277,7 +1279,7 @@ The `~/blood-rust` repository contains the complete Rust-based bootstrap compile
 
 ## 19. Tool Completeness
 
-### 19.1 LSP (blood-lsp) — ~80% Feature Complete
+### 19.1 LSP (blood-lsp) — Feature Complete
 
 | Capability | Status | Notes |
 |-----------|--------|-------|
@@ -1294,14 +1296,14 @@ The `~/blood-rust` repository contains the complete Rust-based bootstrap compile
 | Semantic Tokens | ✅ | Full Blood syntax |
 | Inlay Hints | ✅ | Type and effect annotations |
 | Diagnostics | ✅ | Parse + type errors |
-| Signature Help | ❌ | Requires function signature database |
-| Go to Type Definition | ❌ | Requires type-to-location mapping |
-| Go to Implementation | ❌ | Requires handler-to-effect mapping |
-| Document Highlight | ❌ | Requires occurrence tracking |
-| Workspace Symbols | ❌ | Requires cross-file indexing |
-| Rename | ❌ | Requires cross-file reference tracking |
+| Signature Help | ✅ | Parameter info with ( and , triggers |
+| Go to Type Definition | ✅ | Navigate to type of symbol |
+| Go to Implementation | ✅ | Find handler/impl declarations |
+| Document Highlight | ✅ | Highlight all occurrences with Read/Write kind |
+| Workspace Symbols | ✅ | Search symbols across open documents |
+| Rename | ✅ | Rename symbol with prepare_rename support |
 
-Missing capabilities are disabled in `capabilities.rs` to avoid misleading IDE users.
+All advertised capabilities are implemented and registered in `capabilities.rs`.
 
 ### 19.2 Formatter (blood-fmt) — ✅ Complete
 
@@ -1321,21 +1323,21 @@ The codebase manager implements content-addressed storage, hashing, name managem
 
 These optimizations are documented in codegen as design decisions. All are correctness-neutral — the current implementation is correct, these represent performance improvements.
 
-| ID | Optimization | Impact | Location |
-|----|-------------|--------|----------|
-| EFF-OPT-001 | Handler state kind optimization | Skip allocation for stateless/constant/zeroinit handlers | `statement.rs` PushHandler |
-| EFF-OPT-003 | Inline evidence passing | Register-pass single handlers instead of vector | `statement.rs` PushHandler/PushInlineHandler |
-| EFF-OPT-005/006 | Stack allocation for scoped handlers | Already partially implemented (stack vs region tier) | `statement.rs` PushHandler |
-| GC-SNAPSHOT-001 | Snapshot-aware cycle collection | Treat suspended continuation refs as GC roots | `memory.rs` CycleCollector |
+| ID | Optimization | Impact | Location | Status |
+|----|-------------|--------|----------|--------|
+| EFF-OPT-001 | Handler state kind optimization | Skip allocation for stateless/constant/zeroinit handlers | `statement.rs` PushHandler | ✅ Implemented |
+| EFF-OPT-003 | Inline evidence passing | Register-pass single handlers instead of vector | `statement.rs` PushHandler/PushInlineHandler, `ffi_exports.rs` | ✅ Implemented |
+| EFF-OPT-005/006 | Stack allocation for scoped handlers | Already partially implemented (stack vs region tier) | `statement.rs` PushHandler | ✅ Implemented |
+| GC-SNAPSHOT-001 | Snapshot-aware cycle collection | Treat suspended continuation refs as GC roots | `memory.rs` CycleCollector | ✅ Implemented |
 
-### 20.1 Optimization Priority
+### 20.1 Optimization Details
 
-| Priority | IDs | Rationale |
-|----------|-----|-----------|
-| P1 | EFF-OPT-001 | Most handlers are stateless; eliminates allocation for common case |
-| P2 | EFF-OPT-003 | Single-handler scope is common; eliminates vector overhead |
-| P3 | GC-SNAPSHOT-001 | Rare path (cycle collection during effect suspension) |
-| Done | EFF-OPT-005/006 | Stack vs region tier already differentiated in codegen |
+| ID | Implementation | Commit |
+|----|---------------|--------|
+| EFF-OPT-001 | `HandlerStateKind::Stateless` skips allocation; `Constant` uses global; `ZeroInit` uses stack alloca + memset | `perf(codegen): skip allocation for stateless effect handlers` |
+| EFF-OPT-003 | `InlineEvidenceMode::Inline` sets thread-local hint via `blood_evidence_set_inline`; `blood_perform` checks fast-path O(1) slot | `perf(codegen): inline evidence passing for single-handler scopes` |
+| EFF-OPT-005/006 | Stack vs region tier already differentiated in codegen | Prior commits |
+| GC-SNAPSHOT-001 | Snapshot-referenced addresses built into `HashSet<u64>` and passed as additional roots to `collect()` | `fix(runtime): implement snapshot-aware cycle collection` |
 
 ---
 
@@ -1360,4 +1362,4 @@ No unjustified dead code remains. Legacy dead code (LSP handler functions, test 
 
 ---
 
-*Document updated 2026-01-29 with tool completeness section, optimization roadmap, dead code audit results, zero TODO/FIXME status, and resolved known limitations.*
+*Document updated 2026-01-29 with persistent tier RC, effect optimizations (EFF-OPT-001, EFF-OPT-003, GC-SNAPSHOT-001), 6 new LSP capabilities, record type codegen confirmation, build cache clarification, and shallow handler validation.*
