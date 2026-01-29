@@ -260,7 +260,7 @@ pub(super) fn allocate_with_persistent_alloc_impl<'ctx, 'a>(
 
     // Calculate size and alignment of the type
     let type_size = ctx.get_type_size_in_bytes(llvm_ty);
-    let type_align = ctx.get_type_alignment_for_size(llvm_ty) as u64;
+    let type_align = ctx.get_type_alignment_for_size(llvm_ty);
     let size_val = i64_ty.const_int(type_size, false);
     let align_val = i64_ty.const_int(type_align, false);
     let type_fp = i32_ty.const_int(0, false); // Type fingerprint (0 = unknown)
