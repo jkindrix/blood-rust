@@ -1249,13 +1249,19 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             let def_hash = if let Some(item) = hir_crate.items.get(&def_id) {
                 hash_hir_item(def_id, item, &hir_crate.bodies, &hir_crate.items, Some(&args.file))
             } else {
-                // Synthetic definition (closure) - hash based on MIR and source file
+                // Synthetic definition (closure) - hash based on MIR content and source file
                 let mut hasher = ContentHasher::new();
                 // Include source file path to prevent cross-file cache collisions
                 if let Some(path_str) = args.file.to_str() {
                     hasher.update(path_str.as_bytes());
                 }
+                // Include DefId for symbol name consistency (deterministic after
+                // sorting HIR items in lower_crate), plus MIR body characteristics
+                // for content-addressability
                 hasher.update(format!("closure_{}", def_id.index()).as_bytes());
+                hasher.update(&mir_body.locals.len().to_le_bytes());
+                hasher.update(&mir_body.basic_blocks.len().to_le_bytes());
+                hasher.update(&mir_body.param_count.to_le_bytes());
                 hasher.finalize()
             };
 

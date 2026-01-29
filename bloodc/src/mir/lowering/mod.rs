@@ -143,7 +143,15 @@ impl<'hir> MirLowering<'hir> {
     /// - Inline handler bodies for codegen (try/with blocks)
     pub fn lower_crate(&mut self) -> Result<(HashMap<DefId, MirBody>, InlineHandlerBodies), Vec<Diagnostic>> {
         // First pass: lower all top-level functions
-        for (&def_id, item) in &self.hir.items {
+        // Sort by DefId for deterministic closure counter assignment.
+        // HashMap iteration is non-deterministic; since closures discovered during
+        // lowering get sequential synthetic DefIds from a shared counter, the
+        // iteration order determines which DefIds closures receive. Sorting ensures
+        // stable DefId assignment across runs, which is critical for incremental
+        // compilation (object files embed DefId-based symbol names).
+        let mut sorted_items: Vec<_> = self.hir.items.iter().collect();
+        sorted_items.sort_by_key(|(&def_id, _)| def_id.index());
+        for (&def_id, item) in sorted_items {
             match &item.kind {
                 ItemKind::Fn(fn_def) => {
                     if let Some(body_id) = fn_def.body_id {

@@ -2405,7 +2405,7 @@ pub unsafe extern "C" fn blood_perform(
         // Fast path: use the last entry in the evidence vector directly
         let ev = blood_evidence_current();
         if !ev.is_null() {
-            let vec = &*(ev as *const Vec<EvidenceEntry>);
+            let vec = &mut *(ev as *mut Vec<EvidenceEntry>);
             if let Some(ev_entry) = vec.last() {
                 let registry = get_effect_registry();
                 let reg = registry.lock();
@@ -2413,14 +2413,24 @@ pub unsafe extern "C" fn blood_perform(
                     if registry_entry.effect_id == effect_id {
                         if let Some(&op_fn) = registry_entry.operations.get(op_index as usize) {
                             if !op_fn.is_null() {
-                                let args_slice = if arg_count > 0 && !args.is_null() {
-                                    std::slice::from_raw_parts(args, arg_count as usize)
-                                } else {
-                                    &[]
-                                };
-                                let op_fn: fn(*mut c_void, &[i64], i64) -> i64 =
-                                    std::mem::transmute(op_fn);
-                                return op_fn(ev_entry.state, args_slice, continuation);
+                                let instance_state = ev_entry.state;
+                                drop(reg);
+
+                                // Temporarily remove handler entry to implement delimited
+                                // continuation semantics — prevents the handler from catching
+                                // effects it performs itself (e.g., forwarding to outer handler)
+                                let idx = vec.len() - 1;
+                                let removed_entry = vec.remove(idx);
+
+                                // Use extern "C" ABI matching compiled handler signatures
+                                type OpHandler = unsafe extern "C" fn(*mut c_void, *const i64, i64, i64) -> i64;
+                                let handler: OpHandler = std::mem::transmute(op_fn);
+                                let result = handler(instance_state, args, arg_count, continuation);
+
+                                // Restore the handler entry
+                                vec.insert(idx, removed_entry);
+
+                                return result;
                             }
                         }
                     }
