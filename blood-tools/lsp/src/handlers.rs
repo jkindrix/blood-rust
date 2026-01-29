@@ -141,56 +141,6 @@ impl InlayHintProvider {
             .sum()
     }
 
-    /// Checks for let bindings that could use type hints (legacy version).
-    #[allow(dead_code)]
-    fn check_let_binding(&self, line: &str, line_num: u32) -> Option<InlayHint> {
-        let trimmed = line.trim();
-
-        // Match "let name = " or "let mut name = " patterns
-        if let Some(after_let) = trimmed.strip_prefix("let ") {
-            let rest = after_let.strip_prefix("mut ").unwrap_or(after_let);
-
-            // Find the variable name
-            let name_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')?;
-            let _name = &rest[..name_end];
-
-            // Check if there's already a type annotation
-            let after_name = rest[name_end..].trim();
-            if after_name.starts_with(':') {
-                // Already has type annotation
-                return None;
-            }
-
-            if after_name.starts_with('=') {
-                // No type annotation, could add hint
-                let col = line.find("let ").unwrap() + 4;
-                let col = if line[col..].starts_with("mut ") {
-                    col + 4 + name_end
-                } else {
-                    col + name_end
-                };
-
-                return Some(InlayHint {
-                    position: Position {
-                        line: line_num,
-                        character: col as u32,
-                    },
-                    label: InlayHintLabel::String(": <inferred>".to_string()),
-                    kind: Some(InlayHintKind::TYPE),
-                    text_edits: None,
-                    tooltip: Some(InlayHintTooltip::String(
-                        "Type annotation can be added explicitly".to_string(),
-                    )),
-                    padding_left: Some(false),
-                    padding_right: Some(true),
-                    data: None,
-                });
-            }
-        }
-
-        None
-    }
-
     /// Checks function parameters for hints, using analysis data to get parameter names.
     fn check_function_params_with_analysis(
         &self,
@@ -336,31 +286,6 @@ impl InlayHintProvider {
         args
     }
 
-    /// Checks function parameters for hints (legacy version).
-    #[allow(dead_code)]
-    fn check_function_params(&self, line: &str, _line_num: u32) -> Option<Vec<InlayHint>> {
-        let trimmed = line.trim();
-
-        // Look for function calls with arguments
-        // Pattern: identifier(arg1, arg2, ...)
-        if let Some(paren_start) = trimmed.find('(') {
-            if paren_start > 0 {
-                let before_paren = &trimmed[..paren_start];
-
-                // Make sure it's a function call (ends with identifier)
-                if before_paren
-                    .chars()
-                    .last()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                {
-                    // Requires integration with bloodc
-                }
-            }
-        }
-
-        None
-    }
-
     /// Checks for missing effect annotations, using analysis to get real effect info.
     fn check_effect_annotation_with_analysis(
         &self,
@@ -449,41 +374,6 @@ impl InlayHintProvider {
         None
     }
 
-    /// Checks for missing effect annotations (legacy version).
-    #[allow(dead_code)]
-    fn check_effect_annotation(&self, line: &str, line_num: u32) -> Option<InlayHint> {
-        let trimmed = line.trim();
-
-        // Look for function definitions without effect annotations
-        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn "))
-            && !trimmed.contains(" / ") {
-                if let Some(arrow_pos) = trimmed.find("->") {
-                    let after_arrow = &trimmed[arrow_pos + 2..];
-                    if let Some(brace_pos) = after_arrow.find('{') {
-                        let insert_pos = arrow_pos + 2 + brace_pos;
-                        let col = line.find("fn ").unwrap() + insert_pos;
-
-                        return Some(InlayHint {
-                            position: Position {
-                                line: line_num,
-                                character: col as u32,
-                            },
-                            label: InlayHintLabel::String("/ pure".to_string()),
-                            kind: Some(InlayHintKind::TYPE),
-                            text_edits: None,
-                            tooltip: Some(InlayHintTooltip::String(
-                                "Inferred effect annotation".to_string(),
-                            )),
-                            padding_left: Some(true),
-                            padding_right: Some(true),
-                            data: None,
-                        });
-                    }
-                }
-            }
-
-        None
-    }
 }
 
 impl Default for InlayHintProvider {
