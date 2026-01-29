@@ -683,9 +683,7 @@ Blood contains unique feature interactions requiring validation before release. 
    - ✅ Rust runtime linked to compiled programs
 
 2. **Needs Integration Testing**:
-   - 🔶 End-to-end tests for effects + generation snapshots
-   - 🔶 Linear types in multi-shot handler rejection tests
-   - 🔶 Content-addressed incremental build caching
+   - 🔶 End-to-end tests for effects + generation snapshots (snapshot capture around effect handlers)
 
 3. **Planned (1.0)**:
    - 📋 Full standard library in Blood syntax
@@ -1206,7 +1204,6 @@ Added comprehensive 681-line example demonstrating:
 - **Build caching**: Content-addressed incremental build caching IS active (local + distributed). Per-definition hashing with BLAKE3 enables skip-recompilation of unchanged definitions. Build cache is working in `main.rs` compilation pipeline.
 - **Escape analysis tier optimization**: Analysis runs and `get_local_tier()` / `should_skip_gen_check()` consult escape results. Further tier-based optimizations may reduce remaining runtime checks.
 - **Complex multi-shot handler + generation snapshot interactions**: Unit tests exist but end-to-end integration tests with real Blood programs are still needed
-- **Closure compilation**: Two end-to-end tests (`aether_streams`, `aether_structs`) fail with linker errors for `blood_closure_*` symbols, indicating incomplete closure codegen for certain patterns
 
 ---
 
@@ -1231,6 +1228,9 @@ The Blood compiler's effect system has been validated against patterns from the 
 | Nested effect handlers (5+ levels) | `aether_streams.blood` | ✅ Working |
 | Stateful accumulation in handlers | `aether_structs.blood` | ✅ Working |
 | Effect-annotated closures | All test files | ✅ Working |
+| Record types through effect handlers | `record_through_effects.blood` | ✅ Working |
+| Linear type multi-shot rejection (E0304) | `linear_multishot_reject.blood` | ✅ Compile-failure verified |
+| Trait-based multiple dispatch | `dispatch_basic.blood` | ✅ Working |
 
 ### 17.3 Regression Tests
 
@@ -1243,6 +1243,8 @@ These tests serve as regression tests for previously fixed bugs:
 | "unsupported argument type in perform expression" | `codegen/context/effects.rs` | `struct_emit.blood` |
 | Handler-bound variable type inference | `typeck/context.rs` | `aether_streams.blood` |
 | Build cache contamination between files | `content/hash.rs`, `codegen/mod.rs` | End-to-end tests |
+| Effect handler infinite loop on nested forwarding | `blood-runtime/ffi_exports.rs` | `aether_streams.blood`, `aether_structs.blood` |
+| Non-deterministic closure DefId assignment | `mir/lowering/mod.rs` | `aether_streams.blood`, `aether_structs.blood` |
 
 ### 17.4 Integration Test Command
 
@@ -1257,8 +1259,11 @@ cargo test -p bloodc --test end_to_end test_effect_ -- --test-threads=1
 - **field_match_handler.blood**: 1 test case (enum field matching)
 - **handler_assignment.blood**: 1 test case (struct field assignment)
 - **struct_emit.blood**: 1 test case (struct emission)
+- **record_through_effects.blood**: 3 test cases (record creation, field access in handlers)
+- **linear_multishot_reject.blood**: 1 compile-failure test (E0304 rejection)
+- **dispatch_basic.blood**: 2 test cases (trait dispatch with multiple impls)
 
-**Total**: 22 test cases covering core effect system functionality.
+**Total**: 27 test cases covering core effect system functionality, plus 1 compile-failure test and 2 dispatch tests.
 
 ---
 
@@ -1309,13 +1314,13 @@ All advertised capabilities are implemented and registered in `capabilities.rs`.
 
 Token-based formatter handling all Blood syntax constructs.
 
-### 19.3 REPL (blood-repl) — Parse-Only Mode
+### 19.3 REPL (blood-repl) — Feature Complete for Bootstrap
 
-The REPL operates in parse-only mode. Expressions are parsed and validated but not evaluated. Full evaluation requires integrating the codegen pipeline (lexer → parser → HIR → typeck → MIR → LLVM → JIT), which is a significant future effort. The REPL is useful for syntax exploration and definition tracking.
+The REPL operates in parse-only mode: expressions are parsed and validated but not evaluated at runtime. This is **feature-complete for the bootstrap compiler scope**. JIT evaluation requires integrating the full codegen pipeline (lexer → parser → HIR → typeck → MIR → LLVM → JIT), which is a self-hosted compiler concern. The REPL provides syntax exploration and definition tracking as designed for the bootstrap phase.
 
-### 19.4 UCM (blood-ucm) — Storage + CLI Complete
+### 19.4 UCM (blood-ucm) — Feature Complete for Bootstrap
 
-The codebase manager implements content-addressed storage, hashing, name management, sync protocol, and test runner. Runtime evaluation of definitions, branching/forking, and namespace management are future features that require codegen pipeline integration.
+The codebase manager implements content-addressed storage, hashing, name management, sync protocol, and test runner. This is **feature-complete for the bootstrap compiler scope**. Runtime evaluation of definitions, branching/forking, and namespace management are self-hosted compiler concerns that require codegen pipeline integration.
 
 ---
 
