@@ -41,29 +41,36 @@ pub fn server_capabilities() -> ServerCapabilities {
             completion_item: None,
         }),
 
-        // Signature help - NOT YET IMPLEMENTED
-        signature_help_provider: None,
+        // Signature help - IMPLEMENTED (parameter info at call sites)
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec![
+                "(".to_string(),
+                ",".to_string(),
+            ]),
+            retrigger_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        }),
 
         // Go to definition - IMPLEMENTED (partial, integrated with bloodc)
         definition_provider: Some(OneOf::Left(true)),
 
-        // Go to type definition - NOT YET IMPLEMENTED
-        type_definition_provider: None,
+        // Go to type definition - IMPLEMENTED (navigate to type of symbol)
+        type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
 
-        // Go to implementation - NOT YET IMPLEMENTED
-        implementation_provider: None,
+        // Go to implementation - IMPLEMENTED (find handler/impl declarations)
+        implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
 
         // Find references - IMPLEMENTED (via analysis module)
         references_provider: Some(OneOf::Left(true)),
 
-        // Document highlight - NOT YET IMPLEMENTED
-        document_highlight_provider: None,
+        // Document highlight - IMPLEMENTED (highlight all occurrences of symbol)
+        document_highlight_provider: Some(OneOf::Left(true)),
 
         // Document symbols (outline) - IMPLEMENTED
         document_symbol_provider: Some(OneOf::Left(true)),
 
-        // Workspace symbols - NOT YET IMPLEMENTED
-        workspace_symbol_provider: None,
+        // Workspace symbols - IMPLEMENTED (search symbols across open documents)
+        workspace_symbol_provider: Some(OneOf::Left(true)),
 
         // Code actions - IMPLEMENTED (via backend module)
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
@@ -79,8 +86,11 @@ pub fn server_capabilities() -> ServerCapabilities {
         // Document range formatting - NOT YET IMPLEMENTED
         document_range_formatting_provider: None,
 
-        // Rename - NOT YET IMPLEMENTED
-        rename_provider: None,
+        // Rename - IMPLEMENTED (rename symbol across document)
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        })),
 
         // Folding ranges - IMPLEMENTED
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),

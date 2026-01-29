@@ -8,7 +8,11 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, info};
 
-use crate::analysis::{CompletionProvider, DefinitionProvider, HoverProvider, ReferencesProvider};
+use crate::analysis::{
+    CompletionProvider, DefinitionProvider, DocumentHighlightProvider, HoverProvider,
+    ImplementationProvider, ReferencesProvider, RenameProvider, SignatureHelpProvider,
+    TypeDefinitionProvider, WorkspaceSymbolProvider,
+};
 use crate::capabilities;
 use crate::diagnostics::DiagnosticEngine;
 use crate::document::Document;
@@ -32,6 +36,18 @@ pub struct BloodLanguageServer {
     references_provider: ReferencesProvider,
     /// Code completion provider.
     completion_provider: CompletionProvider,
+    /// Document highlight provider.
+    highlight_provider: DocumentHighlightProvider,
+    /// Go-to-type-definition provider.
+    type_definition_provider: TypeDefinitionProvider,
+    /// Signature help provider.
+    signature_help_provider: SignatureHelpProvider,
+    /// Rename provider.
+    rename_provider: RenameProvider,
+    /// Go-to-implementation provider.
+    implementation_provider: ImplementationProvider,
+    /// Workspace symbol provider.
+    workspace_symbol_provider: WorkspaceSymbolProvider,
 }
 
 impl BloodLanguageServer {
@@ -46,6 +62,12 @@ impl BloodLanguageServer {
             definition_provider: DefinitionProvider::new(),
             references_provider: ReferencesProvider::new(),
             completion_provider: CompletionProvider::new(),
+            highlight_provider: DocumentHighlightProvider::new(),
+            type_definition_provider: TypeDefinitionProvider::new(),
+            signature_help_provider: SignatureHelpProvider::new(),
+            rename_provider: RenameProvider::new(),
+            implementation_provider: ImplementationProvider::new(),
+            workspace_symbol_provider: WorkspaceSymbolProvider::new(),
         }
     }
 
@@ -364,6 +386,133 @@ impl LanguageServer for BloodLanguageServer {
             Ok(None)
         } else {
             Ok(Some(actions))
+        }
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        debug!("Document highlight at {} line {} char {}", uri, position.line, position.character);
+
+        let Some(doc) = self.documents.get(uri) else {
+            return Ok(None);
+        };
+
+        Ok(self.highlight_provider.highlights(&doc, position))
+    }
+
+    async fn goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        debug!("Go to type definition at {} line {} char {}", uri, position.line, position.character);
+
+        let Some(doc) = self.documents.get(uri) else {
+            return Ok(None);
+        };
+
+        if let Some(location) = self.type_definition_provider.type_definition(&doc, position) {
+            Ok(Some(GotoDefinitionResponse::Scalar(location)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        debug!("Signature help at {} line {} char {}", uri, position.line, position.character);
+
+        let Some(doc) = self.documents.get(uri) else {
+            return Ok(None);
+        };
+
+        Ok(self.signature_help_provider.signature_help(&doc, position))
+    }
+
+    async fn rename(
+        &self,
+        params: RenameParams,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = &params.new_name;
+
+        debug!("Rename at {} line {} char {} -> {}", uri, position.line, position.character, new_name);
+
+        let Some(doc) = self.documents.get(uri) else {
+            return Ok(None);
+        };
+
+        Ok(self.rename_provider.rename(&doc, position, new_name))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let position = params.position;
+
+        debug!("Prepare rename at {} line {} char {}", uri, position.line, position.character);
+
+        let Some(doc) = self.documents.get(uri) else {
+            return Ok(None);
+        };
+
+        Ok(self.rename_provider.prepare_rename(&doc, position))
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        debug!("Go to implementation at {} line {} char {}", uri, position.line, position.character);
+
+        let Some(doc) = self.documents.get(uri) else {
+            return Ok(None);
+        };
+
+        if let Some(locations) = self.implementation_provider.implementations(&doc, position) {
+            Ok(Some(GotoDefinitionResponse::Array(locations)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = &params.query;
+
+        debug!("Workspace symbol search: '{}'", query);
+
+        // Collect all open documents
+        let docs: Vec<(Url, Document)> = self.documents.iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        let results = self.workspace_symbol_provider.workspace_symbols(query, &docs);
+
+        if results.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(results))
         }
     }
 }

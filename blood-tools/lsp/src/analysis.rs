@@ -2621,3 +2621,632 @@ enum CompletionContext {
     /// After `with` keyword (for handler selection).
     WithHandler,
 }
+
+// ============================================================================
+// Document Highlight Provider
+// ============================================================================
+
+/// Provider for document highlight functionality.
+///
+/// Highlights all occurrences of the symbol under the cursor within
+/// the same document, classified as Read or Write access.
+pub struct DocumentHighlightProvider {
+    analyzer: SemanticAnalyzer,
+}
+
+impl DocumentHighlightProvider {
+    /// Creates a new document highlight provider.
+    pub fn new() -> Self {
+        Self {
+            analyzer: SemanticAnalyzer::new(),
+        }
+    }
+
+    /// Finds all highlights for the symbol at a position.
+    pub fn highlights(
+        &self,
+        doc: &Document,
+        position: Position,
+    ) -> Option<Vec<DocumentHighlight>> {
+        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
+        let offset = doc.position_to_offset(position)?;
+
+        // Find symbol at offset
+        let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
+        let symbol = analysis.symbols.get(*symbol_idx)?;
+
+        let mut highlights = Vec::new();
+
+        // Add the definition itself as a Write highlight
+        highlights.push(DocumentHighlight {
+            range: self.span_to_range(&symbol.def_span, &text),
+            kind: Some(DocumentHighlightKind::WRITE),
+        });
+
+        // Search for all occurrences of the symbol name in the document
+        let name = &symbol.name;
+        for (idx, _) in text.match_indices(name) {
+            if idx == symbol.def_span.start {
+                continue;
+            }
+
+            let before_char = if idx > 0 {
+                text.as_bytes().get(idx - 1).copied()
+            } else {
+                None
+            };
+            let after_char = text.as_bytes().get(idx + name.len()).copied();
+
+            let is_ident_char = |c: Option<u8>| -> bool {
+                c.map(|c| c.is_ascii_alphanumeric() || c == b'_').unwrap_or(false)
+            };
+
+            if !is_ident_char(before_char) && !is_ident_char(after_char) {
+                let pos = self.offset_to_position(idx, &text);
+                let span = Span::new(
+                    idx,
+                    idx + name.len(),
+                    pos.line + 1,
+                    pos.character + 1,
+                );
+                highlights.push(DocumentHighlight {
+                    range: self.span_to_range(&span, &text),
+                    kind: Some(DocumentHighlightKind::READ),
+                });
+            }
+        }
+
+        highlights.sort_by_key(|h| (h.range.start.line, h.range.start.character));
+        highlights.dedup_by(|a, b| {
+            a.range.start.line == b.range.start.line
+                && a.range.start.character == b.range.start.character
+        });
+
+        if highlights.is_empty() {
+            None
+        } else {
+            Some(highlights)
+        }
+    }
+
+    fn span_to_range(&self, span: &Span, text: &str) -> Range {
+        let start = self.offset_to_position(span.start, text);
+        let end = self.offset_to_position(span.end, text);
+        Range { start, end }
+    }
+
+    fn offset_to_position(&self, offset: usize, text: &str) -> Position {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        let mut current = 0;
+        for ch in text.chars() {
+            if current >= offset { break; }
+            if ch == '\n' { line += 1; col = 0; } else { col += 1; }
+            current += ch.len_utf8();
+        }
+        Position { line, character: col }
+    }
+}
+
+impl Default for DocumentHighlightProvider {
+    fn default() -> Self { Self::new() }
+}
+
+// ============================================================================
+// Type Definition Provider
+// ============================================================================
+
+/// Provider for go-to-type-definition functionality.
+///
+/// Resolves the symbol at the cursor, finds its type, then navigates
+/// to the type's definition location.
+pub struct TypeDefinitionProvider {
+    analyzer: SemanticAnalyzer,
+}
+
+impl TypeDefinitionProvider {
+    /// Creates a new type definition provider.
+    pub fn new() -> Self {
+        Self { analyzer: SemanticAnalyzer::new() }
+    }
+
+    /// Finds the type definition for the symbol at a position.
+    pub fn type_definition(
+        &self,
+        doc: &Document,
+        position: Position,
+    ) -> Option<Location> {
+        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
+        let offset = doc.position_to_offset(position)?;
+
+        let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
+        let symbol = analysis.symbols.get(*symbol_idx)?;
+
+        // Extract the type name from the symbol's description
+        let type_name = self.extract_type_name(&symbol.description)?;
+
+        // Search for a type-defining symbol with matching name
+        for sym in &analysis.symbols {
+            if sym.name == type_name && self.is_type_defining_symbol(sym.kind) {
+                return Some(Location {
+                    uri: doc.uri().clone(),
+                    range: self.span_to_range(&sym.def_span, &text),
+                });
+            }
+        }
+
+        None
+    }
+
+    fn extract_type_name(&self, description: &str) -> Option<String> {
+        // Try "let name: Type" or "param: Type" pattern
+        if let Some(colon_pos) = description.find(": ") {
+            let after_colon = &description[colon_pos + 2..];
+            let type_name: String = after_colon
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !type_name.is_empty() {
+                return Some(type_name);
+            }
+        }
+
+        // Try "-> ReturnType" pattern
+        if let Some(arrow_pos) = description.find("-> ") {
+            let after_arrow = &description[arrow_pos + 3..];
+            let type_name: String = after_arrow
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !type_name.is_empty() {
+                return Some(type_name);
+            }
+        }
+
+        None
+    }
+
+    fn is_type_defining_symbol(&self, kind: SymbolKind) -> bool {
+        matches!(kind, SymbolKind::STRUCT | SymbolKind::ENUM | SymbolKind::INTERFACE | SymbolKind::CLASS | SymbolKind::TYPE_PARAMETER)
+    }
+
+    fn span_to_range(&self, span: &Span, text: &str) -> Range {
+        let start = self.offset_to_position(span.start, text);
+        let end = self.offset_to_position(span.end, text);
+        Range { start, end }
+    }
+
+    fn offset_to_position(&self, offset: usize, text: &str) -> Position {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        let mut current = 0;
+        for ch in text.chars() {
+            if current >= offset { break; }
+            if ch == '\n' { line += 1; col = 0; } else { col += 1; }
+            current += ch.len_utf8();
+        }
+        Position { line, character: col }
+    }
+}
+
+impl Default for TypeDefinitionProvider {
+    fn default() -> Self { Self::new() }
+}
+
+// ============================================================================
+// Signature Help Provider
+// ============================================================================
+
+/// Provider for signature help functionality.
+///
+/// Shows parameter information when the user is typing function arguments.
+pub struct SignatureHelpProvider {
+    analyzer: SemanticAnalyzer,
+}
+
+impl SignatureHelpProvider {
+    /// Creates a new signature help provider.
+    pub fn new() -> Self {
+        Self { analyzer: SemanticAnalyzer::new() }
+    }
+
+    /// Provides signature help at a position.
+    pub fn signature_help(
+        &self,
+        doc: &Document,
+        position: Position,
+    ) -> Option<SignatureHelp> {
+        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
+        let offset = doc.position_to_offset(position)?;
+
+        // Walk backwards from cursor to find the opening '('
+        let text_before = &text[..offset];
+        let mut paren_depth = 0i32;
+        let mut fn_call_end = None;
+        let mut active_param: u32 = 0;
+
+        for (i, ch) in text_before.char_indices().rev() {
+            match ch {
+                ')' => paren_depth += 1,
+                '(' => {
+                    if paren_depth == 0 {
+                        fn_call_end = Some(i);
+                        break;
+                    }
+                    paren_depth -= 1;
+                }
+                ',' if paren_depth == 0 => active_param += 1,
+                _ => {}
+            }
+        }
+
+        let fn_call_end = fn_call_end?;
+
+        // Extract function name before '('
+        let before_paren = text_before[..fn_call_end].trim_end();
+        let fn_name: String = before_paren
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+
+        if fn_name.is_empty() {
+            return None;
+        }
+
+        // Find the function symbol
+        let fn_symbol = analysis.symbols.iter().find(|s| {
+            s.name == fn_name && s.kind == SymbolKind::FUNCTION
+        })?;
+
+        // Parse parameters from description
+        let params = self.extract_parameters(&fn_symbol.description);
+        let param_infos: Vec<ParameterInformation> = params.iter().map(|p| {
+            ParameterInformation {
+                label: ParameterLabel::Simple(p.clone()),
+                documentation: None,
+            }
+        }).collect();
+
+        let signature = SignatureInformation {
+            label: fn_symbol.description.clone(),
+            documentation: fn_symbol.doc.as_ref().map(|d| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d.clone(),
+                })
+            }),
+            parameters: Some(param_infos),
+            active_parameter: Some(active_param),
+        };
+
+        Some(SignatureHelp {
+            signatures: vec![signature],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        })
+    }
+
+    fn extract_parameters(&self, description: &str) -> Vec<String> {
+        let start = match description.find('(') {
+            Some(i) => i + 1,
+            None => return Vec::new(),
+        };
+
+        let mut depth = 1;
+        let mut end = start;
+        for (i, ch) in description[start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 { end = start + i; break; }
+                }
+                _ => {}
+            }
+        }
+
+        let params_str = &description[start..end];
+        if params_str.trim().is_empty() {
+            return Vec::new();
+        }
+
+        let mut params = Vec::new();
+        let mut current = String::new();
+        let mut bracket_depth = 0;
+
+        for ch in params_str.chars() {
+            match ch {
+                '(' | '<' | '[' | '{' => { bracket_depth += 1; current.push(ch); }
+                ')' | '>' | ']' | '}' => { bracket_depth -= 1; current.push(ch); }
+                ',' if bracket_depth == 0 => {
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() { params.push(trimmed); }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        let trimmed = current.trim().to_string();
+        if !trimmed.is_empty() { params.push(trimmed); }
+        params
+    }
+}
+
+impl Default for SignatureHelpProvider {
+    fn default() -> Self { Self::new() }
+}
+
+// ============================================================================
+// Rename Provider
+// ============================================================================
+
+/// Provider for rename functionality.
+///
+/// Renames a symbol across all its occurrences in the document.
+pub struct RenameProvider {
+    analyzer: SemanticAnalyzer,
+}
+
+impl RenameProvider {
+    /// Creates a new rename provider.
+    pub fn new() -> Self {
+        Self { analyzer: SemanticAnalyzer::new() }
+    }
+
+    /// Prepares a rename at the given position.
+    pub fn prepare_rename(
+        &self,
+        doc: &Document,
+        position: Position,
+    ) -> Option<PrepareRenameResponse> {
+        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
+        let offset = doc.position_to_offset(position)?;
+
+        let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
+        let symbol = analysis.symbols.get(*symbol_idx)?;
+        let range = self.span_to_range(&symbol.def_span, &text);
+
+        Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range,
+            placeholder: symbol.name.clone(),
+        })
+    }
+
+    /// Performs a rename of the symbol at the given position.
+    pub fn rename(
+        &self,
+        doc: &Document,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
+        let offset = doc.position_to_offset(position)?;
+
+        let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
+        let symbol = analysis.symbols.get(*symbol_idx)?;
+
+        let mut edits = Vec::new();
+        let name = &symbol.name;
+
+        // Add edit for the declaration
+        edits.push(TextEdit {
+            range: self.span_to_range(&symbol.def_span, &text),
+            new_text: new_name.to_string(),
+        });
+
+        // Add edits for all references
+        for (idx, _) in text.match_indices(name) {
+            if idx == symbol.def_span.start { continue; }
+
+            let before_char = if idx > 0 { text.as_bytes().get(idx - 1).copied() } else { None };
+            let after_char = text.as_bytes().get(idx + name.len()).copied();
+            let is_ident_char = |c: Option<u8>| -> bool {
+                c.map(|c| c.is_ascii_alphanumeric() || c == b'_').unwrap_or(false)
+            };
+
+            if !is_ident_char(before_char) && !is_ident_char(after_char) {
+                let pos = self.offset_to_position(idx, &text);
+                let span = Span::new(idx, idx + name.len(), pos.line + 1, pos.character + 1);
+                edits.push(TextEdit {
+                    range: self.span_to_range(&span, &text),
+                    new_text: new_name.to_string(),
+                });
+            }
+        }
+
+        edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+        edits.dedup_by(|a, b| a.range.start.line == b.range.start.line && a.range.start.character == b.range.start.character);
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(doc.uri().clone(), edits);
+
+        Some(WorkspaceEdit { changes: Some(changes), ..Default::default() })
+    }
+
+    fn span_to_range(&self, span: &Span, text: &str) -> Range {
+        let start = self.offset_to_position(span.start, text);
+        let end = self.offset_to_position(span.end, text);
+        Range { start, end }
+    }
+
+    fn offset_to_position(&self, offset: usize, text: &str) -> Position {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        let mut current = 0;
+        for ch in text.chars() {
+            if current >= offset { break; }
+            if ch == '\n' { line += 1; col = 0; } else { col += 1; }
+            current += ch.len_utf8();
+        }
+        Position { line, character: col }
+    }
+}
+
+impl Default for RenameProvider {
+    fn default() -> Self { Self::new() }
+}
+
+// ============================================================================
+// Implementation Provider
+// ============================================================================
+
+/// Provider for go-to-implementation functionality.
+///
+/// Maps effect definitions to their handler implementations,
+/// and trait definitions to their impl blocks.
+pub struct ImplementationProvider {
+    analyzer: SemanticAnalyzer,
+}
+
+impl ImplementationProvider {
+    /// Creates a new implementation provider.
+    pub fn new() -> Self {
+        Self { analyzer: SemanticAnalyzer::new() }
+    }
+
+    /// Finds implementations of the symbol at the given position.
+    pub fn implementations(
+        &self,
+        doc: &Document,
+        position: Position,
+    ) -> Option<Vec<Location>> {
+        let analysis = self.analyzer.analyze(doc)?;
+        let text = doc.text();
+        let offset = doc.position_to_offset(position)?;
+
+        let symbol_idx = analysis.symbol_at_offset.get(&offset)?;
+        let symbol = analysis.symbols.get(*symbol_idx)?;
+
+        let mut locations = Vec::new();
+
+        // For effects (INTERFACE) and traits (CLASS), find implementations
+        if symbol.kind == SymbolKind::INTERFACE || symbol.kind == SymbolKind::CLASS {
+            for sym in &analysis.symbols {
+                // Handlers reference the effect name in their description
+                if sym.description.contains(&symbol.name)
+                    && sym.def_span != symbol.def_span
+                    && (sym.kind == SymbolKind::CLASS
+                        || sym.description.contains("impl ")
+                        || sym.description.contains("handler "))
+                {
+                    locations.push(Location {
+                        uri: doc.uri().clone(),
+                        range: self.span_to_range(&sym.def_span, &text),
+                    });
+                }
+            }
+        }
+
+        locations.sort_by_key(|l| (l.range.start.line, l.range.start.character));
+        locations.dedup_by(|a, b| a.range.start.line == b.range.start.line && a.range.start.character == b.range.start.character);
+
+        if locations.is_empty() { None } else { Some(locations) }
+    }
+
+    fn span_to_range(&self, span: &Span, text: &str) -> Range {
+        let start = self.offset_to_position(span.start, text);
+        let end = self.offset_to_position(span.end, text);
+        Range { start, end }
+    }
+
+    fn offset_to_position(&self, offset: usize, text: &str) -> Position {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        let mut current = 0;
+        for ch in text.chars() {
+            if current >= offset { break; }
+            if ch == '\n' { line += 1; col = 0; } else { col += 1; }
+            current += ch.len_utf8();
+        }
+        Position { line, character: col }
+    }
+}
+
+impl Default for ImplementationProvider {
+    fn default() -> Self { Self::new() }
+}
+
+// ============================================================================
+// Workspace Symbol Provider
+// ============================================================================
+
+/// Provider for workspace symbol search.
+///
+/// Indexes symbols across all open documents and supports query filtering.
+pub struct WorkspaceSymbolProvider {
+    analyzer: SemanticAnalyzer,
+}
+
+impl WorkspaceSymbolProvider {
+    /// Creates a new workspace symbol provider.
+    pub fn new() -> Self {
+        Self { analyzer: SemanticAnalyzer::new() }
+    }
+
+    /// Searches for symbols matching the query across provided documents.
+    pub fn workspace_symbols(
+        &self,
+        query: &str,
+        documents: &[(Url, Document)],
+    ) -> Vec<SymbolInformation> {
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for (uri, doc) in documents {
+            if let Some(analysis) = self.analyzer.analyze(doc) {
+                let text = doc.text();
+
+                for symbol in &analysis.symbols {
+                    if !query.is_empty() && !symbol.name.to_lowercase().contains(&query_lower) {
+                        continue;
+                    }
+
+                    let range = self.span_to_range(&symbol.def_span, &text);
+
+                    #[allow(deprecated)]
+                    results.push(SymbolInformation {
+                        name: symbol.name.clone(),
+                        kind: symbol.kind,
+                        tags: None,
+                        deprecated: None,
+                        location: Location { uri: uri.clone(), range },
+                        container_name: None,
+                    });
+                }
+            }
+        }
+
+        results
+    }
+
+    fn span_to_range(&self, span: &Span, text: &str) -> Range {
+        let start = self.offset_to_position(span.start, text);
+        let end = self.offset_to_position(span.end, text);
+        Range { start, end }
+    }
+
+    fn offset_to_position(&self, offset: usize, text: &str) -> Position {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        let mut current = 0;
+        for ch in text.chars() {
+            if current >= offset { break; }
+            if ch == '\n' { line += 1; col = 0; } else { col += 1; }
+            current += ch.len_utf8();
+        }
+        Position { line, character: col }
+    }
+}
+
+impl Default for WorkspaceSymbolProvider {
+    fn default() -> Self { Self::new() }
+}
