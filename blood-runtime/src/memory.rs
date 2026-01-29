@@ -1441,6 +1441,22 @@ impl PersistentAllocator {
         &self.stats
     }
 
+    /// Find the slot ID that owns the given address.
+    ///
+    /// Iterates all active slots and returns the ID of the slot whose
+    /// value pointer matches the given address, if any.
+    pub fn find_slot_by_address(&self, address: usize) -> Option<u64> {
+        let slots = self.slots.read();
+        for (&id, slot) in slots.iter() {
+            // Safety: we only read the pointer value for comparison;
+            // the slot is alive because it is in the allocator map.
+            if unsafe { slot.value_ptr() } as usize == address {
+                return Some(id);
+            }
+        }
+        None
+    }
+
     /// Get the number of live slots.
     pub fn live_count(&self) -> usize {
         self.slots.read().len()
@@ -1618,17 +1634,22 @@ impl CycleCollector {
     /// addresses held by suspended effect handler continuations that
     /// must be treated as GC roots to prevent premature collection.
     pub fn collect_with_snapshot_roots(&self, snapshot_refs: &[(usize, Generation)]) -> usize {
-        // Design decision (GC-SNAPSHOT-001): Snapshot-aware cycle collection is deferred.
-        // The current implementation collects without snapshot awareness. A full
-        // implementation would maintain a reverse mapping from addresses to slot IDs
-        // and treat snapshot_refs as additional GC roots during cycle detection.
-        // This is safe because programs rarely invoke the cycle collector while effect
-        // handlers hold suspended continuations, and the warning alerts developers
-        // if this path is reached.
-        if !snapshot_refs.is_empty() {
-            eprintln!("warning: collect_with_snapshot_roots called with {} refs but snapshot-aware collection is not yet implemented", snapshot_refs.len());
+        if snapshot_refs.is_empty() {
+            return self.collect(&[]);
         }
-        self.collect(&[])
+
+        // Resolve snapshot addresses to slot IDs. Each snapshot ref is an
+        // (address, generation) pair from a suspended continuation. We look
+        // up which persistent slot owns each address and treat those slots
+        // as GC roots so they survive cycle collection.
+        let allocator = persistent_allocator();
+        let mut roots = Vec::new();
+        for &(address, _gen) in snapshot_refs {
+            if let Some(slot_id) = allocator.find_slot_by_address(address) {
+                roots.push(slot_id);
+            }
+        }
+        self.collect(&roots)
     }
 }
 
