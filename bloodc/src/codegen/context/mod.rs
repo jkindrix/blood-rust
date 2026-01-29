@@ -291,6 +291,7 @@ fn substitute_type_with_ctx(ty: &Type, ctx: &SubstContext) -> Type {
 /// Result of type inference containing both type and const param substitutions.
 struct InferResult {
     type_subst: HashMap<TyVarId, Type>,
+    #[allow(dead_code)] // Const generic substitution — will be used when const generics codegen is complete
     const_subst: HashMap<hir::ConstParamId, hir::ConstValue>,
 }
 

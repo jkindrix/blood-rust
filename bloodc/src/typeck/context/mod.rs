@@ -818,7 +818,7 @@ impl<'a> TypeContext<'a> {
                 } else {
                     // Has breaks - loop type is the unified break value type
                     // Start with the first break type and unify with all others
-                    let mut result_ty = break_types[0].clone();
+                    let result_ty = break_types[0].clone();
                     for ty in break_types.iter().skip(1) {
                         // Unify with dummy span - errors will be caught at break sites
                         let _ = self.unifier.unify(&result_ty, ty, Span::dummy());

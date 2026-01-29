@@ -162,7 +162,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Inner implementation of parse_expr_prec_with with struct literal control.
-    fn parse_expr_prec_with_inner(&mut self, mut left: Expr, min_prec: Precedence, no_struct: bool) -> Expr {
+    fn parse_expr_prec_with_inner(&mut self, left: Expr, min_prec: Precedence, no_struct: bool) -> Expr {
         self.parse_expr_prec_with_inner_opts(left, min_prec, no_struct, false)
     }
 
