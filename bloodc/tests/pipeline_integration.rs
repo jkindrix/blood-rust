@@ -420,19 +420,18 @@ fn test_parse_linear_types() {
     assert_eq!(program.declarations.len(), 2);
 }
 
-// Note: Region/lifetime syntax ('a) is not yet implemented in the parser.
-// This test is deferred until lifetime support is added.
-// #[test]
-// fn test_parse_region_annotations() {
-//     let source = r#"
-//         fn with_region<'a>(x: &'a i32) -> &'a i32 {
-//             x
-//         }
-//     "#;
-//     let mut parser = Parser::new(source);
-//     let program = parser.parse_program().expect("Failed to parse");
-//     assert_eq!(program.declarations.len(), 1);
-// }
+#[test]
+#[ignore = "region/lifetime syntax ('a) not yet implemented in parser"]
+fn test_parse_region_annotations() {
+    let source = r#"
+        fn with_region<'a>(x: &'a i32) -> &'a i32 {
+            x
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let program = parser.parse_program().expect("Failed to parse");
+    assert_eq!(program.declarations.len(), 1);
+}
 
 // ============================================================
 // Content-Addressed Code Integration Tests
@@ -505,23 +504,22 @@ fn test_parse_effect_annotations() {
     assert_eq!(program.declarations.len(), 3);
 }
 
-// Note: The perform statement parsing may have performance issues.
-// This test is disabled until the parser is optimized.
-// #[test]
-// fn test_parse_perform_resume() {
-//     let source = r#"
-//         effect Yield {
-//             op yield(value: i32) -> unit;
-//         }
-//
-//         fn generator() / {Yield} {
-//             perform yield(1)
-//         }
-//     "#;
-//     let mut parser = Parser::new(source);
-//     let program = parser.parse_program().expect("Failed to parse");
-//     assert_eq!(program.declarations.len(), 2);
-// }
+#[test]
+#[ignore = "yield is a reserved keyword — test needs updating to use a non-reserved operation name"]
+fn test_parse_perform_resume() {
+    let source = r#"
+        effect Yield {
+            op yield(value: i32) -> unit;
+        }
+
+        fn generator() / {Yield} {
+            perform yield(1)
+        }
+    "#;
+    let mut parser = Parser::new(source);
+    let program = parser.parse_program().expect("Failed to parse");
+    assert_eq!(program.declarations.len(), 2);
+}
 
 // ============================================================
 // Error Recovery Integration Tests
