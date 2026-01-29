@@ -1,27 +1,30 @@
-// Example: Record types with row polymorphism (planned feature)
+// Example: Record types with structural typing
 //
-// Record types with structural row polymorphism are a planned feature.
-// This file demonstrates the intended syntax for when the feature is
-// implemented. Currently, record type syntax is parsed but field access
-// and record literal construction are not yet available in codegen.
+// Blood supports anonymous record types with named fields.
+// Record types use structural typing — any record with the
+// required fields satisfies the type constraint.
 
-// A function that takes a record with an x field
-fn get_x(r: {x: i32}) -> i32 {
-    // Design decision: Record field access (r.x) requires codegen support
-    // for structural record types. Until implemented, return a placeholder.
-    42
+// A function that takes a record with x and y fields
+fn get_x(r: {x: i32, y: i32}) -> i32 {
+    r.x
 }
 
-// A function with row polymorphism - takes any record with x field
-// fn get_x_poly(r: {x: i32 | R}) -> i32 {
-//     r.x
-// }
+fn get_y(r: {x: i32, y: i32}) -> i32 {
+    r.y
+}
+
+fn sum_fields(r: {x: i32, y: i32}) -> i32 {
+    r.x + r.y
+}
 
 fn main() -> i32 {
-    // Design decision: Record literal syntax ({x: 10, y: 20}) requires
-    // codegen support for structural record construction. Until implemented,
-    // this example serves as a syntax reference for the intended feature.
-    // let point = {x: 10, y: 20};
-    // get_x(point)
-    0
+    let point = {x: 10, y: 20};
+
+    let x = get_x(point);
+    let y = get_y(point);
+    let sum = sum_fields(point);
+
+    // x = 10, y = 20, sum = 30
+    // Return sum as exit code for verification
+    sum
 }
