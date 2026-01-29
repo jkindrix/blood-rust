@@ -298,6 +298,20 @@ impl EffectLowering {
                     crate::hir::HandlerKind::Shallow => HandlerKind::Shallow,
                 };
 
+                // Validate shallow handlers cannot multi-resume
+                if handler_kind == HandlerKind::Shallow {
+                    for (op_impl, op_hir) in op_impls.iter().zip(operations.iter()) {
+                        if op_impl.resume_count > 1 {
+                            return Err(LoweringError::new(format!(
+                                "shallow handler cannot resume more than once \
+                                 (found {} resume calls in operation '{}'); \
+                                 use a deep handler for multi-shot semantics",
+                                op_impl.resume_count, op_hir.name
+                            )));
+                        }
+                    }
+                }
+
                 let info = HandlerInfo {
                     def_id: item.def_id,
                     name: item.name.clone(),
