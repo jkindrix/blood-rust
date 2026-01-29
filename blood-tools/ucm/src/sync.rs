@@ -190,7 +190,7 @@ impl<'a> SyncEngine<'a> {
                     .iter()
                     .find(|(h, _, _)| h == hash_str)
                 {
-                    let kind = DefKind::from_str(kind_str);
+                    let kind = DefKind::parse(kind_str)?;
                     plan.add(SyncOp::AddLocal(name, source.clone(), kind));
                 }
             }

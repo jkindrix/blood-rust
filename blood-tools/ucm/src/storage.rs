@@ -156,7 +156,11 @@ impl Storage {
                         "handler" => DefKind::Handler,
                         "test" => DefKind::Test,
                         "doc" => DefKind::Doc,
-                        _ => DefKind::Term,
+                        other => return Err(rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(StorageError::Other(format!("invalid DefKind in database: {}", other))),
+                        )),
                     };
                     Ok((kind, source))
                 },
@@ -427,7 +431,11 @@ impl Storage {
                 "handler" => DefKind::Handler,
                 "test" => DefKind::Test,
                 "doc" => DefKind::Doc,
-                _ => DefKind::Term,
+                other => return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(StorageError::Other(format!("invalid DefKind in database: {}", other))),
+                )),
             };
             Ok((Hash::from_bytes(arr), kind))
         })?;

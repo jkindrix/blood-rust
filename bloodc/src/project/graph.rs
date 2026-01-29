@@ -339,7 +339,10 @@ impl DependencyGraph {
     /// Try to load a dependency graph from a file, returning a new empty graph if the file doesn't exist.
     pub fn load_or_new(path: &Path) -> Self {
         if path.exists() {
-            Self::load(path).unwrap_or_default()
+            Self::load(path).unwrap_or_else(|e| {
+                eprintln!("warning: failed to load dependency graph from {}: {}; starting with empty graph", path.display(), e);
+                Self::new()
+            })
         } else {
             Self::new()
         }

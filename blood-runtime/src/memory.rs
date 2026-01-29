@@ -601,7 +601,7 @@ impl RegionStatus {
             0 => RegionStatus::Active,
             1 => RegionStatus::Suspended,
             2 => RegionStatus::PendingDeallocation,
-            _ => RegionStatus::Active, // Default fallback
+            _ => panic!("invalid RegionStatus value {}: expected 0 (Active), 1 (Suspended), or 2 (PendingDeallocation)", v),
         }
     }
 }
@@ -1614,11 +1614,17 @@ impl CycleCollector {
     /// Collect with roots extracted from suspended continuations.
     ///
     /// This is the primary entry point for cycle collection that
-    /// respects algebraic effect safety.
-    pub fn collect_with_snapshot_roots(&self, _snapshot_refs: &[(usize, Generation)]) -> usize {
-        // Convert snapshot addresses to slot IDs
-        // In a full implementation, we would maintain a reverse mapping
-        // For now, we collect without snapshot awareness
+    /// respects algebraic effect safety. Snapshot refs represent memory
+    /// addresses held by suspended effect handler continuations that
+    /// must be treated as GC roots to prevent premature collection.
+    pub fn collect_with_snapshot_roots(&self, snapshot_refs: &[(usize, Generation)]) -> usize {
+        // TODO(GC-SNAPSHOT-001): Implement snapshot-aware collection.
+        // Currently collects without snapshot awareness. A full implementation
+        // would maintain a reverse mapping from addresses to slot IDs and treat
+        // snapshot_refs as additional GC roots during cycle detection.
+        if !snapshot_refs.is_empty() {
+            eprintln!("warning: collect_with_snapshot_roots called with {} refs but snapshot-aware collection is not yet implemented", snapshot_refs.len());
+        }
         self.collect(&[])
     }
 }

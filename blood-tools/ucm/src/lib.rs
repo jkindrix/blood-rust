@@ -80,6 +80,9 @@ pub enum UcmError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Invalid definition kind: {0}")]
+    InvalidDefKind(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }
@@ -118,15 +121,15 @@ impl DefKind {
     }
 
     /// Parses a DefKind from a string.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Result<Self, UcmError> {
         match s {
-            "term" => DefKind::Term,
-            "type" => DefKind::Type,
-            "effect" => DefKind::Effect,
-            "handler" => DefKind::Handler,
-            "test" => DefKind::Test,
-            "doc" => DefKind::Doc,
-            _ => DefKind::Term, // Default fallback
+            "term" => Ok(DefKind::Term),
+            "type" => Ok(DefKind::Type),
+            "effect" => Ok(DefKind::Effect),
+            "handler" => Ok(DefKind::Handler),
+            "test" => Ok(DefKind::Test),
+            "doc" => Ok(DefKind::Doc),
+            _ => Err(UcmError::InvalidDefKind(s.to_string())),
         }
     }
 }

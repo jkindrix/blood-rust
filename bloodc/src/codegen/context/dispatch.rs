@@ -433,9 +433,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         vtable_global.set_constant(true);
         vtable_global.set_linkage(inkwell::module::Linkage::Private);
 
-        // Store for later lookup
-        let type_def_id = self.type_to_def_id(self_ty);
-        self.vtables.insert((trait_id, type_def_id), vtable_global);
+        // Store for later lookup — self_ty should always be an ADT in trait impl context
+        if let Some(type_def_id) = self.type_to_def_id(self_ty) {
+            self.vtables.insert((trait_id, type_def_id), vtable_global);
+        } else {
+            debug_assert!(false, "ICE: vtable generated for non-ADT type: {:?}", self_ty);
+        }
 
         Ok(())
     }
@@ -472,23 +475,53 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .collect();
                 format!("tuple_{}", parts.join("_"))
             }
-            _ => "unknown".to_string(),
+            TypeKind::Fn { params, ret, .. } => {
+                let parts: Vec<_> = params.iter()
+                    .map(|p| self.type_to_vtable_name(p))
+                    .collect();
+                format!("fn_{}_{}", parts.join("_"), self.type_to_vtable_name(ret))
+            }
+            TypeKind::Closure { def_id, .. } => format!("closure{}", def_id.index()),
+            TypeKind::Array { element, .. } => format!("array_{}", self.type_to_vtable_name(element)),
+            TypeKind::Slice { element } => format!("slice_{}", self.type_to_vtable_name(element)),
+            TypeKind::Ptr { inner, mutable } => {
+                let m = if *mutable { "mut_" } else { "const_" };
+                format!("{}ptr_{}", m, self.type_to_vtable_name(inner))
+            }
+            TypeKind::Never => "never".to_string(),
+            TypeKind::Range { element, inclusive } => {
+                let kind = if *inclusive { "rangeinc" } else { "range" };
+                format!("{}_{}", kind, self.type_to_vtable_name(element))
+            }
+            TypeKind::DynTrait { trait_id, .. } => format!("dyn{}", trait_id.index()),
+            TypeKind::Record { fields, .. } => {
+                let parts: Vec<_> = fields.iter()
+                    .map(|f| format!("{:?}_{}", f.name, self.type_to_vtable_name(&f.ty)))
+                    .collect();
+                format!("record_{}", parts.join("_"))
+            }
+            TypeKind::Forall { body, .. } => format!("forall_{}", self.type_to_vtable_name(body)),
+            TypeKind::Ownership { inner, .. } => self.type_to_vtable_name(inner),
+            // ICE: these types should not appear in vtable contexts
+            TypeKind::Infer(_) | TypeKind::Param(_) | TypeKind::Error => {
+                debug_assert!(false, "ICE: unexpected type in vtable naming: {:?}", ty.kind());
+                "error".to_string()
+            }
         }
     }
 
     /// Get the DefId for a type (for vtable lookup).
-    /// Returns a sentinel DefId for non-ADT types.
-    fn type_to_def_id(&self, ty: &Type) -> DefId {
+    /// Returns `None` for non-ADT types that have no DefId.
+    fn type_to_def_id(&self, ty: &Type) -> Option<DefId> {
         match ty.kind() {
-            TypeKind::Adt { def_id, .. } => *def_id,
-            // Use max value as sentinel for non-ADT types
-            _ => DefId::new(u32::MAX),
+            TypeKind::Adt { def_id, .. } => Some(*def_id),
+            _ => None,
         }
     }
 
     /// Look up a vtable for a (trait, type) pair.
     pub fn get_vtable(&self, trait_id: DefId, ty: &Type) -> Option<PointerValue<'ctx>> {
-        let type_def_id = self.type_to_def_id(ty);
+        let type_def_id = self.type_to_def_id(ty)?;
         self.vtables
             .get(&(trait_id, type_def_id))
             .map(|g| g.as_pointer_value())
