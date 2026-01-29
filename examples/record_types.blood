@@ -1,9 +1,14 @@
-// Test: Record types with row polymorphism
+// Example: Record types with row polymorphism (planned feature)
+//
+// Record types with structural row polymorphism are a planned feature.
+// This file demonstrates the intended syntax for when the feature is
+// implemented. Currently, record type syntax is parsed but field access
+// and record literal construction are not yet available in codegen.
 
 // A function that takes a record with an x field
 fn get_x(r: {x: i32}) -> i32 {
-    // TODO: field access not yet implemented
-    // For now, just return a value
+    // Design decision: Record field access (r.x) requires codegen support
+    // for structural record types. Until implemented, return a placeholder.
     42
 }
 
@@ -13,8 +18,9 @@ fn get_x(r: {x: i32}) -> i32 {
 // }
 
 fn main() -> i32 {
-    // Create a simple record
-    // TODO: record literal syntax not yet implemented
+    // Design decision: Record literal syntax ({x: 10, y: 20}) requires
+    // codegen support for structural record construction. Until implemented,
+    // this example serves as a syntax reference for the intended feature.
     // let point = {x: 10, y: 20};
     // get_x(point)
     0
