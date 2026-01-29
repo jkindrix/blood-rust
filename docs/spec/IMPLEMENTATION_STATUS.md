@@ -1228,6 +1228,8 @@ The Blood compiler's effect system has been validated against patterns from the 
 | Nested effect handlers (5+ levels) | `aether_streams.blood` | ✅ Working |
 | Stateful accumulation in handlers | `aether_structs.blood` | ✅ Working |
 | Effect-annotated closures | All test files | ✅ Working |
+| Primitive types as effect type parameters | `primitive_emit.blood` | ✅ Working |
+| Generic enum + effect unification | `option_effect_unify.blood` | ✅ Working |
 | Record types through effect handlers | `record_through_effects.blood` | ✅ Working |
 | Linear type multi-shot rejection (E0304) | `linear_multishot_reject.blood` | ✅ Compile-failure verified |
 | Trait-based multiple dispatch | `dispatch_basic.blood` | ✅ Working |
@@ -1245,6 +1247,8 @@ These tests serve as regression tests for previously fixed bugs:
 | Build cache contamination between files | `content/hash.rs`, `codegen/mod.rs` | End-to-end tests |
 | Effect handler infinite loop on nested forwarding | `blood-runtime/ffi_exports.rs` | `aether_streams.blood`, `aether_structs.blood` |
 | Non-deterministic closure DefId assignment | `mir/lowering/mod.rs` | `aether_streams.blood`, `aether_structs.blood` |
+| Primitive type effect parameter LLVM mismatch | `codegen/context/effects.rs` | `primitive_emit.blood` |
+| Generic enum + effect type unification | `typeck/context.rs` | `option_effect_unify.blood` |
 
 ### 17.4 Integration Test Command
 
@@ -1259,11 +1263,13 @@ cargo test -p bloodc --test end_to_end test_effect_ -- --test-threads=1
 - **field_match_handler.blood**: 1 test case (enum field matching)
 - **handler_assignment.blood**: 1 test case (struct field assignment)
 - **struct_emit.blood**: 1 test case (struct emission)
+- **primitive_emit.blood**: 1 test case (primitive type effect parameters)
+- **option_effect_unify.blood**: 1 test case (generic enum + effect unification)
 - **record_through_effects.blood**: 3 test cases (record creation, field access in handlers)
 - **linear_multishot_reject.blood**: 1 compile-failure test (E0304 rejection)
 - **dispatch_basic.blood**: 2 test cases (trait dispatch with multiple impls)
 
-**Total**: 27 test cases covering core effect system functionality, plus 1 compile-failure test and 2 dispatch tests.
+**Total**: 29 test cases covering core effect system functionality, plus 1 compile-failure test and 2 dispatch tests.
 
 ---
 
