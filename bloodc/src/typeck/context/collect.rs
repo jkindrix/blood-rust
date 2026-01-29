@@ -719,11 +719,11 @@ impl<'a> TypeContext<'a> {
 
     /// Collect a macro declaration.
     ///
-    /// Macros are expanded before type checking, so this just registers the macro
-    /// name in the current scope for later lookup during expansion.
+    /// Macros are expanded in a separate pre-typeck phase (macro_expand.rs).
+    /// The type checker does not need to register macros — this function exists
+    /// because the declaration visitor visits all declaration types. By the time
+    /// type checking runs, all macro calls have already been expanded in place.
     pub(crate) fn collect_macro(&mut self, _macro_decl: &ast::MacroDecl) -> Result<(), TypeError> {
-        // TODO: Register macro in macro namespace for expansion phase
-        // For now, macros are handled separately in the expansion phase
         Ok(())
     }
 

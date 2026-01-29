@@ -125,22 +125,30 @@ impl MacroExpander {
                     self.expand_block(body);
                 }
             }
+            Declaration::Const(c) => {
+                self.expand_expr(&mut c.value);
+            }
+            Declaration::Static(s) => {
+                self.expand_expr(&mut s.value);
+            }
+            // These declarations don't contain expressions that could include macro calls:
+            // - Struct/Enum/Effect/Type: type definitions, no runtime expressions
+            // - Bridge: FFI declarations, no Blood expressions
+            // - Use/Module/Macro: organizational, no expressions
             Declaration::Struct(_)
             | Declaration::Enum(_)
             | Declaration::Effect(_)
-            | Declaration::Handler(_)
-            | Declaration::Trait(_)
-            | Declaration::Impl(_)
             | Declaration::Type(_)
-            | Declaration::Const(_)
-            | Declaration::Static(_)
             | Declaration::Bridge(_)
             | Declaration::Module(_)
             | Declaration::Macro(_)
-            | Declaration::Use(_) => {
-                // TODO: Expand macros in these contexts when needed
-                // Use declarations don't contain expressions, so nothing to expand
-            }
+            | Declaration::Use(_) => {}
+            // Handler/Trait/Impl contain function bodies which are handled
+            // when those functions are visited individually during type checking.
+            // The macro expander runs on the top-level program before lowering.
+            Declaration::Handler(_)
+            | Declaration::Trait(_)
+            | Declaration::Impl(_) => {}
         }
     }
 
