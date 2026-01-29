@@ -53,8 +53,8 @@ pub fn server_capabilities() -> ServerCapabilities {
         // Go to implementation - NOT YET IMPLEMENTED
         implementation_provider: None,
 
-        // Find references - NOT YET IMPLEMENTED
-        references_provider: None,
+        // Find references - IMPLEMENTED (via analysis module)
+        references_provider: Some(OneOf::Left(true)),
 
         // Document highlight - NOT YET IMPLEMENTED
         document_highlight_provider: None,
@@ -65,17 +65,16 @@ pub fn server_capabilities() -> ServerCapabilities {
         // Workspace symbols - NOT YET IMPLEMENTED
         workspace_symbol_provider: None,
 
-        // Code actions - NOT YET IMPLEMENTED
-        code_action_provider: None,
+        // Code actions - IMPLEMENTED (via backend module)
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
 
         // Code lens - IMPLEMENTED (main, test, handler annotations)
         code_lens_provider: Some(CodeLensOptions {
             resolve_provider: Some(true),
         }),
 
-        // Document formatting - NOT YET IMPLEMENTED
-        // (blood-fmt exists but LSP integration not complete)
-        document_formatting_provider: None,
+        // Document formatting - IMPLEMENTED (via blood-fmt integration in backend)
+        document_formatting_provider: Some(OneOf::Left(true)),
 
         // Document range formatting - NOT YET IMPLEMENTED
         document_range_formatting_provider: None,

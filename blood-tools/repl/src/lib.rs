@@ -3,10 +3,16 @@
 //! The REPL provides an interactive way to explore the Blood language,
 //! test expressions, and learn about types and effects.
 //!
+//! # Current Limitations
+//!
+//! The REPL currently operates in **parse-only mode**. Expressions are parsed
+//! and validated but not evaluated. Full evaluation requires the codegen
+//! pipeline, which is not yet integrated into the REPL.
+//!
 //! # Features
 //!
-//! - Expression evaluation with type inference
-//! - Variable bindings persist across inputs
+//! - Expression parsing and validation
+//! - Variable binding tracking (parse-only)
 //! - Special commands (`:help`, `:type`, `:clear`, `:quit`)
 //! - Type information display
 //! - Parse and type error feedback
@@ -397,9 +403,8 @@ impl ReplSession {
                     }
                 }
 
-                // For expressions, we'd need to evaluate them
-                // For now, just confirm they parse
-                Ok(format!("{}", "()".dimmed()))
+                // Parse-only mode: evaluation not yet available
+                Ok(format!("{}", "(parsed, evaluation not yet available)".dimmed()))
             }
             Err(e) => {
                 Err(ReplError::ParseError(format!("{:?}", e)))

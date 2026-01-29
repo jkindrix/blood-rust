@@ -180,10 +180,14 @@ impl IoInterest {
 }
 
 /// A fiber's saved execution context.
+///
+/// This is a simplified representation for the initial runtime implementation.
+/// A production implementation would save all callee-saved registers per the
+/// platform ABI (e.g., rbx, rbp, r12-r15 on x86-64 System V). The current
+/// three-register model is sufficient for the cooperative scheduling model
+/// where fibers yield at known safe points.
 #[derive(Debug, Default)]
 pub struct FiberContext {
-    // Platform-specific saved registers would go here.
-    // For now, we use a simplified representation.
     /// Instruction pointer (program counter).
     pub ip: usize,
     /// Stack pointer.
