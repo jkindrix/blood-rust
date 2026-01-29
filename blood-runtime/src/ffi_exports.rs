@@ -2215,6 +2215,23 @@ thread_local! {
     static CURRENT_EVIDENCE: std::cell::RefCell<Option<EvidenceHandle>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Inline evidence entry for single-handler scopes (EFF-OPT-003).
+///
+/// When exactly one handler is in scope, we store its effect_id in a thread-local
+/// fast-path slot. The `blood_perform` function checks this slot first: if the
+/// effect_id matches, it knows the most-recently-pushed evidence entry is the
+/// correct handler, enabling O(1) dispatch instead of reverse-linear search.
+#[derive(Clone, Copy, Debug)]
+struct InlineEvidenceSlot {
+    /// Effect ID for matching.
+    effect_id: u64,
+}
+
+// Thread-local inline evidence slot for single-handler optimization.
+thread_local! {
+    static INLINE_EVIDENCE: std::cell::RefCell<Option<InlineEvidenceSlot>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Get or initialize the effect registry.
 fn get_effect_registry() -> &'static Mutex<Vec<EffectHandlerEntry>> {
     EFFECT_REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
@@ -2324,6 +2341,32 @@ pub extern "C" fn blood_evidence_set_current(ev: EvidenceHandle) {
     });
 }
 
+/// Set an inline evidence hint for single-handler scopes (EFF-OPT-003).
+///
+/// When a scope has exactly one handler, this stores the effect_id in a
+/// thread-local fast-path slot. The `blood_perform` function checks this
+/// slot first: if the effect_id matches, it uses the last entry in the
+/// evidence vector directly (O(1)) instead of searching (O(n)).
+///
+/// # Arguments
+/// * `effect_id` - The effect type ID to set as the inline hint
+#[no_mangle]
+pub extern "C" fn blood_evidence_set_inline(effect_id: u64) {
+    INLINE_EVIDENCE.with(|slot| {
+        *slot.borrow_mut() = Some(InlineEvidenceSlot { effect_id });
+    });
+}
+
+/// Clear the inline evidence slot.
+///
+/// Called when leaving a single-handler scope.
+#[no_mangle]
+pub extern "C" fn blood_evidence_clear_inline() {
+    INLINE_EVIDENCE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
 /// Perform an effect operation.
 ///
 /// Dispatches to the appropriate handler based on the effect_id and op_index.
@@ -2349,6 +2392,44 @@ pub unsafe extern "C" fn blood_perform(
     arg_count: i64,
     continuation: i64,
 ) -> i64 {
+    // EFF-OPT-003: Check inline evidence slot first (fast path for single-handler scopes).
+    // When the inline slot matches the effect_id, we know the last entry in the evidence
+    // vector is the correct handler. This avoids reverse-linear search through the vector.
+    let has_inline_hint = INLINE_EVIDENCE.with(|slot| {
+        slot.borrow()
+            .map(|entry| entry.effect_id == effect_id as u64)
+            .unwrap_or(false)
+    });
+
+    if has_inline_hint {
+        // Fast path: use the last entry in the evidence vector directly
+        let ev = blood_evidence_current();
+        if !ev.is_null() {
+            let vec = &*(ev as *const Vec<EvidenceEntry>);
+            if let Some(ev_entry) = vec.last() {
+                let registry = get_effect_registry();
+                let reg = registry.lock();
+                if let Some(registry_entry) = reg.get(ev_entry.registry_index as usize) {
+                    if registry_entry.effect_id == effect_id {
+                        if let Some(&op_fn) = registry_entry.operations.get(op_index as usize) {
+                            if !op_fn.is_null() {
+                                let args_slice = if arg_count > 0 && !args.is_null() {
+                                    std::slice::from_raw_parts(args, arg_count as usize)
+                                } else {
+                                    &[]
+                                };
+                                let op_fn: fn(*mut c_void, &[i64], i64) -> i64 =
+                                    std::mem::transmute(op_fn);
+                                return op_fn(ev_entry.state, args_slice, continuation);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Inline hint didn't resolve - fall through to normal path
+    }
+
     // Get current evidence vector
     let ev = blood_evidence_current();
     if ev.is_null() {

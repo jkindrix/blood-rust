@@ -380,12 +380,6 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // Currently all modes use the vector-based implementation. When Inline mode
                 // optimization is implemented, single-handler cases can skip the evidence
                 // vector entirely and pass the handler entry directly in registers/stack.
-                // EFF-OPT-003: Inline evidence mode determines evidence vector strategy.
-                // Inline mode optimization is implemented in Phase 4b via
-                // blood_evidence_set_inline for single-handler scopes.
-                // SpecializedPair and Vector modes use the standard vector path.
-                let _ = inline_mode; // Used by Phase 4b optimization
-
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
 
@@ -632,6 +626,29 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 ).map_err(|e| vec![Diagnostic::error(
                     format!("LLVM call error: {}", e), stmt.span
                 )])?;
+
+                // EFF-OPT-003: For single-handler scopes (InlineEvidenceMode::Inline),
+                // set the inline evidence hint for fast-path dispatch in blood_perform.
+                // The handler is still pushed onto the evidence vector for correctness,
+                // but blood_perform checks the inline hint first (O(1) vs O(n) search).
+                if *inline_mode == InlineEvidenceMode::Inline {
+                    let ev_set_inline = self.module.get_function("blood_evidence_set_inline")
+                        .unwrap_or_else(|| {
+                            let fn_type = self.context.void_type().fn_type(
+                                &[i64_ty.into()],
+                                false
+                            );
+                            self.module.add_function("blood_evidence_set_inline", fn_type, None)
+                        });
+
+                    self.builder.build_call(
+                        ev_set_inline,
+                        &[effect_id_val.into()],
+                        ""
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), stmt.span
+                    )])?;
+                }
             }
 
             StatementKind::PushInlineHandler { effect_id, operations, allocation_tier, inline_mode } => {
@@ -643,28 +660,13 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 //
                 // INLINE EVIDENCE MODE (EFF-OPT-003/004):
                 // The inline_mode parameter specifies the optimal evidence passing strategy:
-                // - Inline: Single handler, could pass directly without vector (optimization not yet implemented)
-                // - SpecializedPair: Two handlers, could use fixed-size pair (per spec, treated same as Vector)
-                // - Vector: Three or more handlers, must use heap-allocated vector
+                // - Inline: Single handler scope. The handler is pushed to the evidence vector
+                //   AND a thread-local inline hint is set for O(1) dispatch in blood_perform.
+                // - SpecializedPair: Two handlers, uses standard vector path (per spec).
+                // - Vector: Three or more handlers, uses heap-allocated vector.
                 //
-                // Currently all modes use the vector-based implementation. When Inline mode
-                // optimization is implemented, single-handler cases can skip the evidence
-                // vector entirely and pass the handler entry directly in registers/stack.
-                match inline_mode {
-                    InlineEvidenceMode::Inline => {
-                        // Design decision (EFF-OPT-003): Inline handlers currently use the
-                        // vector-based evidence path. A future optimization can pass the
-                        // handler entry directly in registers/stack for single-handler cases,
-                        // eliminating evidence vector overhead for inline try/with expressions.
-                    }
-                    InlineEvidenceMode::SpecializedPair => {
-                        // Per spec: "Currently treated same as Vector in codegen."
-                        // Future optimization opportunity for two-handler case.
-                    }
-                    InlineEvidenceMode::Vector => {
-                        // Standard vector-based evidence passing - this is the current implementation.
-                    }
-                }
+                // All modes push to the evidence vector for correctness. The Inline mode
+                // additionally calls blood_evidence_set_inline to enable fast-path dispatch.
 
                 let i64_ty = self.context.i64_type();
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
@@ -1047,6 +1049,30 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         format!("LLVM call error: {}", e), stmt.span
                     )])?;
                 }
+
+                // EFF-OPT-003: For single-handler scopes (InlineEvidenceMode::Inline),
+                // set the inline evidence hint for fast-path dispatch in blood_perform.
+                // The handler is still pushed onto the evidence vector for correctness,
+                // but blood_perform checks the inline hint first (O(1) vs O(n) search).
+                if *inline_mode == InlineEvidenceMode::Inline {
+                    let ev_set_inline = self.module.get_function("blood_evidence_set_inline")
+                        .unwrap_or_else(|| {
+                            let fn_type = self.context.void_type().fn_type(
+                                &[i64_ty.into()],
+                                false
+                            );
+                            self.module.add_function("blood_evidence_set_inline", fn_type, None)
+                        });
+
+                    let inline_effect_id_val = i64_ty.const_int(effect_id.index as u64, false);
+                    self.builder.build_call(
+                        ev_set_inline,
+                        &[inline_effect_id_val.into()],
+                        ""
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), stmt.span
+                    )])?;
+                }
             }
 
             StatementKind::PopHandler => {
@@ -1079,6 +1105,19 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
                 // Pop the handler
                 self.builder.build_call(ev_pop, &[ev.into()], "")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM call error: {}", e), stmt.span
+                    )])?;
+
+                // EFF-OPT-003: Clear inline evidence hint on handler pop.
+                // The hint was set by PushHandler/PushInlineHandler for Inline mode;
+                // clearing on pop ensures stale hints don't persist after scope exit.
+                let ev_clear_inline = self.module.get_function("blood_evidence_clear_inline")
+                    .unwrap_or_else(|| {
+                        let fn_type = self.context.void_type().fn_type(&[], false);
+                        self.module.add_function("blood_evidence_clear_inline", fn_type, None)
+                    });
+                self.builder.build_call(ev_clear_inline, &[], "")
                     .map_err(|e| vec![Diagnostic::error(
                         format!("LLVM call error: {}", e), stmt.span
                     )])?;
