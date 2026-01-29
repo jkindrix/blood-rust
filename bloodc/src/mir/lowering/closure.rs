@@ -46,7 +46,7 @@ pub struct ClosureLowering<'hir, 'ctx> {
     /// HIR body being lowered.
     body: &'hir Body,
     /// HIR crate for accessing nested closure bodies (reserved for future use).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Infrastructure for nested closure body access
     hir: &'hir HirCrate,
     /// Mapping from HIR locals to MIR locals.
     local_map: HashMap<LocalId, LocalId>,

@@ -176,7 +176,7 @@ impl Scheduler {
 /// Handle to a worker thread.
 struct WorkerHandle {
     /// Worker ID (reserved for debugging).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Worker ID — used for debugging and diagnostics
     id: usize,
     /// Local work deque.
     deque: Deque<FiberId>,
@@ -187,7 +187,7 @@ struct WorkerHandle {
 /// A worker thread in the scheduler.
 pub struct Worker {
     /// Worker ID (reserved for debugging and metrics).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Worker ID — used for debugging, metrics, and tracing
     id: usize,
     /// Global injection queue.
     global_queue: Arc<Injector<FiberId>>,

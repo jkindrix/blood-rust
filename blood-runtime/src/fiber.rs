@@ -276,7 +276,7 @@ pub struct Fiber {
     task: Option<Box<dyn FnOnce() + Send>>,
     /// Result value (if completed).
     /// Reserved for future use when fiber join returns results.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Fiber result field — used when fiber join is implemented
     result: Option<Box<dyn std::any::Any + Send>>,
 }
 

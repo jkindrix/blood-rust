@@ -14,8 +14,7 @@ use super::constraints::ConstraintChecker;
 /// Dispatch resolution context.
 pub struct DispatchResolver<'a> {
     /// Reference to the unifier for subtype checking.
-    /// Currently unused but will be used for constraint-based subtyping.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Infrastructure for constraint-based subtype dispatch
     unifier: &'a Unifier,
     /// Optional function to check if a type implements a trait.
     /// Required for `T <: dyn Trait` subtyping.

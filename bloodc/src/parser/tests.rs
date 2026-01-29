@@ -7,7 +7,7 @@ use super::*;
 use crate::ast::*;
 
 /// Helper to parse an expression and return it (for snapshot tests).
-#[allow(dead_code)]
+#[allow(dead_code)] // Test infrastructure — available for expression-level snapshot tests
 fn parse_expr(source: &str) -> Result<Expr, String> {
     let mut parser = Parser::new(source);
     // For expression parsing, we need to wrap in a function body

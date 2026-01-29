@@ -472,7 +472,7 @@ impl<'src> Parser<'src> {
         self.error_at(self.current.span, message, code);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Infrastructure for error reporting at previous token position
     fn error_at_previous(&mut self, message: &str, code: ErrorCode) {
         self.error_at(self.previous.span, message, code);
     }
@@ -593,7 +593,7 @@ impl<'src> Parser<'src> {
 
     /// Synchronize within a statement/expression context.
     /// Skips to semicolon, comma, or closing delimiter.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Infrastructure for fine-grained error recovery
     fn synchronize_local(&mut self) {
         self.panic_mode = false;
 

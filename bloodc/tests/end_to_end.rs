@@ -87,19 +87,6 @@ fn cleanup_test_cache(cache_dir: &Path) {
     }
 }
 
-/// Clear the Blood build cache (global).
-/// Note: Not used by tests that need isolation - they use create_test_cache() instead.
-#[allow(dead_code)]
-fn clear_cache() {
-    let cache_dir = dirs::home_dir()
-        .expect("No home directory")
-        .join(".blood/cache");
-
-    if cache_dir.exists() {
-        fs::remove_dir_all(&cache_dir).ok();
-    }
-}
-
 /// Clear object files for a specific source file.
 fn clear_obj_files(source_path: &Path) {
     let obj_dir = source_path.with_extension("blood_objs");
@@ -129,49 +116,6 @@ fn compile_with_cache(source_path: &Path, cache_dir: &Path) -> CompileResult {
     let output = Command::new(compiler_path())
         .args(["build", source_path.to_str().unwrap()])
         .env("BLOOD_CACHE", cache_dir)
-        .output()
-        .expect("Failed to run compiler");
-
-    let executable = source_path.with_extension("");
-
-    // Wait for the executable to appear on disk (handles async filesystem operations)
-    if output.status.success() {
-        let max_wait = 10; // 100ms total max wait
-        for i in 0..max_wait {
-            if executable.exists() {
-                // Give the filesystem a bit more time to sync
-                thread::sleep(Duration::from_millis(20));
-
-                // On Unix, sync to ensure data is flushed
-                #[cfg(unix)]
-                {
-                    use std::process::Command;
-                    Command::new("sync").output().ok();
-                }
-                break;
-            }
-            thread::sleep(Duration::from_millis(10 * (i + 1)));
-        }
-    }
-
-    let executable_exists = executable.exists();
-
-    CompileResult {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        executable: if executable_exists { Some(executable) } else { None },
-    }
-}
-
-/// Compile a Blood source file using the global cache.
-/// Note: Prefer compile_with_cache() for test isolation.
-#[allow(dead_code)]
-fn compile(source_path: &Path) -> CompileResult {
-    ensure_compiler_built();
-
-    let output = Command::new(compiler_path())
-        .args(["build", source_path.to_str().unwrap()])
         .output()
         .expect("Failed to run compiler");
 

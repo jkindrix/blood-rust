@@ -27,7 +27,7 @@ use super::CodegenContext;
 ///
 /// Note: This function is preserved for future handler optimization work.
 /// Currently all handlers use a uniform compilation strategy.
-#[allow(dead_code)]
+#[allow(dead_code)] // Infrastructure for tail-resumptive handler optimization
 pub fn is_handler_tail_resumptive(body: &hir::Body) -> bool {
     // Check if all resumes in the body are in tail position
     check_expr_tail_resumptive(&body.expr, true)
@@ -36,7 +36,7 @@ pub fn is_handler_tail_resumptive(body: &hir::Body) -> bool {
 /// Check if all resumes in an expression are in tail position.
 ///
 /// `in_tail_position` indicates whether the current expression is in tail position.
-#[allow(dead_code)]
+#[allow(dead_code)] // Called by is_handler_tail_resumptive (infrastructure)
 fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool {
     use hir::ExprKind::*;
 

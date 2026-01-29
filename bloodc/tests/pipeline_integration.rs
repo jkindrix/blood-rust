@@ -8,8 +8,7 @@ use bloodc::typeck::check_program;
 use std::fs;
 
 /// Test helper to run the full pipeline on source code.
-/// Kept for use in future type-checking tests.
-#[allow(dead_code)]
+#[allow(dead_code)] // Test infrastructure — used by future type-checking integration tests
 fn check_source(source: &str) -> Result<bloodc::hir::Crate, Vec<bloodc::Diagnostic>> {
     let mut parser = Parser::new(source);
     let program = parser.parse_program()?;
@@ -18,8 +17,7 @@ fn check_source(source: &str) -> Result<bloodc::hir::Crate, Vec<bloodc::Diagnost
 }
 
 /// Test helper to verify source type-checks successfully.
-/// Kept for use in future type-checking tests.
-#[allow(dead_code)]
+#[allow(dead_code)] // Test infrastructure — used by future type-checking integration tests
 fn assert_type_checks(source: &str) {
     match check_source(source) {
         Ok(_) => (),
@@ -37,8 +35,7 @@ fn assert_type_checks(source: &str) {
 }
 
 /// Test helper to verify source fails type checking with expected error.
-/// Kept for use in future type-checking tests.
-#[allow(dead_code)]
+#[allow(dead_code)] // Test infrastructure — used by future type-checking integration tests
 fn assert_type_error(source: &str, expected: &str) {
     match check_source(source) {
         Ok(_) => panic!("Expected type error containing '{}', but type checking succeeded", expected),

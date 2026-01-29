@@ -79,7 +79,7 @@ pub struct EffectLowering {
     /// Mapping from handler DefId to its compiled form.
     handlers: HashMap<DefId, HandlerInfo>,
     /// Counter for generating fresh variable names.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by fresh_name() for Phase 2.4 evidence translation
     fresh_counter: u64,
 }
 
@@ -984,7 +984,7 @@ impl EffectLowering {
     }
 
     /// Generate a fresh variable name (used in Phase 2.4).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Infrastructure for Phase 2.4 evidence variable naming
     fn fresh_name(&mut self, prefix: &str) -> String {
         let id = self.fresh_counter;
         self.fresh_counter += 1;

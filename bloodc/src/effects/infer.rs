@@ -81,7 +81,7 @@ pub struct InferenceContext {
     is_polymorphic: bool,
     /// Row variable for polymorphism (if applicable).
     /// Reserved for future use when we need to track pre-assigned row variables.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Infrastructure for pre-assigned row variable tracking
     row_var: Option<RowVar>,
 }
 
