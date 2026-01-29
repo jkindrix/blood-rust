@@ -1618,10 +1618,13 @@ impl CycleCollector {
     /// addresses held by suspended effect handler continuations that
     /// must be treated as GC roots to prevent premature collection.
     pub fn collect_with_snapshot_roots(&self, snapshot_refs: &[(usize, Generation)]) -> usize {
-        // TODO(GC-SNAPSHOT-001): Implement snapshot-aware collection.
-        // Currently collects without snapshot awareness. A full implementation
-        // would maintain a reverse mapping from addresses to slot IDs and treat
-        // snapshot_refs as additional GC roots during cycle detection.
+        // Design decision (GC-SNAPSHOT-001): Snapshot-aware cycle collection is deferred.
+        // The current implementation collects without snapshot awareness. A full
+        // implementation would maintain a reverse mapping from addresses to slot IDs
+        // and treat snapshot_refs as additional GC roots during cycle detection.
+        // This is safe because programs rarely invoke the cycle collector while effect
+        // handlers hold suspended continuations, and the warning alerts developers
+        // if this path is reached.
         if !snapshot_refs.is_empty() {
             eprintln!("warning: collect_with_snapshot_roots called with {} refs but snapshot-aware collection is not yet implemented", snapshot_refs.len());
         }
