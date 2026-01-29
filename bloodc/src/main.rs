@@ -1300,8 +1300,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 &hir_crate,
                 Some(mir_body),
                 escape_results,
-                Some(&mir_bodies),
-                Some(&inline_handler_bodies),
+                Some(mir_bodies),
+                Some(inline_handler_bodies),
                 &obj_path,
                 builtin_def_ids,
             ) {
@@ -1366,7 +1366,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             }
 
             // Cache miss - compile this handler
-            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(&mir_bodies), Some(&inline_handler_bodies), &obj_path, builtin_def_ids) {
+            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(mir_bodies), Some(inline_handler_bodies), &obj_path, builtin_def_ids) {
                 Ok(()) => {
                     compiled_count += 1;
                     if verbosity > 2 {
@@ -1448,7 +1448,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Collect FFI link specifications from all bridge blocks
     let mut ffi_link_specs: Vec<&bloodc::hir::item::LinkSpec> = Vec::new();
-    for (_def_id, item) in &hir_crate.items {
+    for item in hir_crate.items.values() {
         if let bloodc::hir::ItemKind::Bridge(bridge_def) = &item.kind {
             for link_spec in &bridge_def.link_specs {
                 ffi_link_specs.push(link_spec);

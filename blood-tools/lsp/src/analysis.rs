@@ -106,10 +106,7 @@ impl SemanticAnalyzer {
         let interner = parser.take_interner();
 
         // Run type checking - this may fail on incomplete code
-        match typeck::check_program(&program, &text, interner) {
-            Ok(hir_crate) => Some(hir_crate),
-            Err(_) => None, // Type checking failed, but that's expected for incomplete code
-        }
+        typeck::check_program(&program, &text, interner).ok()
     }
 
     /// Collects symbols from a declaration.
@@ -1012,7 +1009,7 @@ impl HoverProvider {
         }
 
         // Add examples for user-defined types based on their kind
-        if let Some(example) = self.symbol_example(&symbol) {
+        if let Some(example) = self.symbol_example(symbol) {
             content.push_str("\n\n---\n\n**Example:**\n\n");
             content.push_str(&example);
         }

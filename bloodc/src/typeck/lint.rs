@@ -495,7 +495,6 @@ impl PointerLintContext {
                     }
                 }
                 self.check_indirection_depth(inner, span, d);
-                return;
             }
             TypeKind::Adt { def_id, args } if self.is_box_type(*def_id) => {
                 let d = depth + 1;
@@ -517,7 +516,6 @@ impl PointerLintContext {
                 if let Some(inner) = args.first() {
                     self.check_indirection_depth(inner, span, d);
                 }
-                return;
             }
             // Reset depth for non-pointer types and check children
             TypeKind::Tuple(tys) => {

@@ -388,10 +388,10 @@ impl Codebase {
                 for (k, line) in lines2[j..].iter().enumerate().take(5) {
                     if lines1[i] == *line {
                         // Old line found later in new, so lines before were added
-                        for l in j..(j + k) {
+                        for (l, line) in lines2.iter().enumerate().skip(j).take(k) {
                             differences.push(Difference::LineAdded {
                                 line_num: l + 1,
-                                content: lines2[l].to_string(),
+                                content: line.to_string(),
                             });
                         }
                         j += k;
@@ -405,10 +405,10 @@ impl Codebase {
                     for (k, line) in lines1[i..].iter().enumerate().take(5) {
                         if lines2[j] == *line {
                             // New line found later in old, so lines before were removed
-                            for l in i..(i + k) {
+                            for (l, line) in lines1.iter().enumerate().skip(i).take(k) {
                                 differences.push(Difference::LineRemoved {
                                     line_num: l + 1,
-                                    content: lines1[l].to_string(),
+                                    content: line.to_string(),
                                 });
                             }
                             i += k;

@@ -452,9 +452,7 @@ pub enum CacheError {
 /// Sanitize a URL for use as a directory name.
 fn sanitize_url(url: &str) -> String {
     url.replace("://", "-")
-        .replace('/', "-")
-        .replace(':', "-")
-        .replace('.', "-")
+        .replace(['/', ':', '.'], "-")
         .trim_end_matches('-')
         .to_string()
 }

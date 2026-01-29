@@ -156,7 +156,7 @@ impl Fetcher {
 
         archive
             .unpack(dest)
-            .map_err(|e| FetchError::Io(io::Error::new(io::ErrorKind::Other, format!("failed to extract tarball: {}", e))))?;
+            .map_err(|e| FetchError::Io(io::Error::other(format!("failed to extract tarball: {}", e))))?;
 
         Ok(())
     }
@@ -292,7 +292,7 @@ fn compute_dir_hash(path: &Path) -> Result<String, FetchError> {
         }
 
         // Include file contents
-        let contents = fs::read(&file).map_err(|e| FetchError::Io(e))?;
+        let contents = fs::read(&file).map_err(FetchError::Io)?;
         hasher.update(&contents);
     }
 

@@ -99,7 +99,7 @@ impl ModulePath {
 
     /// Check if this path starts with "crate".
     pub fn is_absolute(&self) -> bool {
-        self.segments.first().map_or(false, |s| s == "crate")
+        self.segments.first().is_some_and(|s| s == "crate")
     }
 
 }

@@ -94,8 +94,10 @@ impl TestSummary {
 
     /// Creates a summary from test results.
     pub fn from_results(results: &[TestResult]) -> Self {
-        let mut summary = Self::default();
-        summary.total = results.len();
+        let mut summary = Self {
+            total: results.len(),
+            ..Self::default()
+        };
 
         for result in results {
             match &result.outcome {

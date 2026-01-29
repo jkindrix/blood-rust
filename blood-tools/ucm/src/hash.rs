@@ -356,16 +356,14 @@ fn collect_deps_from_expr(
                 collect_deps_from_expr(e, interner, deps);
             }
         }
-        ExprKind::Return(e) => {
-            if let Some(e) = e {
-                collect_deps_from_expr(e, interner, deps);
-            }
+        ExprKind::Return(Some(e)) => {
+            collect_deps_from_expr(e, interner, deps);
         }
-        ExprKind::Break { value, .. } => {
-            if let Some(e) = value {
-                collect_deps_from_expr(e, interner, deps);
-            }
+        ExprKind::Return(None) => {}
+        ExprKind::Break { value: Some(e), .. } => {
+            collect_deps_from_expr(e, interner, deps);
         }
+        ExprKind::Break { value: None, .. } => {}
         ExprKind::Loop { body, .. } => {
             collect_deps_from_block(body, interner, deps);
         }

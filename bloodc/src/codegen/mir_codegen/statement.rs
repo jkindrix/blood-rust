@@ -1077,7 +1077,7 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     }
                     BasicValueEnum::ArrayValue(_) | BasicValueEnum::StructValue(_) | BasicValueEnum::VectorValue(_) => {
                         return Err(vec![Diagnostic::error(
-                            format!("ICE: handler return clause received aggregate value that cannot be converted to i64"),
+                            "ICE: handler return clause received aggregate value that cannot be converted to i64".to_string(),
                             stmt.span
                         )]);
                     }

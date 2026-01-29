@@ -1770,7 +1770,7 @@ impl<'src> Parser<'src> {
                 if let crate::ast::LiteralKind::Int { value, suffix } = &lit.kind {
                     lit.kind = crate::ast::LiteralKind::Int {
                         value: -(*value as i64) as u128,
-                        suffix: suffix.clone(),
+                        suffix: *suffix,
                     };
                 }
             }

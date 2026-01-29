@@ -212,8 +212,8 @@ impl SemanticTokensProvider {
 
             self.add_token(
                 &mut tokens,
-                token.span.start_line as u32,
-                token.span.start_col as u32,
+                token.span.start_line,
+                token.span.start_col,
                 length,
                 token_type,
                 modifiers,

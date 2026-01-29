@@ -455,8 +455,8 @@ impl InlayHintProvider {
         let trimmed = line.trim();
 
         // Look for function definitions without effect annotations
-        if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ") {
-            if !trimmed.contains(" / ") {
+        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn "))
+            && !trimmed.contains(" / ") {
                 if let Some(arrow_pos) = trimmed.find("->") {
                     let after_arrow = &trimmed[arrow_pos + 2..];
                     if let Some(brace_pos) = after_arrow.find('{') {
@@ -481,7 +481,6 @@ impl InlayHintProvider {
                     }
                 }
             }
-        }
 
         None
     }

@@ -238,8 +238,7 @@ impl DistributedCache {
         }
 
         let response = request.call().map_err(|e| {
-            CacheError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            CacheError::Io(std::io::Error::other(
                 format!("HTTP GET failed: {}", e),
             ))
         })?;
@@ -253,8 +252,7 @@ impl DistributedCache {
         }
 
         if response.status() >= 400 {
-            return Err(CacheError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(CacheError::Io(std::io::Error::other(
                 format!("HTTP error: status {}", response.status()),
             )));
         }
@@ -262,8 +260,7 @@ impl DistributedCache {
         // Read response body
         let mut data = Vec::new();
         response.into_reader().read_to_end(&mut data).map_err(|e| {
-            CacheError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            CacheError::Io(std::io::Error::other(
                 format!("Failed to read response body: {}", e),
             ))
         })?;
@@ -320,16 +317,14 @@ impl DistributedCache {
         }
 
         let response = request.send_bytes(data).map_err(|e| {
-            CacheError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            CacheError::Io(std::io::Error::other(
                 format!("HTTP PUT failed: {}", e),
             ))
         })?;
 
         // Check status code
         if response.status() >= 400 {
-            return Err(CacheError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(CacheError::Io(std::io::Error::other(
                 format!("HTTP PUT error: status {}", response.status()),
             )));
         }

@@ -170,19 +170,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let tag_type = self.context.i32_type();
                         let payload_type = if max_alignment >= 16 {
                             // Need 16-byte alignment: use [i128 x N] for i128 fields
-                            let num_i128s = (max_payload_size + 15) / 16;
+                            let num_i128s = max_payload_size.div_ceil(16);
                             self.context.i128_type().array_type(num_i128s as u32).into()
                         } else if max_alignment >= 8 {
                             // Need 8-byte alignment: use [i64 x N]
-                            let num_i64s = (max_payload_size + 7) / 8;
+                            let num_i64s = max_payload_size.div_ceil(8);
                             self.context.i64_type().array_type(num_i64s as u32).into()
                         } else if max_alignment >= 4 {
                             // Need 4-byte alignment: use [i32 x N]
-                            let num_i32s = (max_payload_size + 3) / 4;
+                            let num_i32s = max_payload_size.div_ceil(4);
                             self.context.i32_type().array_type(num_i32s as u32).into()
                         } else if max_alignment >= 2 {
                             // Need 2-byte alignment: use [i16 x N]
-                            let num_i16s = (max_payload_size + 1) / 2;
+                            let num_i16s = max_payload_size.div_ceil(2);
                             self.context.i16_type().array_type(num_i16s as u32).into()
                         } else {
                             // 1-byte alignment: use [i8 x N]
@@ -364,7 +364,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             BasicTypeEnum::IntType(t) => {
                 let bits = t.get_bit_width() as usize;
                 // Round up to byte boundary
-                (bits + 7) / 8
+                bits.div_ceil(8)
             }
             BasicTypeEnum::FloatType(t) => {
                 if t == self.context.f32_type() { 4 } else { 8 }

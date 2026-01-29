@@ -815,7 +815,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                     idx_int
                                 };
 
-                                let elem_size_val = i64_type.const_int(elem_size as u64, false);
+                                let elem_size_val = i64_type.const_int(elem_size, false);
                                 let byte_offset = self.builder.build_int_mul(
                                     idx_i64,
                                     elem_size_val,
@@ -937,7 +937,7 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 } else {
                                     idx_int
                                 };
-                                let elem_size_val = i64_type.const_int(elem_size as u64, false);
+                                let elem_size_val = i64_type.const_int(elem_size, false);
                                 let byte_offset = self.builder.build_int_mul(
                                     idx_i64,
                                     elem_size_val,

@@ -1245,7 +1245,7 @@ impl<'src> Parser<'src> {
                     // Unicode escape \u{NNNN}
                     if chars.next() == Some('{') {
                         let mut hex = String::new();
-                        while let Some(c) = chars.next() {
+                        for c in chars {
                             if c == '}' {
                                 break;
                             }

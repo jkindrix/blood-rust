@@ -1511,14 +1511,13 @@ impl<'src> Parser<'src> {
             let path = self.parse_expr_path();
 
             // Check for macro call syntax (e.g., matches!, vec!)
-            if self.check(TokenKind::Not) {
-                if self.check_next(TokenKind::LParen)
+            if self.check(TokenKind::Not)
+                && (self.check_next(TokenKind::LParen)
                     || self.check_next(TokenKind::LBracket)
-                    || self.check_next(TokenKind::LBrace)
+                    || self.check_next(TokenKind::LBrace))
                 {
                     return self.parse_macro_call(path, start);
                 }
-            }
 
             // Don't check for struct literal here - just return the path
             return Expr {
@@ -2047,9 +2046,7 @@ impl<'src> Parser<'src> {
             self.expect(TokenKind::RParen);
 
             // Expect '=>' or ':'
-            if self.check(TokenKind::FatArrow) {
-                self.advance();
-            } else if self.check(TokenKind::Colon) {
+            if self.check(TokenKind::FatArrow) || self.check(TokenKind::Colon) {
                 self.advance();
             } else {
                 self.expect(TokenKind::FatArrow); // This will generate error

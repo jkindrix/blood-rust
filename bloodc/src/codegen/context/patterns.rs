@@ -590,7 +590,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                                         // Get pointer to destination element
                                         let zero = self.context.i32_type().const_int(0, false);
-                                        let idx = self.context.i32_type().const_int(i as u64, false);
+                                        let idx = self.context.i32_type().const_int(i, false);
                                         let dest_ptr = unsafe {
                                             self.builder.build_gep(
                                                 rest_alloca,

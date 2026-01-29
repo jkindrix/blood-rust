@@ -80,7 +80,7 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 for i in 0..t.count_fields() {
                     if let Some(field_ty) = t.get_field_type_at_index(i) {
                         let field_size = self.get_type_size_in_bytes(field_ty);
-                        let field_align = self.get_type_alignment_for_size(field_ty) as u64;
+                        let field_align = self.get_type_alignment_for_size(field_ty);
 
                         // Update max alignment
                         if field_align > max_align {
@@ -118,7 +118,7 @@ impl<'ctx, 'a> MirTypesCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 //      offset 8 for i128 in a struct, the actual address is only
                 //      8-byte aligned, causing SIGSEGV from aligned SSE/AVX moves
                 // Alignment is min(size, 8) bytes for all integer types.
-                std::cmp::min((bits as u64 + 7) / 8, 8).max(1)
+                std::cmp::min((bits as u64).div_ceil(8), 8).max(1)
             }
             BasicTypeEnum::FloatType(float_ty) => {
                 if float_ty == self.context.f32_type() {

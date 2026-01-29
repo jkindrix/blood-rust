@@ -110,7 +110,7 @@ impl<'a> SyncEngine<'a> {
 
     /// Loads remote export data from a file path.
     fn load_remote_data(&self, path: &std::path::Path) -> UcmResult<ExportData> {
-        let format = if path.extension().map_or(false, |e| e == "json") {
+        let format = if path.extension().is_some_and(|e| e == "json") {
             ExportFormat::Json
         } else {
             ExportFormat::Binary
@@ -254,7 +254,7 @@ impl<'a> SyncEngine<'a> {
             let remote_path = std::path::Path::new(&remote.url[7..]);
 
             // Export current state to remote
-            let format = if remote_path.extension().map_or(false, |e| e == "json") {
+            let format = if remote_path.extension().is_some_and(|e| e == "json") {
                 ExportFormat::Json
             } else {
                 ExportFormat::Binary

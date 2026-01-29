@@ -162,7 +162,7 @@ impl ProjectCompiler {
             std::fs::create_dir_all(parent)?;
         }
         self.dep_graph.save(&dep_graph_path)
-            .map_err(|e| FileCacheError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| FileCacheError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(())
     }

@@ -203,12 +203,12 @@ impl ClosureAnalysisResults {
             } else { 0.0 }
         ));
 
-        report.push_str(&format!("\nEnvironment sizes:\n"));
+        report.push_str("\nEnvironment sizes:\n");
         report.push_str(&format!("  Total: {} bytes\n", self.stats.total_env_bytes));
         report.push_str(&format!("  Average: {:.1} bytes\n", self.stats.avg_env_size));
         report.push_str(&format!("  Maximum: {} bytes\n", self.stats.max_env_size));
 
-        report.push_str(&format!("\nCapture count distribution:\n"));
+        report.push_str("\nCapture count distribution:\n");
         let mut counts: Vec<_> = self.stats.capture_count_distribution.iter().collect();
         counts.sort_by_key(|(k, _)| *k);
         for (count, occurrences) in counts {

@@ -221,13 +221,13 @@ fn contains_nested_handle(expr: &Expr) -> bool {
                     return true;
                 }
             }
-            expr.as_ref().map_or(false, |e| contains_nested_handle(e))
+            expr.as_ref().is_some_and(|e| contains_nested_handle(e))
         }
 
         ExprKind::If { condition, then_branch, else_branch } => {
             contains_nested_handle(condition)
                 || contains_nested_handle(then_branch)
-                || else_branch.as_ref().map_or(false, |e| contains_nested_handle(e))
+                || else_branch.as_ref().is_some_and(|e| contains_nested_handle(e))
         }
 
         ExprKind::Match { scrutinee, arms } => {
@@ -283,7 +283,7 @@ fn contains_nested_handle(expr: &Expr) -> bool {
 
         ExprKind::Struct { fields, base, .. } => {
             fields.iter().any(|f| contains_nested_handle(&f.value))
-                || base.as_ref().map_or(false, |e| contains_nested_handle(e))
+                || base.as_ref().is_some_and(|e| contains_nested_handle(e))
         }
 
         ExprKind::Repeat { value, .. } => contains_nested_handle(value),
@@ -293,11 +293,11 @@ fn contains_nested_handle(expr: &Expr) -> bool {
         }
 
         ExprKind::Return(value) => {
-            value.as_ref().map_or(false, |e| contains_nested_handle(e))
+            value.as_ref().is_some_and(|e| contains_nested_handle(e))
         }
 
         ExprKind::Break { value, .. } => {
-            value.as_ref().map_or(false, |e| contains_nested_handle(e))
+            value.as_ref().is_some_and(|e| contains_nested_handle(e))
         }
 
         ExprKind::Assign { target, value } => {
@@ -311,8 +311,8 @@ fn contains_nested_handle(expr: &Expr) -> bool {
         | ExprKind::Dbg(expr) => contains_nested_handle(expr),
 
         ExprKind::Range { start, end, .. } => {
-            start.as_ref().map_or(false, |e| contains_nested_handle(e))
-                || end.as_ref().map_or(false, |e| contains_nested_handle(e))
+            start.as_ref().is_some_and(|e| contains_nested_handle(e))
+                || end.as_ref().is_some_and(|e| contains_nested_handle(e))
         }
 
         ExprKind::Let { init, .. } => contains_nested_handle(init),
@@ -325,7 +325,7 @@ fn contains_nested_handle(expr: &Expr) -> bool {
 
         ExprKind::Assert { condition, message } => {
             contains_nested_handle(condition)
-                || message.as_ref().map_or(false, |m| contains_nested_handle(m))
+                || message.as_ref().is_some_and(|m| contains_nested_handle(m))
         }
 
         ExprKind::MacroExpansion { args, named_args, .. } => {
@@ -353,7 +353,7 @@ fn contains_nested_handle(expr: &Expr) -> bool {
 fn contains_nested_handle_stmt(stmt: &crate::hir::Stmt) -> bool {
     use crate::hir::Stmt;
     match stmt {
-        Stmt::Let { init, .. } => init.as_ref().map_or(false, |e| contains_nested_handle(e)),
+        Stmt::Let { init, .. } => init.as_ref().is_some_and(contains_nested_handle),
         Stmt::Expr(expr) => contains_nested_handle(expr),
         Stmt::Item(_) => false,
     }
@@ -488,7 +488,7 @@ fn is_default_expr(expr: &Expr) -> bool {
 
         // Block containing only a default expression
         ExprKind::Block { stmts, expr } if stmts.is_empty() => {
-            expr.as_ref().map_or(false, |e| is_default_expr(e))
+            expr.as_ref().is_some_and(|e| is_default_expr(e))
         }
 
         _ => false,
@@ -657,7 +657,7 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
         ExprKind::If { condition, then_branch, else_branch } => {
             contains_escaping_control_flow(condition)
                 || contains_escaping_control_flow(then_branch)
-                || else_branch.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
+                || else_branch.as_ref().is_some_and(|e| contains_escaping_control_flow(e))
         }
 
         ExprKind::Match { scrutinee, arms } => {
@@ -735,7 +735,7 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
 
         ExprKind::Struct { fields, base, .. } => {
             fields.iter().any(|f| contains_escaping_control_flow(&f.value))
-                || base.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
+                || base.as_ref().is_some_and(|e| contains_escaping_control_flow(e))
         }
 
         ExprKind::Repeat { value, .. } => {
@@ -749,11 +749,11 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
         }
 
         ExprKind::Return(value) => {
-            value.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
+            value.as_ref().is_some_and(|e| contains_escaping_control_flow(e))
         }
 
         ExprKind::Break { value, .. } => {
-            value.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
+            value.as_ref().is_some_and(|e| contains_escaping_control_flow(e))
         }
 
         ExprKind::Assign { target, value } => {
@@ -766,8 +766,8 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
         }
 
         ExprKind::Range { start, end, .. } => {
-            start.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
-                || end.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
+            start.as_ref().is_some_and(|e| contains_escaping_control_flow(e))
+                || end.as_ref().is_some_and(|e| contains_escaping_control_flow(e))
         }
 
         ExprKind::Unsafe(expr) | ExprKind::Dbg(expr) => {
@@ -788,7 +788,7 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
 
         ExprKind::Assert { condition, message } => {
             contains_escaping_control_flow(condition)
-                || message.as_ref().map_or(false, |m| contains_escaping_control_flow(m))
+                || message.as_ref().is_some_and(|m| contains_escaping_control_flow(m))
         }
 
         ExprKind::MacroExpansion { args, named_args, .. } => {
@@ -820,7 +820,7 @@ fn contains_escaping_control_flow_stmt(stmt: &crate::hir::Stmt) -> bool {
     use crate::hir::Stmt;
     match stmt {
         Stmt::Let { init, .. } => {
-            init.as_ref().map_or(false, |e| contains_escaping_control_flow(e))
+            init.as_ref().is_some_and(contains_escaping_control_flow)
         }
         Stmt::Expr(expr) => {
             contains_escaping_control_flow(expr)
