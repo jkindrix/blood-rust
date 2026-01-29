@@ -969,3 +969,73 @@ fn test_effect_option_emit_unification() {
     // Previously a known limitation (type variable unification), now working.
     run_effect_test("option_effect_unify");
 }
+
+#[test]
+fn test_effect_record_through_effects() {
+    // Tests: Record types (structs with named fields) created, passed through
+    // effect operations, and field-accessed in handlers.
+    run_effect_test("record_through_effects");
+}
+
+/// Compile-failure test: expects compilation to fail with a specific error code.
+fn run_effect_compile_failure_test(name: &str, expected_error: &str) {
+    let cache_dir = create_test_cache(&format!("effect_{}", name));
+    let source = effects_fixtures_dir().join(format!("{}.blood", name));
+
+    assert!(source.exists(), "Effect test fixture not found: {:?}", source);
+
+    let result = compile_with_cache(&source, &cache_dir);
+    assert!(
+        !result.success,
+        "Expected compilation failure for '{}' but it succeeded",
+        name
+    );
+    assert!(
+        result.stderr.contains(expected_error),
+        "Expected error '{}' in output for '{}', got: {}",
+        expected_error, name, result.stderr
+    );
+
+    clear_obj_files(&source);
+    cleanup_test_cache(&cache_dir);
+}
+
+#[test]
+fn test_effect_linear_multishot_reject() {
+    // Tests: Compiler rejects linear state fields in multi-shot handlers (E0304).
+    // A handler with a linear state field and multiple resume calls must fail.
+    run_effect_compile_failure_test("linear_multishot_reject", "E0304");
+}
+
+/// Run a fixture test from the fixtures/ directory (not effects/).
+fn run_fixture_test(name: &str) {
+    let cache_dir = create_test_cache(&format!("fixture_{}", name));
+    let source = fixtures_dir().join(format!("{}.blood", name));
+
+    assert!(source.exists(), "Fixture test not found: {:?}", source);
+
+    let result = compile_with_cache(&source, &cache_dir);
+    assert!(
+        result.success,
+        "Fixture test '{}' compilation failed: {}",
+        name, result.stderr
+    );
+
+    let executable = result.executable.expect("No executable produced");
+    let run_result = run_executable(&executable);
+
+    assert_eq!(
+        run_result.exit_code, 0,
+        "Fixture test '{}' failed with exit code {}",
+        name, run_result.exit_code
+    );
+
+    clear_obj_files(&source);
+    cleanup_test_cache(&cache_dir);
+}
+
+#[test]
+fn test_dispatch_basic() {
+    // Tests: Trait-based dispatch with multiple implementations compiles and runs.
+    run_fixture_test("dispatch_basic");
+}
