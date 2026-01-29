@@ -98,7 +98,7 @@ impl Unifier {
     /// Unify two types, recording substitutions.
     ///
     /// Returns Ok(()) if unification succeeds, Err if types are incompatible.
-    pub fn unify(&mut self, t1: &Type, t2: &Type, span: Span) -> Result<(), TypeError> {
+    pub fn unify(&mut self, t1: &Type, t2: &Type, span: Span) -> Result<(), Box<TypeError>> {
         // Resolve any existing substitutions
         let t1 = self.resolve(t1);
         let t2 = self.resolve(t2);
@@ -112,13 +112,13 @@ impl Unifier {
                 if d1 == d2 =>
             {
                 if a1.len() != a2.len() {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::Mismatch {
                             expected: t1.clone(),
                             found: t2.clone(),
                         },
                         span,
-                    ));
+                    )));
                 }
                 for (arg1, arg2) in a1.iter().zip(a2.iter()) {
                     self.unify(arg1, arg2, span)?;
@@ -349,13 +349,13 @@ impl Unifier {
             }
 
             // No match
-            _ => Err(TypeError::new(
+            _ => Err(Box::new(TypeError::new(
                 TypeErrorKind::Mismatch {
                     expected: t1.clone(),
                     found: t2.clone(),
                 },
                 span,
-            )),
+            ))),
         }
     }
 
@@ -371,7 +371,7 @@ impl Unifier {
         fields2: &[RecordField],
         row_var2: Option<RecordRowVarId>,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         use std::collections::HashMap;
 
         // Build maps of field name -> type
@@ -404,26 +404,26 @@ impl Unifier {
 
             // Both closed but have extra fields - mismatch
             (None, None, false, _) | (None, None, _, false) => {
-                Err(TypeError::new(
+                Err(Box::new(TypeError::new(
                     TypeErrorKind::Mismatch {
                         expected: Type::record(fields1.to_vec(), row_var1),
                         found: Type::record(fields2.to_vec(), row_var2),
                     },
                     span,
-                ))
+                )))
             }
 
             // Record 1 is open - bind its row var to record 2's extra fields
             (Some(rv1), None, _, false) | (Some(rv1), None, _, true) => {
                 if !only_in_1.is_empty() {
                     // Record 2 is missing fields that record 1 has
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::Mismatch {
                             expected: Type::record(fields1.to_vec(), row_var1),
                             found: Type::record(fields2.to_vec(), row_var2),
                         },
                         span,
-                    ));
+                    )));
                 }
                 // Bind rv1 to the extra fields from record 2
                 self.row_substitutions.insert(rv1, (only_in_2, None));
@@ -434,13 +434,13 @@ impl Unifier {
             (None, Some(rv2), false, _) | (None, Some(rv2), true, _) => {
                 if !only_in_2.is_empty() {
                     // Record 1 is missing fields that record 2 has
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::Mismatch {
                             expected: Type::record(fields1.to_vec(), row_var1),
                             found: Type::record(fields2.to_vec(), row_var2),
                         },
                         span,
-                    ));
+                    )));
                 }
                 // Bind rv2 to the extra fields from record 1
                 self.row_substitutions.insert(rv2, (only_in_1, None));
@@ -472,10 +472,10 @@ impl Unifier {
     }
 
     /// Bind a type variable to a type.
-    fn bind(&mut self, var: TyVarId, ty: Type, span: Span) -> Result<(), TypeError> {
+    fn bind(&mut self, var: TyVarId, ty: Type, span: Span) -> Result<(), Box<TypeError>> {
         // Occurs check: prevent infinite types like ?T = List<?T>
         if self.occurs_in(var, &ty) {
-            return Err(TypeError::new(TypeErrorKind::InfiniteType, span));
+            return Err(Box::new(TypeError::new(TypeErrorKind::InfiniteType, span)));
         }
 
         self.substitutions.insert(var, ty);

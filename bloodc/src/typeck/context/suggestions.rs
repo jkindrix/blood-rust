@@ -15,7 +15,7 @@ impl<'a> TypeContext<'a> {
     ///
     /// Searches for similar names in the current scope and adds a
     /// "did you mean?" suggestion if close matches are found.
-    pub(crate) fn error_name_not_found(&self, name: &str, span: Span) -> TypeError {
+    pub(crate) fn error_name_not_found(&self, name: &str, span: Span) -> Box<TypeError> {
         let visible_names = self.resolver.collect_visible_names();
         let suggestions = suggest_similar(name, visible_names.iter().map(|s| s.as_str()));
 
@@ -28,14 +28,14 @@ impl<'a> TypeContext<'a> {
             error = error.with_help(help);
         }
 
-        error
+        Box::new(error)
     }
 
     /// Create a "type not found" error with suggestions.
     ///
     /// Searches for similar type names in the current scope and adds a
     /// "did you mean?" suggestion if close matches are found.
-    pub(crate) fn error_type_not_found(&self, name: &str, span: Span) -> TypeError {
+    pub(crate) fn error_type_not_found(&self, name: &str, span: Span) -> Box<TypeError> {
         let visible_types = self.resolver.collect_visible_type_names();
         let suggestions = suggest_similar(name, visible_types.iter().map(|s| s.as_str()));
 
@@ -48,14 +48,14 @@ impl<'a> TypeContext<'a> {
             error = error.with_help(help);
         }
 
-        error
+        Box::new(error)
     }
 
     /// Create an "unknown field" error with suggestions.
     ///
     /// Searches for similar field names on the struct type and adds a
     /// "did you mean?" suggestion if close matches are found.
-    pub(crate) fn error_unknown_field(&self, ty: &Type, field: &str, span: Span) -> TypeError {
+    pub(crate) fn error_unknown_field(&self, ty: &Type, field: &str, span: Span) -> Box<TypeError> {
         let field_names = self.collect_field_names(ty);
         let suggestions = suggest_similar(field, field_names.iter().map(|s| s.as_str()));
 
@@ -71,14 +71,14 @@ impl<'a> TypeContext<'a> {
             error = error.with_help(help);
         }
 
-        error
+        Box::new(error)
     }
 
     /// Create a "method not found" error with suggestions.
     ///
     /// Searches for similar method names on the type and adds a
     /// "did you mean?" suggestion if close matches are found.
-    pub(crate) fn error_method_not_found(&self, ty: &Type, method: &str, span: Span) -> TypeError {
+    pub(crate) fn error_method_not_found(&self, ty: &Type, method: &str, span: Span) -> Box<TypeError> {
         let method_names = self.collect_method_names(ty);
         let suggestions = suggest_similar(method, method_names.iter().map(|s| s.as_str()));
 
@@ -94,7 +94,7 @@ impl<'a> TypeContext<'a> {
             error = error.with_help(help);
         }
 
-        error
+        Box::new(error)
     }
 
     /// Collect field names for a given type.

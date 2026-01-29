@@ -7,6 +7,11 @@ use crate::hir::Type;
 use crate::span::Span;
 use crate::diagnostics::Diagnostic;
 
+/// Result type alias for type checking operations.
+///
+/// `TypeError` is boxed to reduce stack frame size (184+ bytes → 8 bytes on the Err path).
+pub type TypeResult<T> = Result<T, Box<TypeError>>;
+
 /// A type error.
 #[derive(Debug, Clone)]
 pub struct TypeError {
@@ -32,6 +37,11 @@ impl TypeError {
             source_file: None,
             source_content: None,
         }
+    }
+
+    /// Wrap this error in a `Box` and return as `Err`.
+    pub fn into_err<T>(self) -> TypeResult<T> {
+        Err(Box::new(self))
     }
 
     /// Add a help message.

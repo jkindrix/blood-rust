@@ -219,13 +219,13 @@ impl<'a> Resolver<'a> {
         name: String,
         kind: DefKind,
         span: Span,
-    ) -> Result<DefId, TypeError> {
+    ) -> Result<DefId, Box<TypeError>> {
         // Check for duplicates in current scope
         if self.current_scope().bindings.contains_key(&name) {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::DuplicateDefinition { name },
                 span,
-            ));
+            )));
         }
 
         let def_id = self.next_def_id();
@@ -291,7 +291,7 @@ impl<'a> Resolver<'a> {
         name: String,
         span: Span,
         visibility: Visibility,
-    ) -> Result<DefId, TypeError> {
+    ) -> Result<DefId, Box<TypeError>> {
         let def_id = self.next_def_id();
 
         self.def_info.insert(def_id, DefInfo {
@@ -316,17 +316,17 @@ impl<'a> Resolver<'a> {
                                 .insert(name.clone(), Binding::Methods(vec![existing_def_id, def_id]));
                         } else {
                             // Non-function with same name - error
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::DuplicateDefinition { name },
                                 span,
-                            ));
+                            )));
                         }
                     } else {
                         // Shouldn't happen - def_id without info
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::DuplicateDefinition { name },
                             span,
-                        ));
+                        )));
                     }
                 }
                 Binding::Methods(mut methods) => {
@@ -338,10 +338,10 @@ impl<'a> Resolver<'a> {
                 }
                 Binding::Local { .. } => {
                     // Can't define function with same name as local
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::DuplicateDefinition { name },
                         span,
-                    ));
+                    )));
                 }
             }
         } else {
@@ -369,13 +369,13 @@ impl<'a> Resolver<'a> {
         name: String,
         def_id: DefId,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Check for duplicates in current scope
         if self.current_scope().type_bindings.contains_key(&name) {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::DuplicateDefinition { name },
                 span,
-            ));
+            )));
         }
 
         self.current_scope_mut()
@@ -394,13 +394,13 @@ impl<'a> Resolver<'a> {
         name: String,
         def_id: DefId,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Check for duplicates in current scope
         if self.current_scope().bindings.contains_key(&name) {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::DuplicateDefinition { name },
                 span,
-            ));
+            )));
         }
 
         // Add as a Def binding (it's an alias to an existing definition)
@@ -422,13 +422,13 @@ impl<'a> Resolver<'a> {
         name: String,
         def_id: DefId,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Check for duplicates in current scope
         if self.current_scope().type_bindings.contains_key(&name) {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::DuplicateDefinition { name },
                 span,
-            ));
+            )));
         }
 
         self.current_scope_mut()
@@ -445,7 +445,7 @@ impl<'a> Resolver<'a> {
         ty: Type,
         mutable: bool,
         span: Span,
-    ) -> Result<LocalId, TypeError> {
+    ) -> Result<LocalId, Box<TypeError>> {
         let local_id = self.next_local_id();
 
         self.current_scope_mut().bindings.insert(

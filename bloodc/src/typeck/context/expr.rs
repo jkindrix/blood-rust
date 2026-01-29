@@ -17,7 +17,7 @@ use super::super::resolve::{Binding, ScopeKind};
 
 impl<'a> TypeContext<'a> {
     /// Check an expression against an expected type.
-    pub(crate) fn check_expr(&mut self, expr: &ast::Expr, expected: &Type) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn check_expr(&mut self, expr: &ast::Expr, expected: &Type) -> Result<hir::Expr, Box<TypeError>> {
         use crate::hir::TypeKind;
 
         // Special case for literals: use expected type to guide numeric literal inference
@@ -78,7 +78,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer the type of an expression.
-    pub(crate) fn infer_expr(&mut self, expr: &ast::Expr) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_expr(&mut self, expr: &ast::Expr) -> Result<hir::Expr, Box<TypeError>> {
         match &expr.kind {
             ast::ExprKind::Literal(lit) => self.infer_literal(lit, expr.span),
             ast::ExprKind::Path(path) => self.infer_path(path, expr.span),
@@ -191,7 +191,7 @@ impl<'a> TypeContext<'a> {
 
     /// Infer type for `default` expression.
     /// The type is inferred from context (where the value is used).
-    fn infer_default(&mut self, span: Span) -> Result<hir::Expr, TypeError> {
+    fn infer_default(&mut self, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         // Create a fresh type variable - the type will be inferred from usage context
         let ty = self.unifier.fresh_var();
         Ok(hir::Expr {
@@ -202,7 +202,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a with...handle expression.
-    fn infer_with_handle(&mut self, handler: &ast::Expr, body: &ast::Expr, span: Span) -> Result<hir::Expr, TypeError> {
+    fn infer_with_handle(&mut self, handler: &ast::Expr, body: &ast::Expr, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         // Type-check the handler expression first
         let handler_expr = self.infer_expr(handler)?;
 
@@ -255,12 +255,12 @@ impl<'a> TypeContext<'a> {
                 if handled_effect_info.is_some() {
                     self.handled_effects.pop();
                 }
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: "Handle body must be a block".into(),
                     },
                     body.span,
-                ));
+                )));
             }
         };
 
@@ -294,12 +294,12 @@ impl<'a> TypeContext<'a> {
         let handler_id = match handler_expr.ty.kind() {
             hir::TypeKind::Adt { def_id, .. } => *def_id,
             _ => {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: "Handler must be an ADT type".into(),
                     },
                     span,
-                ));
+                )));
             }
         };
 
@@ -326,7 +326,7 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         handlers: &[ast::TryWithHandler],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Collect effect info for each handler clause
         // (effect_id, op_name, param_types, return_type, ast_handler, effect_type_args)
         let mut handler_infos: Vec<(DefId, String, Vec<Type>, Type, &ast::TryWithHandler, Vec<Type>)> = Vec::new();
@@ -336,12 +336,12 @@ impl<'a> TypeContext<'a> {
             let effect_name = if let Some(first_seg) = handler.effect.segments.first() {
                 self.symbol_to_string(first_seg.name.node)
             } else {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: "Effect path must have at least one segment".into(),
                     },
                     handler.span,
-                ));
+                )));
             };
 
             // Look up the effect definition first so we know how many generics it has
@@ -352,20 +352,20 @@ impl<'a> TypeContext<'a> {
             let effect_id = match effect_id {
                 Some(id) => id,
                 None => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotAnEffect { name: effect_name },
                         handler.span,
-                    ));
+                    )));
                 }
             };
 
             let effect_info = match self.effect_defs.get(&effect_id).cloned() {
                 Some(info) => info,
                 None => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotAnEffect { name: effect_name },
                         handler.span,
-                    ));
+                    )));
                 }
             };
 
@@ -415,12 +415,12 @@ impl<'a> TypeContext<'a> {
             let op_info = match effect_info.operations.iter().find(|op| op.name == op_name) {
                 Some(info) => info.clone(),
                 None => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::UnsupportedFeature {
                             feature: format!("Unknown operation `{}` on effect `{}`", op_name, effect_name),
                         },
                         handler.operation.span,
-                    ));
+                    )));
                 }
             };
 
@@ -481,13 +481,13 @@ impl<'a> TypeContext<'a> {
             // Check parameter count matches
             if handler.params.len() != param_types.len() {
                 self.resolver.pop_scope();
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::WrongArity {
                         expected: param_types.len(),
                         found: handler.params.len(),
                     },
                     handler.span,
-                ));
+                )));
             }
 
             for (idx, (pattern, param_ty)) in handler.params.iter().zip(param_types.iter()).enumerate() {
@@ -532,22 +532,22 @@ impl<'a> TypeContext<'a> {
                             hir::TypeKind::Tuple(elems) => elems.clone(),
                             _ => {
                                 self.resolver.pop_scope();
-                                return Err(TypeError::new(
+                                return Err(Box::new(TypeError::new(
                                     TypeErrorKind::NotATuple { ty: param_ty.clone() },
                                     pattern.span,
-                                ));
+                                )));
                             }
                         };
 
                         if fields.len() != elem_types.len() {
                             self.resolver.pop_scope();
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::WrongArity {
                                     expected: elem_types.len(),
                                     found: fields.len(),
                                 },
                                 pattern.span,
-                            ));
+                            )));
                         }
 
                         // Define each element of the tuple pattern
@@ -623,7 +623,7 @@ impl<'a> TypeContext<'a> {
                     }
                     _ => {
                         self.resolver.pop_scope();
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::UnsupportedFeature {
                                 feature: format!(
                                     "pattern kind {:?} in inline handler parameters \
@@ -632,7 +632,7 @@ impl<'a> TypeContext<'a> {
                                 ),
                             },
                             pattern.span,
-                        ));
+                        )));
                     }
                 }
             }
@@ -690,7 +690,7 @@ impl<'a> TypeContext<'a> {
         operation: &crate::span::Spanned<ast::Symbol>,
         args: &[ast::Expr],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         use crate::ice;
 
         let op_name = self.symbol_to_string(operation.node);
@@ -974,7 +974,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a resume expression.
-    fn infer_resume(&mut self, value: &ast::Expr, span: Span) -> Result<hir::Expr, TypeError> {
+    fn infer_resume(&mut self, value: &ast::Expr, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         // Validate we're inside a handler scope
         if !self.resolver.in_handler() {
             self.errors.push(TypeError::new(
@@ -1000,13 +1000,13 @@ impl<'a> TypeContext<'a> {
             let value_ty = self.unifier.resolve(&value_expr.ty);
             let expected = self.unifier.resolve(expected_ty);
             if self.unifier.unify(&value_ty, &expected, span).is_err() {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ResumeTypeMismatch {
                         expected: format!("{}", expected),
                         found: format!("{}", value_ty),
                     },
                     span,
-                ));
+                )));
             }
         }
 
@@ -1043,7 +1043,7 @@ impl<'a> TypeContext<'a> {
         method_name: &str,
         args: &[hir::Expr],
         span: Span,
-    ) -> Result<Option<hir::Expr>, TypeError> {
+    ) -> Result<Option<hir::Expr>, Box<TypeError>> {
         // Get the underlying receiver type (auto-deref if needed)
         let receiver_ty = match receiver_expr.ty.kind() {
             TypeKind::Ref { inner, .. } => inner.clone(),
@@ -1124,7 +1124,7 @@ impl<'a> TypeContext<'a> {
         closure: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let option_def_id = self.option_def_id.expect("option_def_id must be set");
 
         // Get U from closure type: fn(T) -> U
@@ -1237,7 +1237,7 @@ impl<'a> TypeContext<'a> {
         closure: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let option_def_id = self.option_def_id.expect("option_def_id must be set");
 
         // Get Option<U> from closure return type
@@ -1342,7 +1342,7 @@ impl<'a> TypeContext<'a> {
         predicate: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = receiver.ty.clone();
 
         let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
@@ -1449,7 +1449,7 @@ impl<'a> TypeContext<'a> {
         closure: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Result type is U (return type of closure)
         let result_ty = match closure.ty.kind() {
             TypeKind::Fn { ret, .. } => ret.clone(),
@@ -1534,7 +1534,7 @@ impl<'a> TypeContext<'a> {
         closure: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = match closure.ty.kind() {
             TypeKind::Fn { ret, .. } => ret.clone(),
             TypeKind::Closure { ret, .. } => ret.clone(),
@@ -1625,7 +1625,7 @@ impl<'a> TypeContext<'a> {
         closure: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = receiver.ty.clone();
 
         let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
@@ -1713,7 +1713,7 @@ impl<'a> TypeContext<'a> {
         closure: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = t_ty.clone();
 
         let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
@@ -1791,7 +1791,7 @@ impl<'a> TypeContext<'a> {
         receiver: &hir::Expr,
         t_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = t_ty.clone();
 
         let (some_def_id, none_def_id) = self.get_option_variant_def_ids()?;
@@ -1859,7 +1859,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Helper to get Option's Some and None variant DefIds
-    fn get_option_variant_def_ids(&self) -> Result<(DefId, DefId), TypeError> {
+    fn get_option_variant_def_ids(&self) -> Result<(DefId, DefId), Box<TypeError>> {
         let option_def_id = self.option_def_id.expect("option_def_id must be set");
 
         // Look up the enum info to get variant def IDs
@@ -1880,7 +1880,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Helper to get Result's Ok and Err variant DefIds
-    fn get_result_variant_def_ids(&self) -> Result<(DefId, DefId), TypeError> {
+    fn get_result_variant_def_ids(&self) -> Result<(DefId, DefId), Box<TypeError>> {
         let result_def_id = self.result_def_id.expect("result_def_id must be set");
 
         if let Some(enum_info) = self.enum_defs.get(&result_def_id) {
@@ -1899,7 +1899,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Generate a default value for a type
-    fn generate_default_value(&self, ty: &Type, span: Span) -> Result<hir::Expr, TypeError> {
+    fn generate_default_value(&self, ty: &Type, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         match ty.kind() {
             TypeKind::Primitive(prim) => {
                 let lit = match prim {
@@ -1915,12 +1915,12 @@ impl<'a> TypeContext<'a> {
                     hir::PrimitiveTy::String => hir::LiteralValue::String("".to_string()),
                     hir::PrimitiveTy::Str => hir::LiteralValue::String("".to_string()),
                     hir::PrimitiveTy::Never => {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::UnsupportedFeature {
                                 feature: "Never type has no default value".to_string(),
                             },
                             span,
-                        ));
+                        )));
                     }
                 };
                 Ok(hir::Expr::new(
@@ -1971,7 +1971,7 @@ impl<'a> TypeContext<'a> {
         t_ty: &Type,
         e_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_def_id = self.result_def_id.expect("result_def_id must be set");
 
         let u_ty = match closure.ty.kind() {
@@ -2096,7 +2096,7 @@ impl<'a> TypeContext<'a> {
         t_ty: &Type,
         e_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_def_id = self.result_def_id.expect("result_def_id must be set");
 
         let f_ty = match closure.ty.kind() {
@@ -2221,7 +2221,7 @@ impl<'a> TypeContext<'a> {
         t_ty: &Type,
         e_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = match closure.ty.kind() {
             TypeKind::Fn { ret, .. } => ret.clone(),
             TypeKind::Closure { ret, .. } => ret.clone(),
@@ -2333,7 +2333,7 @@ impl<'a> TypeContext<'a> {
         t_ty: &Type,
         e_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = match closure.ty.kind() {
             TypeKind::Fn { ret, .. } => ret.clone(),
             TypeKind::Closure { ret, .. } => ret.clone(),
@@ -2445,7 +2445,7 @@ impl<'a> TypeContext<'a> {
         t_ty: &Type,
         e_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = t_ty.clone();
 
         let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
@@ -2543,7 +2543,7 @@ impl<'a> TypeContext<'a> {
         t_ty: &Type,
         _e_ty: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let result_ty = t_ty.clone();
 
         let (ok_def_id, err_def_id) = self.get_result_variant_def_ids()?;
@@ -2624,7 +2624,7 @@ impl<'a> TypeContext<'a> {
         method: &ast::Symbol,
         args: &[ast::CallArg],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let receiver_expr = self.infer_expr(receiver)?;
         let method_name = self.symbol_to_string(*method);
 
@@ -2869,7 +2869,7 @@ impl<'a> TypeContext<'a> {
         method_name: &str,
         _args: &[hir::Expr],
         span: Span,
-    ) -> Result<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>, bool), TypeError> {
+    ) -> Result<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>, bool), Box<TypeError>> {
         // Try to find the method on the receiver type directly
         if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(receiver_ty, method_name) {
             // Check if we need to auto-ref the receiver
@@ -3419,14 +3419,14 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Convert an AST type to an HIR type.
-    pub(crate) fn ast_type_to_hir_type(&mut self, ty: &ast::Type) -> Result<Type, TypeError> {
+    pub(crate) fn ast_type_to_hir_type(&mut self, ty: &ast::Type) -> Result<Type, Box<TypeError>> {
         match &ty.kind {
             ast::TypeKind::Path(path) => {
                 if path.segments.is_empty() {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::TypeNotFound { name: "empty path".to_string() },
                         ty.span,
-                    ));
+                    )));
                 }
 
                 // Handle simple single-segment paths
@@ -3465,10 +3465,10 @@ impl<'a> TypeContext<'a> {
                             if let Some(ref self_ty) = self.current_impl_self_ty {
                                 return Ok(self_ty.clone());
                             }
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::TypeNotFound { name: "Self".to_string() },
                                 ty.span,
-                            ));
+                            )));
                         }
                         // Non-primitive type names: fall through to user-defined type lookup
                         _ => {}
@@ -3563,12 +3563,12 @@ impl<'a> TypeContext<'a> {
                                 }
                             }
                         }
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::TypeNotFound {
                                 name: format!("Self::{}", second_segment),
                             },
                             ty.span,
-                        ));
+                        )));
                     }
 
                     // Module::Type or Bridge::Type
@@ -3856,12 +3856,12 @@ impl<'a> TypeContext<'a> {
                 };
                 let size = const_eval::eval_const_expr_with_lookup(size, &lookup)?
                     .as_u64()
-                    .ok_or_else(|| TypeError::new(
+                    .ok_or_else(|| Box::new(TypeError::new(
                         TypeErrorKind::ConstEvalError {
                             reason: "array size must be a non-negative integer".to_string(),
                         },
                         ty.span,
-                    ))?;
+                    )))?;
                 Ok(Type::array(elem_ty, size))
             }
             ast::TypeKind::Slice { element } => {
@@ -3903,7 +3903,7 @@ impl<'a> TypeContext<'a> {
                             ty: field_ty,
                         })
                     })
-                    .collect::<Result<_, TypeError>>()?;
+                    .collect::<Result<_, Box<TypeError>>>()?;
 
                 // If there's a rest (row variable), create a fresh row variable
                 let row_var = rest.as_ref().map(|_| self.unifier.fresh_row_var());
@@ -3960,7 +3960,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         path: &ast::TypePath,
         span: Span,
-    ) -> Result<Type, TypeError> {
+    ) -> Result<Type, Box<TypeError>> {
         let segments: Vec<String> = path.segments.iter()
             .map(|s| self.symbol_to_string(s.name.node))
             .collect();
@@ -3979,23 +3979,23 @@ impl<'a> TypeContext<'a> {
                     .find(|(_, info)| info.name == *first_name)
                     .map(|(def_id, _)| *def_id)
             })
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::ModuleNotFound {
                     name: first_name.clone(),
                     searched_paths: vec![first_name.clone()],
                 },
                 span,
-            ))?;
+            )))?;
 
         // Navigate through intermediate segments (all should be modules)
         for segment_name in &segments[1..segments.len()-1] {
             let module_info = self.module_defs.get(&current_module_def_id).cloned()
-                .ok_or_else(|| TypeError::new(
+                .ok_or_else(|| Box::new(TypeError::new(
                     TypeErrorKind::TypeNotFound {
                         name: format!("{} is not a module", segment_name),
                     },
                     span,
-                ))?;
+                )))?;
 
             // Find the next segment within this module's items
             let mut found = false;
@@ -4013,12 +4013,12 @@ impl<'a> TypeContext<'a> {
             }
 
             if !found {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::TypeNotFound {
                         name: format!("{}::{}", module_info.name, segment_name),
                     },
                     span,
-                ));
+                )));
             }
         }
 
@@ -4026,12 +4026,12 @@ impl<'a> TypeContext<'a> {
         // SAFETY: segments.len() >= 3 guaranteed by check at line 3817
         let type_name = segments.last().expect("BUG: segments guaranteed non-empty by guard at function start");
         let module_info = self.module_defs.get(&current_module_def_id).cloned()
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::TypeNotFound {
                     name: segments.join("::"),
                 },
                 span,
-            ))?;
+            )))?;
 
         // Find the type in the module's items
         for &item_def_id in &module_info.items {
@@ -4088,12 +4088,12 @@ impl<'a> TypeContext<'a> {
             }
         }
 
-        Err(TypeError::new(
+        Err(Box::new(TypeError::new(
             TypeErrorKind::TypeNotFound {
                 name: segments.join("::"),
             },
             span,
-        ))
+        )))
     }
 
     /// Infer type of an index expression.
@@ -4102,7 +4102,7 @@ impl<'a> TypeContext<'a> {
         base: &ast::Expr,
         index: &ast::Expr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let base_expr = self.infer_expr(base)?;
         let index_expr = self.infer_expr(index)?;
 
@@ -4113,10 +4113,10 @@ impl<'a> TypeContext<'a> {
                 self.unifier.unify(&index_expr.ty, &Type::i32(), span)?;
             }
             _ => {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::NotIndexable { ty: index_expr.ty.clone() },
                     span,
-                ));
+                )));
             }
         }
 
@@ -4139,16 +4139,16 @@ impl<'a> TypeContext<'a> {
                     if !args.is_empty() {
                         args[0].clone()
                     } else {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
                             span,
-                        ));
+                        )));
                     }
                 } else {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
                         span,
-                    ));
+                    )));
                 }
             }
             TypeKind::Ref { inner, .. } => {
@@ -4163,31 +4163,31 @@ impl<'a> TypeContext<'a> {
                             if !args.is_empty() {
                                 args[0].clone()
                             } else {
-                                return Err(TypeError::new(
+                                return Err(Box::new(TypeError::new(
                                     TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
                                     span,
-                                ));
+                                )));
                             }
                         } else {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
                                 span,
-                            ));
+                            )));
                         }
                     }
                     _ => {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
                             span,
-                        ));
+                        )));
                     }
                 }
             }
             _ => {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::NotIndexable { ty: base_expr.ty.clone() },
                     span,
-                ));
+                )));
             }
         };
 
@@ -4206,7 +4206,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         array_expr: &ast::ArrayExpr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         match array_expr {
             ast::ArrayExpr::List(elements) => {
                 if elements.is_empty() {
@@ -4267,7 +4267,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a literal.
-    pub(crate) fn infer_literal(&mut self, lit: &ast::Literal, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_literal(&mut self, lit: &ast::Literal, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let (value, ty) = match &lit.kind {
             ast::LiteralKind::Int { value, suffix } => {
                 let ty = match suffix {
@@ -4317,7 +4317,7 @@ impl<'a> TypeContext<'a> {
 
     /// Check a literal against an expected type.
     /// This allows unsuffixed numeric literals to be coerced to the expected type.
-    pub(crate) fn check_literal(&mut self, lit: &ast::Literal, expected: &Type, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn check_literal(&mut self, lit: &ast::Literal, expected: &Type, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         use crate::hir::def::{FloatTy, IntTy, UintTy};
 
         let resolved_expected = self.unifier.resolve(expected);
@@ -4372,7 +4372,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a path (variable/function reference).
-    pub(crate) fn infer_path(&mut self, path: &ast::ExprPath, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_path(&mut self, path: &ast::ExprPath, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         if path.segments.len() == 1 {
             let name = self.symbol_to_string(path.segments[0].name.node);
 
@@ -4697,10 +4697,10 @@ impl<'a> TypeContext<'a> {
                         ));
                     }
 
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
                         span,
-                    ));
+                    )));
                 }
             }
 
@@ -4748,10 +4748,10 @@ impl<'a> TypeContext<'a> {
                         }
                     }
                     // Module found but item not found
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
                         span,
-                    ));
+                    )));
                 }
             }
 
@@ -4784,17 +4784,17 @@ impl<'a> TypeContext<'a> {
                         }
                     }
                     // Bridge found but item not found
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
                         span,
-                    ));
+                    )));
                 }
             }
 
-            Err(TypeError::new(
+            Err(Box::new(TypeError::new(
                 TypeErrorKind::NotFound { name: format!("{}::{}", first_name, second_name) },
                 span,
-            ))
+            )))
         } else if path.segments.len() == 3 {
             // Three-segment path: module::Type::method, module::Enum::Variant, or module::submodule::item
             let module_name = self.symbol_to_string(path.segments[0].name.node);
@@ -4895,10 +4895,10 @@ impl<'a> TypeContext<'a> {
                         }
 
                         // Item not found in submodule
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::NotFound { name: format!("{}::{}::{}", module_name, type_name, third_name) },
                             span,
-                        ));
+                        )));
                     }
                 }
 
@@ -5082,10 +5082,10 @@ impl<'a> TypeContext<'a> {
                     }
 
                     // Type found but no matching method
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{}::{}::{}", module_name, type_name, method_name) },
                         span,
-                    ));
+                    )));
                 } else {
                     // Type not found in module
                     return Err(self.error_type_not_found(
@@ -5095,22 +5095,22 @@ impl<'a> TypeContext<'a> {
                 }
             } else {
                 // Module not found
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::NotFound { name: format!("module '{}'", module_name) },
                     span,
-                ));
+                )));
             }
         } else {
             let path_str = path.segments.iter()
                 .map(|s| self.symbol_to_string(s.name.node))
                 .collect::<Vec<_>>()
                 .join("::");
-            Err(TypeError::new(
+            Err(Box::new(TypeError::new(
                 TypeErrorKind::UnsupportedFeature {
                     feature: format!("paths with more than 3 segments: {}", path_str),
                 },
                 span,
-            ))
+            )))
         }
     }
 
@@ -5121,7 +5121,7 @@ impl<'a> TypeContext<'a> {
         left: &ast::Expr,
         right: &ast::Expr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let left_expr = self.infer_expr(left)?;
         // Use check_expr for right side to propagate left type for better literal inference
         let right_expr = self.check_expr(right, &left_expr.ty).unwrap_or_else(|_| {
@@ -5155,22 +5155,22 @@ impl<'a> TypeContext<'a> {
                 match right_expr.ty.kind() {
                     TypeKind::Fn { params, ret, .. } => {
                         if params.is_empty() {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::WrongArity {
                                     expected: 1,
                                     found: 0,
                                 },
                                 span,
-                            ));
+                            )));
                         }
                         self.unifier.unify(&left_expr.ty, &params[0], span)?;
                         ret.clone()
                     }
                     _ => {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::NotAFunction { ty: right_expr.ty.clone() },
                             span,
-                        ));
+                        )));
                     }
                 }
             }
@@ -5193,7 +5193,7 @@ impl<'a> TypeContext<'a> {
         op: ast::UnaryOp,
         operand: &ast::Expr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let operand_expr = self.infer_expr(operand)?;
 
         let result_ty = match op {
@@ -5209,23 +5209,23 @@ impl<'a> TypeContext<'a> {
                             if info.name == "Box" && args.len() == 1 {
                                 args[0].clone()
                             } else {
-                                return Err(TypeError::new(
+                                return Err(Box::new(TypeError::new(
                                     TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
                                     span,
-                                ));
+                                )));
                             }
                         } else {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
                                 span,
-                            ));
+                            )));
                         }
                     }
                     _ => {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::CannotDeref { ty: operand_expr.ty.clone() },
                             span,
-                        ));
+                        )));
                     }
                 }
             }
@@ -5253,7 +5253,7 @@ impl<'a> TypeContext<'a> {
         callee: &ast::Expr,
         args: &[ast::CallArg],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let callee_expr = self.infer_expr(callee)?;
 
         // Handle multiple dispatch: if callee is a MethodFamily, resolve to specific method
@@ -5344,21 +5344,21 @@ impl<'a> TypeContext<'a> {
         let (param_types, return_type) = match instantiated_ty.kind() {
             TypeKind::Fn { params, ret, .. } => (params.clone(), ret.clone()),
             _ => {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::NotAFunction { ty: callee_expr.ty.clone() },
                     span,
-                ));
+                )));
             }
         };
 
         if args.len() != param_types.len() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::WrongArity {
                     expected: param_types.len(),
                     found: args.len(),
                 },
                 span,
-            ));
+            )));
         }
 
         // Check effect compatibility
@@ -5476,7 +5476,7 @@ impl<'a> TypeContext<'a> {
         candidates: &[DefId],
         args: &[ast::CallArg],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // First, infer the types of all arguments to guide dispatch
         let mut inferred_arg_types = Vec::new();
         for arg in args {
@@ -5517,13 +5517,13 @@ impl<'a> TypeContext<'a> {
             let arg_types: Vec<String> = inferred_arg_types.iter()
                 .map(|t| format!("{:?}", t))
                 .collect();
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::NoApplicableMethod {
                     name: name.to_string(),
                     arg_types,
                 },
                 span,
-            ));
+            )));
         }
 
         // If exactly one applicable method, use it
@@ -5580,13 +5580,13 @@ impl<'a> TypeContext<'a> {
                 format!("({})", params.join(", "))
             })
             .collect();
-        Err(TypeError::new(
+        Err(Box::new(TypeError::new(
             TypeErrorKind::AmbiguousDispatch {
                 name: name.to_string(),
                 candidates: candidate_sigs,
             },
             span,
-        ))
+        )))
     }
 
     /// Infer type of an if expression.
@@ -5596,7 +5596,7 @@ impl<'a> TypeContext<'a> {
         then_branch: &ast::Block,
         else_branch: Option<&ast::ElseBranch>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let cond_expr = self.check_expr(condition, &Type::bool())?;
 
         let expected = self.unifier.fresh_var();
@@ -5638,7 +5638,7 @@ impl<'a> TypeContext<'a> {
         else_branch: Option<&ast::ElseBranch>,
         expected: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let cond_expr = self.check_expr(condition, &Type::bool())?;
 
         // Use expected type directly instead of fresh variable
@@ -5687,7 +5687,7 @@ impl<'a> TypeContext<'a> {
         then_branch: &ast::Block,
         else_branch: Option<&ast::ElseBranch>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Infer the scrutinee type
         let scrutinee_expr = self.infer_expr(scrutinee)?;
         let scrutinee_ty = scrutinee_expr.ty.clone();
@@ -5757,7 +5757,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a return expression.
-    pub(crate) fn infer_return(&mut self, value: Option<&ast::Expr>, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_return(&mut self, value: Option<&ast::Expr>, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let return_type = self.return_type.clone().ok_or_else(|| {
             TypeError::new(TypeErrorKind::ReturnOutsideFunction, span)
         })?;
@@ -5777,7 +5777,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a tuple expression.
-    pub(crate) fn infer_tuple(&mut self, exprs: &[ast::Expr], span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_tuple(&mut self, exprs: &[ast::Expr], span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let mut hir_exprs = Vec::new();
         let mut types = Vec::new();
 
@@ -5795,7 +5795,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of an assignment.
-    pub(crate) fn infer_assign(&mut self, target: &ast::Expr, value: &ast::Expr, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_assign(&mut self, target: &ast::Expr, value: &ast::Expr, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let target_expr = self.infer_expr(target)?;
         let value_expr = self.check_expr(value, &target_expr.ty)?;
 
@@ -5810,7 +5810,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a loop.
-    pub(crate) fn infer_loop(&mut self, body: &ast::Block, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_loop(&mut self, body: &ast::Block, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -5832,7 +5832,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a while loop.
-    pub(crate) fn infer_while(&mut self, condition: &ast::Expr, body: &ast::Block, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_while(&mut self, condition: &ast::Expr, body: &ast::Block, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -5874,7 +5874,7 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -5957,7 +5957,7 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Try to match range expression first
         if let ast::ExprKind::Range { start, end, inclusive } = &iter.kind {
             let start = start.as_ref().ok_or_else(|| {
@@ -6029,7 +6029,7 @@ impl<'a> TypeContext<'a> {
         }
 
         // Not a supported iterable type
-        Err(TypeError::new(
+        Err(Box::new(TypeError::new(
             TypeErrorKind::UnsupportedFeature {
                 feature: format!(
                     "For loop over type `{}` not supported. Use range expressions (0..n), arrays, or Vec.",
@@ -6037,7 +6037,7 @@ impl<'a> TypeContext<'a> {
                 ),
             },
             iter.span,
-        ))
+        )))
     }
 
     /// Helper: Infer for loop over a range expression.
@@ -6050,18 +6050,18 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Extract variable name, or None for wildcard pattern
         let var_name = match &pattern.kind {
             ast::PatternKind::Ident { name, .. } => Some(self.symbol_to_string(name.node)),
             ast::PatternKind::Wildcard => None,
             _ => {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: "For loop currently only supports simple identifier or wildcard patterns".into(),
                     },
                     pattern.span,
-                ));
+                )));
             }
         };
 
@@ -6229,7 +6229,7 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -6421,7 +6421,7 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let loop_id = self.enter_loop(label_str.as_deref());
 
@@ -6641,7 +6641,7 @@ impl<'a> TypeContext<'a> {
         body: &ast::Block,
         label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let label_str = label.map(|l| self.symbol_to_string(l.node));
         let _loop_id = self.enter_loop(label_str.as_deref());
 
@@ -6861,19 +6861,19 @@ impl<'a> TypeContext<'a> {
         _body: &ast::Block,
         _label: Option<&Spanned<ast::Symbol>>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
-        Err(TypeError::new(
+    ) -> Result<hir::Expr, Box<TypeError>> {
+        Err(Box::new(TypeError::new(
             TypeErrorKind::UnsupportedFeature {
                 feature: "Consuming iteration over Vec not supported. Use `&vec` or `&mut vec` instead.".into(),
             },
             span,
-        ))
+        )))
     }
 
     /// Infer type of a break.
-    pub(crate) fn infer_break(&mut self, value: Option<&ast::Expr>, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_break(&mut self, value: Option<&ast::Expr>, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         if !self.resolver.in_loop() {
-            return Err(TypeError::new(TypeErrorKind::BreakOutsideLoop, span));
+            return Err(Box::new(TypeError::new(TypeErrorKind::BreakOutsideLoop, span)));
         }
 
         let label_str = label.map(|l| self.symbol_to_string(l.node));
@@ -6881,10 +6881,10 @@ impl<'a> TypeContext<'a> {
 
         // Check that the label exists
         if label.is_some() && loop_id.is_none() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::UnresolvedName { name: label_str.unwrap_or_default() },
                 span,
-            ));
+            )));
         }
 
         let (value_expr, break_ty) = if let Some(value) = value {
@@ -6911,9 +6911,9 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of a continue.
-    pub(crate) fn infer_continue(&mut self, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn infer_continue(&mut self, label: Option<&Spanned<ast::Symbol>>, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         if !self.resolver.in_loop() {
-            return Err(TypeError::new(TypeErrorKind::ContinueOutsideLoop, span));
+            return Err(Box::new(TypeError::new(TypeErrorKind::ContinueOutsideLoop, span)));
         }
 
         let label_str = label.map(|l| self.symbol_to_string(l.node));
@@ -6921,10 +6921,10 @@ impl<'a> TypeContext<'a> {
 
         // Check that the label exists
         if label.is_some() && loop_id.is_none() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::UnresolvedName { name: label_str.unwrap_or_default() },
                 span,
-            ));
+            )));
         }
 
         Ok(hir::Expr::new(
@@ -6940,7 +6940,7 @@ impl<'a> TypeContext<'a> {
         scrutinee: &ast::Expr,
         arms: &[ast::MatchArm],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let scrutinee_expr = self.infer_expr(scrutinee)?;
 
         if arms.is_empty() {
@@ -6988,12 +6988,12 @@ impl<'a> TypeContext<'a> {
         );
 
         if !result.is_exhaustive {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::NonExhaustivePatterns {
                     missing: result.missing_patterns,
                 },
                 span,
-            ));
+            )));
         }
 
         // Report unreachable patterns
@@ -7026,7 +7026,7 @@ impl<'a> TypeContext<'a> {
         arms: &[ast::MatchArm],
         expected: &Type,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let scrutinee_expr = self.infer_expr(scrutinee)?;
 
         if arms.is_empty() {
@@ -7074,12 +7074,12 @@ impl<'a> TypeContext<'a> {
         );
 
         if !result.is_exhaustive {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::NonExhaustivePatterns {
                     missing: result.missing_patterns,
                 },
                 span,
-            ));
+            )));
         }
 
         // Report unreachable patterns
@@ -7114,7 +7114,7 @@ impl<'a> TypeContext<'a> {
         fields: &[ast::RecordExprField],
         base: Option<&ast::Expr>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let (def_id, struct_info, result_ty) = if let Some(path) = path {
             if path.segments.len() == 1 {
                 let name = self.symbol_to_string(path.segments[0].name.node);
@@ -7133,10 +7133,10 @@ impl<'a> TypeContext<'a> {
                         let result_ty = Type::adt(def_id, Vec::new());
                         (def_id, struct_info, result_ty)
                     } else {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::NotAStruct { ty: Type::adt(def_id, Vec::new()) },
                             span,
-                        ));
+                        )));
                     }
                 } else {
                     return Err(self.error_type_not_found(&name, span));
@@ -7165,10 +7165,10 @@ impl<'a> TypeContext<'a> {
                         let result_ty = Type::adt(def_id, Vec::new());
                         (def_id, struct_info.clone(), result_ty)
                     } else {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::NotAStruct { ty: Type::adt(def_id, Vec::new()) },
                             span,
-                        ));
+                        )));
                     }
                 } else {
                     // Check if first segment is an enum type and second is a variant
@@ -7200,13 +7200,13 @@ impl<'a> TypeContext<'a> {
                                     let variant_field = match variant_fields.iter().find(|f| f.name == field_name) {
                                         Some(f) => f,
                                         None => {
-                                            return Err(TypeError::new(
+                                            return Err(Box::new(TypeError::new(
                                                 TypeErrorKind::UnknownField {
                                                     ty: Type::adt(enum_def_id, type_args.clone()),
                                                     field: field_name,
                                                 },
                                                 field.span,
-                                            ));
+                                            )));
                                         }
                                     };
 
@@ -7415,13 +7415,13 @@ impl<'a> TypeContext<'a> {
                                     let variant_field = match variant_fields.iter().find(|f| f.name == field_name) {
                                         Some(f) => f,
                                         None => {
-                                            return Err(TypeError::new(
+                                            return Err(Box::new(TypeError::new(
                                                 TypeErrorKind::UnknownField {
                                                     ty: Type::adt(enum_def_id, type_args.clone()),
                                                     field: field_name,
                                                 },
                                                 field.span,
-                                            ));
+                                            )));
                                         }
                                     };
 
@@ -7523,13 +7523,13 @@ impl<'a> TypeContext<'a> {
                             let expected_ty = struct_info.fields.iter()
                                 .find(|f| f.name == field_name)
                                 .map(|f| self.substitute_type_vars(&f.ty, &subst))
-                                .ok_or_else(|| TypeError::new(
+                                .ok_or_else(|| Box::new(TypeError::new(
                                     TypeErrorKind::Mismatch {
                                         expected: struct_ty.clone(),
                                         found: Type::error(),
                                     },
                                     field.span,
-                                ))?;
+                                )))?;
 
                             let value_expr = if let Some(value) = &field.value {
                                 self.check_expr(value, &expected_ty)?
@@ -7571,12 +7571,12 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::TypeNotFound {
                         name: segments.join("::"),
                     },
                     span,
-                ));
+                )));
             }
         } else {
             // Anonymous record literal: { x: 1, y: 2 }
@@ -7657,13 +7657,13 @@ impl<'a> TypeContext<'a> {
             match base_ty.kind() {
                 TypeKind::Adt { def_id: base_def_id, args: base_args } => {
                     if *base_def_id != def_id {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::Mismatch {
                                 expected: result_ty.clone(),
                                 found: base_ty,
                             },
                             base_expr.span,
-                        ));
+                        )));
                     }
 
                     // Unify type arguments from base with our fresh type vars
@@ -7680,10 +7680,10 @@ impl<'a> TypeContext<'a> {
                     }
                 }
                 _ => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::NotAStruct { ty: base_ty },
                         base_expr.span,
-                    ));
+                    )));
                 }
             }
 
@@ -7755,13 +7755,13 @@ impl<'a> TypeContext<'a> {
         if hir_base.is_none() {
             for field_info in &struct_info.fields {
                 if !provided_field_names.contains(&field_info.name) {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::MissingField {
                             ty: result_ty.clone(),
                             field: field_info.name.clone(),
                         },
                         span,
-                    ));
+                    )));
                 }
             }
         }
@@ -7789,7 +7789,7 @@ impl<'a> TypeContext<'a> {
         base: &ast::Expr,
         field: &ast::FieldAccess,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let base_expr = self.infer_expr(base)?;
         let base_ty = self.unifier.resolve(&base_expr.ty);
 
@@ -7870,10 +7870,10 @@ impl<'a> TypeContext<'a> {
                     return Err(self.error_unknown_field(&inner_ty, &field_name, span));
                 }
 
-                Err(TypeError::new(
+                Err(Box::new(TypeError::new(
                     TypeErrorKind::NotAStruct { ty: inner_ty },
                     span,
-                ))
+                )))
             }
             ast::FieldAccess::Index(index, _span) => {
                 if let TypeKind::Tuple(types) = inner_ty.kind() {
@@ -7890,16 +7890,16 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                Err(TypeError::new(
+                Err(Box::new(TypeError::new(
                     TypeErrorKind::NotATuple { ty: inner_ty },
                     span,
-                ))
+                )))
             }
         }
     }
 
     /// Infer type of a cast expression.
-    fn infer_cast(&mut self, inner: &ast::Expr, ty: &ast::Type, span: Span) -> Result<hir::Expr, TypeError> {
+    fn infer_cast(&mut self, inner: &ast::Expr, ty: &ast::Type, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let inner_expr = self.infer_expr(inner)?;
         let target_ty = self.ast_type_to_hir_type(ty)?;
 
@@ -7920,7 +7920,7 @@ impl<'a> TypeContext<'a> {
         target: &ast::Expr,
         value: &ast::Expr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let target_expr = self.infer_expr(target)?;
         // Use check_expr to propagate target type for better literal inference
         let value_expr = self.check_expr(value, &target_expr.ty)?;
@@ -7945,7 +7945,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Infer type of an unsafe block.
-    fn infer_unsafe(&mut self, block: &ast::Block, span: Span) -> Result<hir::Expr, TypeError> {
+    fn infer_unsafe(&mut self, block: &ast::Block, span: Span) -> Result<hir::Expr, Box<TypeError>> {
         let expected = self.unifier.fresh_var();
         let block_expr = self.check_block(block, &expected)?;
         let result_ty = block_expr.ty.clone();
@@ -7964,7 +7964,7 @@ impl<'a> TypeContext<'a> {
         end: Option<&ast::Expr>,
         inclusive: bool,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let (start_expr, end_expr, element_ty) = match (start, end) {
             (Some(s), Some(e)) => {
                 let start_expr = self.infer_expr(s)?;
@@ -8011,7 +8011,7 @@ impl<'a> TypeContext<'a> {
         path: &ast::ExprPath,
         kind: &ast::MacroCallKind,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Get the macro name for dispatch
         let macro_name = path.segments.last()
             .map(|seg| self.interner.resolve(seg.name.node).unwrap_or("").to_string())
@@ -8045,12 +8045,12 @@ impl<'a> TypeContext<'a> {
 
             // Custom/user-defined macros - not yet supported
             ast::MacroCallKind::Custom { .. } => {
-                Err(TypeError::new(
+                Err(Box::new(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: format!("user-defined macro `{}!`", macro_name),
                     },
                     span,
-                ))
+                )))
             }
         }
     }
@@ -8063,7 +8063,7 @@ impl<'a> TypeContext<'a> {
         args: &[ast::Expr],
         named_args: &[(String, ast::Expr)],
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Type-check all positional arguments
         let mut checked_args = Vec::new();
         for arg in args {
@@ -8122,7 +8122,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         vec_args: &ast::VecMacroArgs,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         match vec_args {
             ast::VecMacroArgs::List(elements) => {
                 // Type-check all elements
@@ -8165,13 +8165,13 @@ impl<'a> TypeContext<'a> {
                     )
                 );
                 if !count_is_int {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::Mismatch {
                             expected: Type::usize(),
                             found: count_expr.ty.clone(),
                         },
                         count.span,
-                    ));
+                    )));
                 }
 
                 let element_ty = value_expr.ty.clone();
@@ -8194,12 +8194,12 @@ impl<'a> TypeContext<'a> {
                     }
                     None => {
                         // Count is not a constant - for now, error
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::UnsupportedFeature {
                                 feature: "vec! repeat count must be a constant integer literal".to_string(),
                             },
                             span,
-                        ).with_help("use a literal like `vec![0; 10]` instead of a variable"))
+                        ).with_help("use a literal like `vec![0; 10]` instead of a variable")))
                     }
                 }
             }
@@ -8212,7 +8212,7 @@ impl<'a> TypeContext<'a> {
         condition: &ast::Expr,
         message: Option<&ast::Expr>,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let cond_expr = self.infer_expr(condition)?;
 
         // Condition must be bool
@@ -8240,7 +8240,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         expr: &ast::Expr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         let inner_expr = self.infer_expr(expr)?;
         let ty = inner_expr.ty.clone();
 
@@ -8262,7 +8262,7 @@ impl<'a> TypeContext<'a> {
         expr: &ast::Expr,
         pattern: &ast::Pattern,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Type-check the scrutinee expression
         let scrutinee = self.infer_expr(expr)?;
         let scrutinee_ty = scrutinee.ty.clone();

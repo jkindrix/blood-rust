@@ -27,7 +27,7 @@ impl<'a> TypeContext<'a> {
         let pending_consts = std::mem::take(&mut self.pending_consts);
         for (def_id, const_decl) in pending_consts {
             if let Err(e) = self.check_const_body(def_id, &const_decl) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
@@ -35,7 +35,7 @@ impl<'a> TypeContext<'a> {
         let pending_statics = std::mem::take(&mut self.pending_statics);
         for (def_id, static_decl) in pending_statics {
             if let Err(e) = self.check_static_body(def_id, &static_decl) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
@@ -61,20 +61,15 @@ impl<'a> TypeContext<'a> {
                 }
                 if let Err(e) = result {
                     // Attach source file info for errors in external modules
-                    let e = if let Some(mod_id) = parent_module {
+                    let mut err = *e;
+                    if let Some(mod_id) = parent_module {
                         if let Some(mod_info) = self.module_defs.get(&mod_id) {
                             if let (Some(path), Some(content)) = (&mod_info.source_path, &mod_info.source_content) {
-                                e.with_source_file(path.clone(), content.clone())
-                            } else {
-                                e
+                                err = err.with_source_file(path.clone(), content.clone());
                             }
-                        } else {
-                            e
                         }
-                    } else {
-                        e
-                    };
-                    self.errors.push(e);
+                    }
+                    self.errors.push(err);
                 }
             }
         }
@@ -83,7 +78,7 @@ impl<'a> TypeContext<'a> {
         let pending_handlers = std::mem::take(&mut self.pending_handlers);
         for (def_id, handler) in pending_handlers {
             if let Err(e) = self.check_handler_body(def_id, &handler) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
@@ -173,13 +168,13 @@ impl<'a> TypeContext<'a> {
     ///
     /// Const items must have a value that can be evaluated at compile time.
     /// For now, we type-check the expression and store it as a body.
-    pub(crate) fn check_const_body(&mut self, def_id: DefId, const_decl: &ast::ConstDecl) -> Result<(), TypeError> {
+    pub(crate) fn check_const_body(&mut self, def_id: DefId, const_decl: &ast::ConstDecl) -> Result<(), Box<TypeError>> {
         // Get the declared type from const_defs
         let const_info = self.const_defs.get(&def_id).cloned()
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::NotFound { name: format!("const info for {def_id}") },
                 const_decl.span,
-            ))?;
+            )))?;
 
         let expected_ty = const_info.ty.clone();
 
@@ -204,13 +199,13 @@ impl<'a> TypeContext<'a> {
 
         // Unify with the declared type
         self.unifier.unify(&expected_ty, &value_ty, const_decl.value.span)
-            .map_err(|_| TypeError::new(
+            .map_err(|_| Box::new(TypeError::new(
                 TypeErrorKind::Mismatch {
                     expected: expected_ty.clone(),
                     found: value_ty.clone(),
                 },
                 const_decl.value.span,
-            ))?;
+            )))?;
 
         // Create body for the const initializer
         let body_id = hir::BodyId::new(self.next_body_id);
@@ -241,13 +236,13 @@ impl<'a> TypeContext<'a> {
     ///
     /// Static items have an initializer that runs at program startup.
     /// The value does not need to be const-evaluable (unlike const items).
-    pub(crate) fn check_static_body(&mut self, def_id: DefId, static_decl: &ast::StaticDecl) -> Result<(), TypeError> {
+    pub(crate) fn check_static_body(&mut self, def_id: DefId, static_decl: &ast::StaticDecl) -> Result<(), Box<TypeError>> {
         // Get the declared type from static_defs
         let static_info = self.static_defs.get(&def_id).cloned()
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::NotFound { name: format!("static info for {def_id}") },
                 static_decl.span,
-            ))?;
+            )))?;
 
         let expected_ty = static_info.ty.clone();
 
@@ -272,13 +267,13 @@ impl<'a> TypeContext<'a> {
 
         // Unify with the declared type
         self.unifier.unify(&expected_ty, &value_ty, static_decl.value.span)
-            .map_err(|_| TypeError::new(
+            .map_err(|_| Box::new(TypeError::new(
                 TypeErrorKind::Mismatch {
                     expected: expected_ty.clone(),
                     found: value_ty.clone(),
                 },
                 static_decl.value.span,
-            ))?;
+            )))?;
 
         // Create body for the static initializer
         let body_id = hir::BodyId::new(self.next_body_id);
@@ -306,17 +301,17 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Type-check a function body.
-    pub(crate) fn check_function_body(&mut self, def_id: DefId, func: &ast::FnDecl) -> Result<(), TypeError> {
-        let body = func.body.as_ref().ok_or_else(|| TypeError::new(
+    pub(crate) fn check_function_body(&mut self, def_id: DefId, func: &ast::FnDecl) -> Result<(), Box<TypeError>> {
+        let body = func.body.as_ref().ok_or_else(|| Box::new(TypeError::new(
             TypeErrorKind::NotFound { name: format!("body for {def_id}") },
             func.span,
-        ))?;
+        )))?;
 
         let sig = self.fn_sigs.get(&def_id).cloned()
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::NotFound { name: format!("fn sig for {def_id}") },
                 func.span,
-            ))?;
+            )))?;
 
         // Save state for nested function support - these fields are modified
         // during type-checking and need to be restored after nested functions
@@ -442,21 +437,21 @@ impl<'a> TypeContext<'a> {
                     let elem_types = match param_ty.kind() {
                         hir::TypeKind::Tuple(elems) => elems.clone(),
                         _ => {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::NotATuple { ty: param_ty.clone() },
                                 param.span,
-                            ));
+                            )));
                         }
                     };
 
                     if fields.len() != elem_types.len() {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::WrongArity {
                                 expected: elem_types.len(),
                                 found: fields.len(),
                             },
                             param.span,
-                        ));
+                        )));
                     }
 
                     // Define each element of the tuple pattern
@@ -475,12 +470,12 @@ impl<'a> TypeContext<'a> {
                 }
                 _ => {
                     // Other complex patterns - return an error instead of silently failing
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::UnsupportedFeature {
                             feature: "complex patterns in function parameters (only identifiers and tuples supported)".to_string(),
                         },
                         param.span,
-                    ));
+                    )));
                 }
             }
         }
@@ -519,20 +514,20 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Type-check a handler's operation and return clause bodies.
-    pub(crate) fn check_handler_body(&mut self, handler_def_id: DefId, handler: &ast::HandlerDecl) -> Result<(), TypeError> {
+    pub(crate) fn check_handler_body(&mut self, handler_def_id: DefId, handler: &ast::HandlerDecl) -> Result<(), Box<TypeError>> {
         // Get the handler info to find the effect
         let handler_info = self.handler_defs.get(&handler_def_id).cloned()
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::NotFound { name: format!("handler info for {handler_def_id}") },
                 handler.span,
-            ))?;
+            )))?;
 
         let effect_id = handler_info.effect_id;
         let effect_info = self.effect_defs.get(&effect_id).cloned()
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::NotAnEffect { name: format!("effect {effect_id}") },
                 handler.span,
-            ))?;
+            )))?;
 
         // Build substitution map from effect's generic params to handler's type args.
         // This is needed because the effect's operation types (e.g., `put(s: S)`) use
@@ -553,12 +548,12 @@ impl<'a> TypeContext<'a> {
             // Find the effect operation info to get the expected signature
             let effect_op = effect_info.operations.iter()
                 .find(|op| op.name == op_name)
-                .ok_or_else(|| TypeError::new(
+                .ok_or_else(|| Box::new(TypeError::new(
                     TypeErrorKind::InvalidHandler {
                         reason: format!("operation `{}` not found in effect", op_name),
                     },
                     op_impl.span,
-                ))?;
+                )))?;
 
             // Set up scope for operation body
             // Use ScopeKind::Handler so that `resume` is recognized as being in a handler
@@ -679,13 +674,13 @@ impl<'a> TypeContext<'a> {
 
             // Check linearity constraint for shallow handlers
             if handler_info.kind == ast::HandlerKind::Shallow && self.resume_count_in_current_op > 1 {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::MultipleResumesInShallowHandler {
                         operation: op_name.clone(),
                         count: self.resume_count_in_current_op,
                     },
                     op_impl.span,
-                ));
+                )));
             }
 
             // Check linearity constraint for deep handlers with linear/affine state
@@ -698,7 +693,7 @@ impl<'a> TypeContext<'a> {
                     let field_name = self.symbol_to_string(state_field.name.node);
 
                     if self.is_type_linear(field_ty) {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::LinearValueInMultiShotHandler {
                                 operation: op_name.clone(),
                                 field_name,
@@ -709,11 +704,11 @@ impl<'a> TypeContext<'a> {
                             "linear values must be used exactly once, but multi-shot handlers \
                              can resume multiple times. Consider restructuring to single-shot \
                              resumption."
-                        ));
+                        )));
                     }
 
                     if self.is_type_affine(field_ty) {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::AffineValueInMultiShotHandler {
                                 operation: op_name.clone(),
                                 field_name,
@@ -724,7 +719,7 @@ impl<'a> TypeContext<'a> {
                             "affine values may be used at most once, but multi-shot handlers \
                              can resume multiple times. Consider restructuring to single-shot \
                              resumption."
-                        ));
+                        )));
                     }
                 }
             }
@@ -843,7 +838,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Type-check a block.
-    pub(crate) fn check_block(&mut self, block: &ast::Block, expected: &Type) -> Result<hir::Expr, TypeError> {
+    pub(crate) fn check_block(&mut self, block: &ast::Block, expected: &Type) -> Result<hir::Expr, Box<TypeError>> {
         self.resolver.push_scope(ScopeKind::Block, block.span);
 
         // First pass: collect all items so nested functions can see each other
@@ -862,20 +857,15 @@ impl<'a> TypeContext<'a> {
                 // because the block scope is already active
                 if let Err(e) = self.check_function_body(def_id, &func) {
                     // Attach source file info for errors in external modules
-                    let e = if let Some(mod_id) = parent_module {
+                    let mut err = *e;
+                    if let Some(mod_id) = parent_module {
                         if let Some(mod_info) = self.module_defs.get(&mod_id) {
                             if let (Some(path), Some(content)) = (&mod_info.source_path, &mod_info.source_content) {
-                                e.with_source_file(path.clone(), content.clone())
-                            } else {
-                                e
+                                err = err.with_source_file(path.clone(), content.clone());
                             }
-                        } else {
-                            e
                         }
-                    } else {
-                        e
-                    };
-                    self.errors.push(e);
+                    }
+                    self.errors.push(err);
                 }
             }
         }
@@ -904,10 +894,10 @@ impl<'a> TypeContext<'a> {
                         (inferred.ty.clone(), Some(inferred))
                     } else {
                         // No type annotation and no value - error
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::CannotInfer,
                             *span,
-                        ));
+                        )));
                     };
 
                     // Handle the pattern (simplified: just identifiers for Phase 1)
@@ -973,7 +963,7 @@ impl<'a> TypeContext<'a> {
     /// 1. The effect is handled by an enclosing with...handle block
     /// 2. The calling function also declares the same effect
     /// 3. The calling function has a row variable (effect row polymorphism)
-    pub(crate) fn check_effect_compatibility(&mut self, callee_def_id: DefId, span: Span) -> Result<(), TypeError> {
+    pub(crate) fn check_effect_compatibility(&mut self, callee_def_id: DefId, span: Span) -> Result<(), Box<TypeError>> {
         // Get the callee's declared effects
         let callee_effects = match self.fn_effects.get(&callee_def_id) {
             Some(effects) => effects,
@@ -1028,10 +1018,10 @@ impl<'a> TypeContext<'a> {
                 .map(|info| info.name.clone())
                 .unwrap_or_else(|| format!("effect#{}", effect_id.index()));
 
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::UnhandledEffect { effect: effect_name },
                 span,
-            ));
+            )));
         }
 
         Ok(())
@@ -1045,7 +1035,7 @@ impl<'a> TypeContext<'a> {
         &mut self,
         callee_effects: &[hir::FnEffect],
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         if callee_effects.is_empty() {
             return Ok(());
         }
@@ -1091,10 +1081,10 @@ impl<'a> TypeContext<'a> {
                 .map(|info| info.name.clone())
                 .unwrap_or_else(|| format!("effect#{}", effect_id.index()));
 
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::UnhandledEffect { effect: effect_name },
                 span,
-            ));
+            )));
         }
 
         Ok(())
@@ -1111,7 +1101,7 @@ impl<'a> TypeContext<'a> {
         def_id: DefId,
         body: &hir::Body,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Infer effects from the function body
         let inferred_row = infer_effects(body);
 
@@ -1136,12 +1126,12 @@ impl<'a> TypeContext<'a> {
                     })
                     .collect();
 
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::UndeclaredEffects {
                         effects: effect_names,
                     },
                     span,
-                ));
+                )));
             }
         } else {
             // No declared effects - use inferred effects as the function's effect signature

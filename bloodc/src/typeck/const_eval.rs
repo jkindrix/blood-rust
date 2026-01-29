@@ -53,17 +53,17 @@ impl ConstResult {
 /// Returns `Ok(value)` if the expression can be evaluated at compile time,
 /// or an error if it cannot. This version does not support const item lookup;
 /// use `eval_const_expr_with_lookup` if you need to resolve const paths.
-pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, TypeError> {
+pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, Box<TypeError>> {
     match &expr.kind {
         ast::ExprKind::Literal(lit) => eval_literal(lit, expr.span),
 
         ast::ExprKind::Path(_) => {
-            Err(TypeError::new(
+            Err(Box::new(TypeError::new(
                 TypeErrorKind::ConstEvalError {
                     reason: "cannot evaluate path at compile time; only const items are allowed in const contexts".to_string(),
                 },
                 expr.span,
-            ))
+            )))
         }
 
         ast::ExprKind::Binary { left, op, right } => {
@@ -87,31 +87,31 @@ pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, TypeError> {
                     if let Some(else_expr) = else_branch {
                         eval_else_branch(else_expr)
                     } else {
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::ConstEvalError {
                                 reason: "if expression without else branch in const context".to_string(),
                             },
                             expr.span,
-                        ))
+                        )))
                     }
                 }
-                _ => Err(TypeError::new(
+                _ => Err(Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "condition must be a boolean".to_string(),
                     },
                     condition.span,
-                )),
+                ))),
             }
         }
 
         ast::ExprKind::Block(block) => eval_block(block),
 
-        _ => Err(TypeError::new(
+        _ => Err(Box::new(TypeError::new(
             TypeErrorKind::ConstEvalError {
                 reason: "expression cannot be evaluated at compile time".to_string(),
             },
             expr.span,
-        )),
+        ))),
     }
 }
 
@@ -119,7 +119,7 @@ pub fn eval_const_expr(expr: &ast::Expr) -> Result<ConstResult, TypeError> {
 ///
 /// The `lookup` function is called for path expressions to resolve const items.
 /// It receives the path expression and returns the const value if found.
-pub fn eval_const_expr_with_lookup<F>(expr: &ast::Expr, lookup: &F) -> Result<ConstResult, TypeError>
+pub fn eval_const_expr_with_lookup<F>(expr: &ast::Expr, lookup: &F) -> Result<ConstResult, Box<TypeError>>
 where
     F: Fn(&ast::ExprPath) -> Option<ConstResult>,
 {
@@ -128,12 +128,12 @@ where
 
         ast::ExprKind::Path(path) => {
             // Try to look up the path as a const item
-            lookup(path).ok_or_else(|| TypeError::new(
+            lookup(path).ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::ConstEvalError {
                     reason: "cannot evaluate path at compile time; only const items are allowed in const contexts".to_string(),
                 },
                 expr.span,
-            ))
+            )))
         }
 
         ast::ExprKind::Binary { left, op, right } => {
@@ -157,20 +157,20 @@ where
                     if let Some(else_expr) = else_branch {
                         eval_else_branch_with_lookup(else_expr, lookup)
                     } else {
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::ConstEvalError {
                                 reason: "if expression without else branch in const context".to_string(),
                             },
                             expr.span,
-                        ))
+                        )))
                     }
                 }
-                _ => Err(TypeError::new(
+                _ => Err(Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "condition must be a boolean".to_string(),
                     },
                     condition.span,
-                )),
+                ))),
             }
         }
 
@@ -179,22 +179,22 @@ where
             eval_block_with_lookup(block, lookup)
         }
 
-        _ => Err(TypeError::new(
+        _ => Err(Box::new(TypeError::new(
             TypeErrorKind::ConstEvalError {
                 reason: "expression cannot be evaluated at compile time".to_string(),
             },
             expr.span,
-        )),
+        ))),
     }
 }
 
 /// Evaluate a block expression as a compile-time constant.
-fn eval_block(block: &ast::Block) -> Result<ConstResult, TypeError> {
+fn eval_block(block: &ast::Block) -> Result<ConstResult, Box<TypeError>> {
     eval_block_with_lookup(block, &|_| None)
 }
 
 /// Evaluate a block expression with path lookup support.
-fn eval_block_with_lookup<F>(block: &ast::Block, lookup: &F) -> Result<ConstResult, TypeError>
+fn eval_block_with_lookup<F>(block: &ast::Block, lookup: &F) -> Result<ConstResult, Box<TypeError>>
 where
     F: Fn(&ast::ExprPath) -> Option<ConstResult>,
 {
@@ -202,30 +202,30 @@ where
         if let Some(final_expr) = &block.expr {
             eval_const_expr_with_lookup(final_expr, lookup)
         } else {
-            Err(TypeError::new(
+            Err(Box::new(TypeError::new(
                 TypeErrorKind::ConstEvalError {
                     reason: "empty block in const context".to_string(),
                 },
                 block.span,
-            ))
+            )))
         }
     } else {
-        Err(TypeError::new(
+        Err(Box::new(TypeError::new(
             TypeErrorKind::ConstEvalError {
                 reason: "const expressions cannot contain statements".to_string(),
             },
             block.span,
-        ))
+        )))
     }
 }
 
 /// Evaluate an else branch as a compile-time constant.
-fn eval_else_branch(branch: &ast::ElseBranch) -> Result<ConstResult, TypeError> {
+fn eval_else_branch(branch: &ast::ElseBranch) -> Result<ConstResult, Box<TypeError>> {
     eval_else_branch_with_lookup(branch, &|_| None)
 }
 
 /// Evaluate an else branch with path lookup support.
-fn eval_else_branch_with_lookup<F>(branch: &ast::ElseBranch, lookup: &F) -> Result<ConstResult, TypeError>
+fn eval_else_branch_with_lookup<F>(branch: &ast::ElseBranch, lookup: &F) -> Result<ConstResult, Box<TypeError>>
 where
     F: Fn(&ast::ExprPath) -> Option<ConstResult>,
 {
@@ -236,7 +236,7 @@ where
 }
 
 /// Evaluate a literal.
-fn eval_literal(lit: &ast::Literal, span: Span) -> Result<ConstResult, TypeError> {
+fn eval_literal(lit: &ast::Literal, span: Span) -> Result<ConstResult, Box<TypeError>> {
     match &lit.kind {
         ast::LiteralKind::Int { value, suffix } => {
             // Determine if unsigned based on suffix
@@ -257,12 +257,12 @@ fn eval_literal(lit: &ast::Literal, span: Span) -> Result<ConstResult, TypeError
             }
         }
         ast::LiteralKind::Bool(b) => Ok(ConstResult::Bool(*b)),
-        _ => Err(TypeError::new(
+        _ => Err(Box::new(TypeError::new(
             TypeErrorKind::ConstEvalError {
                 reason: "only integer and boolean literals are supported in const contexts".to_string(),
             },
             span,
-        )),
+        ))),
     }
 }
 
@@ -272,17 +272,17 @@ fn eval_binary_op(
     left: ConstResult,
     right: ConstResult,
     span: Span,
-) -> Result<ConstResult, TypeError> {
+) -> Result<ConstResult, Box<TypeError>> {
     // Convert both to i128 for simplicity
     let (l, r) = match (left.as_i128(), right.as_i128()) {
         (Some(l), Some(r)) => (l, r),
         _ => {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ConstEvalError {
                     reason: "cannot perform operation on these values".to_string(),
                 },
                 span,
-            ));
+            )));
         }
     };
 
@@ -292,23 +292,23 @@ fn eval_binary_op(
         BinOp::Mul => l.checked_mul(r),
         BinOp::Div => {
             if r == 0 {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "division by zero in const expression".to_string(),
                     },
                     span,
-                ));
+                )));
             }
             l.checked_div(r)
         }
         BinOp::Rem => {
             if r == 0 {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "remainder by zero in const expression".to_string(),
                     },
                     span,
-                ));
+                )));
             }
             l.checked_rem(r)
         }
@@ -317,23 +317,23 @@ fn eval_binary_op(
         BinOp::BitXor => Some(l ^ r),
         BinOp::Shl => {
             if !(0..=127).contains(&r) {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "shift amount out of range".to_string(),
                     },
                     span,
-                ));
+                )));
             }
             l.checked_shl(r as u32)
         }
         BinOp::Shr => {
             if !(0..=127).contains(&r) {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "shift amount out of range".to_string(),
                     },
                     span,
-                ));
+                )));
             }
             l.checked_shr(r as u32)
         }
@@ -349,12 +349,12 @@ fn eval_binary_op(
             let (lb, rb) = match (left, right) {
                 (ConstResult::Bool(lb), ConstResult::Bool(rb)) => (lb, rb),
                 _ => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::ConstEvalError {
                             reason: "logical operators require boolean operands".to_string(),
                         },
                         span,
-                    ));
+                    )));
                 }
             };
             let result = match op {
@@ -365,48 +365,48 @@ fn eval_binary_op(
             return Ok(ConstResult::Bool(result));
         }
         _ => {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ConstEvalError {
                     reason: format!("operator {:?} not supported in const expressions", op),
                 },
                 span,
-            ));
+            )));
         }
     };
 
     result
         .map(ConstResult::Int)
         .ok_or_else(|| {
-            TypeError::new(
+            Box::new(TypeError::new(
                 TypeErrorKind::ConstEvalError {
                     reason: "arithmetic overflow in const expression".to_string(),
                 },
                 span,
-            )
+            ))
         })
 }
 
 /// Evaluate a unary operation.
-fn eval_unary_op(op: UnaryOp, val: ConstResult, span: Span) -> Result<ConstResult, TypeError> {
+fn eval_unary_op(op: UnaryOp, val: ConstResult, span: Span) -> Result<ConstResult, Box<TypeError>> {
     match op {
         UnaryOp::Neg => {
             let v = val.as_i128().ok_or_else(|| {
-                TypeError::new(
+                Box::new(TypeError::new(
                     TypeErrorKind::ConstEvalError {
                         reason: "cannot negate this value".to_string(),
                     },
                     span,
-                )
+                ))
             })?;
             v.checked_neg()
                 .map(ConstResult::Int)
                 .ok_or_else(|| {
-                    TypeError::new(
+                    Box::new(TypeError::new(
                         TypeErrorKind::ConstEvalError {
                             reason: "arithmetic overflow in const expression".to_string(),
                         },
                         span,
-                    )
+                    ))
                 })
         }
         UnaryOp::Not => match val {
@@ -414,12 +414,12 @@ fn eval_unary_op(op: UnaryOp, val: ConstResult, span: Span) -> Result<ConstResul
             ConstResult::Int(v) => Ok(ConstResult::Int(!v)),
             ConstResult::Uint(v) => Ok(ConstResult::Uint(!v)),
         },
-        _ => Err(TypeError::new(
+        _ => Err(Box::new(TypeError::new(
             TypeErrorKind::ConstEvalError {
                 reason: format!("operator {:?} not supported in const expressions", op),
             },
             span,
-        )),
+        ))),
     }
 }
 

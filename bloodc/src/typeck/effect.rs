@@ -106,7 +106,7 @@ impl EffectUnifier {
         row1: &EffectRow,
         row2: &EffectRow,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Resolve any existing substitutions
         let row1 = self.resolve_row(row1);
         let row2 = self.resolve_row(row2);
@@ -155,13 +155,13 @@ impl EffectUnifier {
                 if rv1.0 == rv2.0 {
                     // Same row variable - effects must be identical
                     if !only_in_1.is_empty() || !only_in_2.is_empty() {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::EffectMismatch {
                                 expected: format!("{:?}", row1),
                                 found: format!("{:?}", row2),
                             },
                             span,
-                        ));
+                        )));
                     }
                     Ok(())
                 } else {
@@ -196,13 +196,13 @@ impl EffectUnifier {
                         Ok(())
                     } else {
                         // row2 is closed but doesn't have all of row1's effects
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::EffectMismatch {
                                 expected: format!("{:?}", row1),
                                 found: format!("{:?}", row2),
                             },
                             span,
-                        ))
+                        )))
                     }
                 } else {
                     // row2 has effects not in row1's concrete part
@@ -217,13 +217,13 @@ impl EffectUnifier {
                         Ok(())
                     } else {
                         // Mismatch - row1 has effects not in closed row2
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::EffectMismatch {
                                 expected: format!("{:?}", row1),
                                 found: format!("{:?}", row2),
                             },
                             span,
-                        ))
+                        )))
                     }
                 }
             }
@@ -236,13 +236,13 @@ impl EffectUnifier {
                         self.bind_row_var(RowVarId(rv2.0), EffectRow::pure());
                         Ok(())
                     } else {
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::EffectMismatch {
                                 expected: format!("{:?}", row1),
                                 found: format!("{:?}", row2),
                             },
                             span,
-                        ))
+                        )))
                     }
                 } else {
                     let mut ext = EffectRow::pure();
@@ -254,13 +254,13 @@ impl EffectUnifier {
                         self.bind_row_var(RowVarId(rv2.0), ext);
                         Ok(())
                     } else {
-                        Err(TypeError::new(
+                        Err(Box::new(TypeError::new(
                             TypeErrorKind::EffectMismatch {
                                 expected: format!("{:?}", row1),
                                 found: format!("{:?}", row2),
                             },
                             span,
-                        ))
+                        )))
                     }
                 }
             }
@@ -270,20 +270,20 @@ impl EffectUnifier {
                 if only_in_1.is_empty() && only_in_2.is_empty() {
                     Ok(())
                 } else {
-                    Err(TypeError::new(
+                    Err(Box::new(TypeError::new(
                         TypeErrorKind::EffectMismatch {
                             expected: format!("{:?}", row1),
                             found: format!("{:?}", row2),
                         },
                         span,
-                    ))
+                    )))
                 }
             }
         }
     }
 
     /// Unify a pure row with a potentially effectful row.
-    fn unify_pure_with_row(&mut self, row: &EffectRow, span: Span) -> Result<(), TypeError> {
+    fn unify_pure_with_row(&mut self, row: &EffectRow, span: Span) -> Result<(), Box<TypeError>> {
         if row.is_pure() {
             return Ok(());
         }
@@ -299,13 +299,13 @@ impl EffectUnifier {
         }
 
         // Cannot unify pure with a row that has concrete effects
-        Err(TypeError::new(
+        Err(Box::new(TypeError::new(
             TypeErrorKind::EffectMismatch {
                 expected: "pure".to_string(),
                 found: format!("{:?}", row),
             },
             span,
-        ))
+        )))
     }
 
     /// Unify type arguments for two effect references.
@@ -314,15 +314,15 @@ impl EffectUnifier {
         e1: &EffectRef,
         e2: &EffectRef,
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         if e1.type_args.len() != e2.type_args.len() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::EffectMismatch {
                     expected: format!("{:?}", e1),
                     found: format!("{:?}", e2),
                 },
                 span,
-            ));
+            )));
         }
 
         for (t1, t2) in e1.type_args.iter().zip(e2.type_args.iter()) {

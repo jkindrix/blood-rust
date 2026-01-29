@@ -83,21 +83,21 @@ impl<'a> TypeContext<'a> {
         // This allows struct A { b: B } to compile when B is defined after A.
         for decl in &program.declarations {
             if let Err(e) = self.register_type_name(decl) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
         // Phase 2: Collect all top-level definitions (now that all type names are known)
         for decl in &program.declarations {
             if let Err(e) = self.collect_declaration(decl) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
         // Phase 3: Resolve imports (after all declarations are collected)
         for import in &program.imports {
             if let Err(e) = self.resolve_import(import) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
@@ -186,14 +186,14 @@ impl<'a> TypeContext<'a> {
         // Pre-register type names first (for forward references within prelude)
         for decl in &prelude_ast.declarations {
             if let Err(e) = self.register_type_name(decl) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
         // Collect all declarations
         for decl in &prelude_ast.declarations {
             if let Err(e) = self.collect_declaration(decl) {
-                self.errors.push(e);
+                self.errors.push(*e);
             }
         }
 
@@ -222,7 +222,7 @@ impl<'a> TypeContext<'a> {
                             // Ignore conflicts with user-defined items (user takes precedence)
                             // DuplicateDefinition errors are expected when user code shadows prelude
                             if !matches!(e.kind, TypeErrorKind::DuplicateDefinition { .. }) {
-                                self.errors.push(e);
+                                self.errors.push(*e);
                             }
                         }
                         // Only import the first def_id for a given name to avoid conflicts
@@ -241,7 +241,7 @@ impl<'a> TypeContext<'a> {
                     if let Err(e) = self.resolver.import_type_binding(name.clone(), def_id, prelude_span) {
                         // Ignore conflicts with user-defined types (user takes precedence)
                         if !matches!(e.kind, TypeErrorKind::DuplicateDefinition { .. }) {
-                            self.errors.push(e);
+                            self.errors.push(*e);
                         }
                     }
                 }
@@ -251,7 +251,7 @@ impl<'a> TypeContext<'a> {
 
     /// Pre-register type names for forward reference support.
     /// This only registers the name -> DefId mapping, without resolving field types.
-    fn register_type_name(&mut self, decl: &ast::Declaration) -> Result<(), TypeError> {
+    fn register_type_name(&mut self, decl: &ast::Declaration) -> Result<(), Box<TypeError>> {
         match decl {
             ast::Declaration::Struct(s) => {
                 let name = self.symbol_to_string(s.name.node);
@@ -305,7 +305,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Resolve an import statement.
-    fn resolve_import(&mut self, import: &ast::Import) -> Result<(), TypeError> {
+    fn resolve_import(&mut self, import: &ast::Import) -> Result<(), Box<TypeError>> {
         match import {
             ast::Import::Simple { path, alias, visibility, span } => {
                 self.resolve_simple_import(path, alias.as_ref(), *visibility, *span)
@@ -326,7 +326,7 @@ impl<'a> TypeContext<'a> {
         alias: Option<&crate::span::Spanned<ast::Symbol>>,
         visibility: ast::Visibility,
         span: crate::span::Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Resolve the path to find the target definition
         let def_id = self.resolve_import_path(path)?;
 
@@ -338,12 +338,12 @@ impl<'a> TypeContext<'a> {
             if let Some(last) = path.segments.last() {
                 self.symbol_to_string(last.node)
             } else {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ImportError {
                         message: "empty import path".to_string(),
                     },
                     span,
-                ));
+                )));
             }
         };
 
@@ -370,12 +370,12 @@ impl<'a> TypeContext<'a> {
                 }
             }
         } else {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: format!("cannot find definition for import path"),
                 },
                 span,
-            ));
+            )));
         }
 
         // For `pub use` re-exports, add this item to the current module's exports
@@ -394,7 +394,7 @@ impl<'a> TypeContext<'a> {
         items: &[ast::ImportItem],
         visibility: ast::Visibility,
         span: crate::span::Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // For group imports, we need to resolve the base path as a module
         // and then import each item from that module
         let base_module_id = self.resolve_module_path(path)?;
@@ -432,12 +432,12 @@ impl<'a> TypeContext<'a> {
                     self.register_reexport(local_name, def_id, visibility, span);
                 }
             } else {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ImportError {
                         message: format!("cannot find `{}` in module", item_name),
                     },
                     span,
-                ));
+                )));
             }
         }
 
@@ -450,7 +450,7 @@ impl<'a> TypeContext<'a> {
         path: &ast::ModulePath,
         visibility: ast::Visibility,
         span: crate::span::Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         // Resolve the path as a module and import all public items
         let module_id = self.resolve_module_path(path)?;
 
@@ -522,14 +522,14 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Resolve an import path to find the target definition.
-    fn resolve_import_path(&mut self, path: &ast::ModulePath) -> Result<DefId, TypeError> {
+    fn resolve_import_path(&mut self, path: &ast::ModulePath) -> Result<DefId, Box<TypeError>> {
         if path.segments.is_empty() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: "empty import path".to_string(),
                 },
                 path.span,
-            ));
+            )));
         }
 
         // Walk the path segments
@@ -539,12 +539,12 @@ impl<'a> TypeContext<'a> {
 
         // Guard: empty path is invalid
         if current_scope_names.is_empty() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: "empty import path".to_string(),
                 },
                 path.span,
-            ));
+            )));
         }
 
         // The last segment is the item we're importing
@@ -560,12 +560,12 @@ impl<'a> TypeContext<'a> {
             if let Some(def_id) = self.resolver.lookup_type(&item_name) {
                 return Ok(def_id);
             }
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: format!("cannot find `{}` in scope", item_name),
                 },
                 path.span,
-            ));
+            )));
         }
 
         // For paths like `std.mem.allocate`, we need to resolve the module path first
@@ -581,24 +581,24 @@ impl<'a> TypeContext<'a> {
         if let Some(def_id) = self.lookup_in_module(module_id, &item_name) {
             Ok(def_id)
         } else {
-            Err(TypeError::new(
+            Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: format!("cannot find `{}` in module", item_name),
                 },
                 path.span,
-            ))
+            )))
         }
     }
 
     /// Resolve a module path to find the module DefId.
-    fn resolve_module_path(&self, path: &ast::ModulePath) -> Result<DefId, TypeError> {
+    fn resolve_module_path(&self, path: &ast::ModulePath) -> Result<DefId, Box<TypeError>> {
         if path.segments.is_empty() {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: "empty module path".to_string(),
                 },
                 path.span,
-            ));
+            )));
         }
 
         let first_name = self.symbol_to_string(path.segments[0].node);
@@ -609,12 +609,12 @@ impl<'a> TypeContext<'a> {
         } else if let Some(def_id) = self.resolver.lookup_type(&first_name) {
             def_id
         } else {
-            return Err(TypeError::new(
+            return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
                     message: format!("cannot find module `{}`", first_name),
                 },
                 path.span,
-            ));
+            )));
         };
 
         // Walk the remaining segments
@@ -624,12 +624,12 @@ impl<'a> TypeContext<'a> {
             if let Some(def_id) = self.lookup_in_module(current_id, &name) {
                 current_id = def_id;
             } else {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::ImportError {
                         message: format!("cannot find `{}` in module path", name),
                     },
                     path.span,
-                ));
+                )));
             }
         }
 
@@ -698,7 +698,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect a declaration.
-    pub(crate) fn collect_declaration(&mut self, decl: &ast::Declaration) -> Result<(), TypeError> {
+    pub(crate) fn collect_declaration(&mut self, decl: &ast::Declaration) -> Result<(), Box<TypeError>> {
         match decl {
             ast::Declaration::Function(f) => self.collect_function(f),
             ast::Declaration::Struct(s) => self.collect_struct(s),
@@ -723,12 +723,12 @@ impl<'a> TypeContext<'a> {
     /// The type checker does not need to register macros — this function exists
     /// because the declaration visitor visits all declaration types. By the time
     /// type checking runs, all macro calls have already been expanded in place.
-    pub(crate) fn collect_macro(&mut self, _macro_decl: &ast::MacroDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_macro(&mut self, _macro_decl: &ast::MacroDecl) -> Result<(), Box<TypeError>> {
         Ok(())
     }
 
     /// Collect a bridge declaration (FFI).
-    pub(crate) fn collect_bridge(&mut self, bridge: &ast::BridgeDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_bridge(&mut self, bridge: &ast::BridgeDecl) -> Result<(), Box<TypeError>> {
         use super::{
             BridgeInfo, BridgeLinkSpec, BridgeLinkKind, BridgeFnInfo, BridgeOpaqueInfo,
             BridgeTypeAliasInfo, BridgeStructInfo, BridgeFieldInfo, BridgeEnumInfo,
@@ -844,7 +844,7 @@ impl<'a> TypeContext<'a> {
                                 span: f.span,
                             })
                         })
-                        .collect::<Result<_, TypeError>>()?;
+                        .collect::<Result<_, Box<TypeError>>>()?;
 
                     // Also register in struct_defs for field access and struct literals
                     let struct_fields: Vec<super::FieldInfo> = bridge_fields.iter()
@@ -926,7 +926,7 @@ impl<'a> TypeContext<'a> {
                                 span: f.span,
                             })
                         })
-                        .collect::<Result<_, TypeError>>()?;
+                        .collect::<Result<_, Box<TypeError>>>()?;
                     unions.push(BridgeUnionInfo {
                         def_id,
                         name,
@@ -1145,7 +1145,7 @@ impl<'a> TypeContext<'a> {
     ///
     /// This uses `define_function` which supports multiple dispatch - multiple
     /// functions with the same name are allowed and will form a method family.
-    pub(crate) fn collect_function(&mut self, func: &ast::FnDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_function(&mut self, func: &ast::FnDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(func.name.node);
         // Use define_function for multiple dispatch support
         let def_id = self.resolver.define_function(
@@ -1241,10 +1241,10 @@ impl<'a> TypeContext<'a> {
                                     }
                                     _ => "unknown".to_string(),
                                 };
-                                return Err(TypeError::new(
+                                return Err(Box::new(TypeError::new(
                                     TypeErrorKind::TraitNotFound { name: trait_name },
                                     *bound_span,
-                                ));
+                                )));
                             }
                         }
 
@@ -1283,7 +1283,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect a struct declaration.
-    pub(crate) fn collect_struct(&mut self, struct_decl: &ast::StructDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_struct(&mut self, struct_decl: &ast::StructDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(struct_decl.name.node);
 
         // Use pre-registered DefId if it exists (from forward reference support phase),
@@ -1352,7 +1352,7 @@ impl<'a> TypeContext<'a> {
                             index: i as u32,
                         })
                     })
-                    .collect::<Result<Vec<_>, TypeError>>()?
+                    .collect::<Result<Vec<_>, Box<TypeError>>>()?
             }
             ast::StructBody::Tuple(types) => {
                 types
@@ -1366,7 +1366,7 @@ impl<'a> TypeContext<'a> {
                             index: i as u32,
                         })
                     })
-                    .collect::<Result<Vec<_>, TypeError>>()?
+                    .collect::<Result<Vec<_>, Box<TypeError>>>()?
             }
             ast::StructBody::Unit => Vec::new(),
         };
@@ -1397,7 +1397,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect a type alias declaration.
-    pub(crate) fn collect_type_alias(&mut self, type_decl: &ast::TypeDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_type_alias(&mut self, type_decl: &ast::TypeDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(type_decl.name.node);
 
         // Use pre-registered DefId if it exists (from forward reference support phase),
@@ -1469,7 +1469,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect an enum declaration.
-    pub(crate) fn collect_enum(&mut self, enum_decl: &ast::EnumDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_enum(&mut self, enum_decl: &ast::EnumDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(enum_decl.name.node);
 
         // Use pre-registered DefId if it exists (from forward reference support phase),
@@ -1556,7 +1556,7 @@ impl<'a> TypeContext<'a> {
                                 index: j as u32,
                             })
                         })
-                        .collect::<Result<Vec<_>, TypeError>>()?
+                        .collect::<Result<Vec<_>, Box<TypeError>>>()?
                 }
                 ast::StructBody::Tuple(types) => {
                     types
@@ -1570,7 +1570,7 @@ impl<'a> TypeContext<'a> {
                                 index: j as u32,
                             })
                         })
-                        .collect::<Result<Vec<_>, TypeError>>()?
+                        .collect::<Result<Vec<_>, Box<TypeError>>>()?
                 }
                 ast::StructBody::Unit => Vec::new(),
             };
@@ -1611,7 +1611,7 @@ impl<'a> TypeContext<'a> {
     /// Collect a const declaration.
     ///
     /// This registers the const item and queues its value expression for type checking.
-    pub(crate) fn collect_const(&mut self, const_decl: &ast::ConstDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_const(&mut self, const_decl: &ast::ConstDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(const_decl.name.node);
         let def_id = self.resolver.define_item(
             name.clone(),
@@ -1656,7 +1656,7 @@ impl<'a> TypeContext<'a> {
     /// Collect a static declaration.
     ///
     /// This registers the static item and queues its value expression for type checking.
-    pub(crate) fn collect_static(&mut self, static_decl: &ast::StaticDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_static(&mut self, static_decl: &ast::StaticDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(static_decl.name.node);
         let def_id = self.resolver.define_item(
             name.clone(),
@@ -1693,7 +1693,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect an effect declaration.
-    pub(crate) fn collect_effect(&mut self, effect: &ast::EffectDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_effect(&mut self, effect: &ast::EffectDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(effect.name.node);
 
         // Use pre-registered DefId if it exists (from forward reference support phase),
@@ -1796,7 +1796,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect a handler declaration.
-    pub(crate) fn collect_handler(&mut self, handler: &ast::HandlerDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_handler(&mut self, handler: &ast::HandlerDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(handler.name.node);
         let def_id = self.resolver.define_item(
             name.clone(),
@@ -1829,10 +1829,10 @@ impl<'a> TypeContext<'a> {
         // Find the effect this handler handles
         // The effect is a Type, we need to resolve it to a DefId
         let effect_ref = self.resolve_effect_type(&handler.effect)?
-            .ok_or_else(|| TypeError::new(
+            .ok_or_else(|| Box::new(TypeError::new(
                 TypeErrorKind::NotAnEffect { name: "unknown".to_string() },
                 handler.effect.span,
-            ))?;
+            )))?;
         let effect_id = effect_ref.def_id;
 
         // Collect operation names implemented by this handler
@@ -1911,7 +1911,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect an impl block declaration.
-    pub(crate) fn collect_impl_block(&mut self, impl_block: &ast::ImplBlock) -> Result<(), TypeError> {
+    pub(crate) fn collect_impl_block(&mut self, impl_block: &ast::ImplBlock) -> Result<(), Box<TypeError>> {
         // Save current generic params
         let saved_generic_params = std::mem::take(&mut self.generic_params);
         let mut generics_vec = Vec::new();
@@ -1947,10 +1947,10 @@ impl<'a> TypeContext<'a> {
             match &trait_ty.kind {
                 ast::TypeKind::Path(path) => {
                     if path.segments.is_empty() {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::TypeNotFound { name: "empty trait path".to_string() },
                             impl_block.span,
-                        ));
+                        )));
                     }
                     let trait_name = self.symbol_to_string(path.segments[0].name.node);
                     // Look up the trait by name
@@ -1961,34 +1961,34 @@ impl<'a> TypeContext<'a> {
                                 if matches!(info.kind, hir::DefKind::Trait) {
                                     Some(def_id)
                                 } else {
-                                    return Err(TypeError::new(
+                                    return Err(Box::new(TypeError::new(
                                         TypeErrorKind::TraitNotFound { name: trait_name },
                                         trait_ty.span,
-                                    ));
+                                    )));
                                 }
                             } else {
-                                return Err(TypeError::new(
+                                return Err(Box::new(TypeError::new(
                                     TypeErrorKind::TraitNotFound { name: trait_name },
                                     trait_ty.span,
-                                ));
+                                )));
                             }
                         }
                         _ => {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::TraitNotFound { name: trait_name },
                                 trait_ty.span,
-                            ));
+                            )));
                         }
                     }
                 }
                 _ => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::Mismatch {
                             expected: Type::unit(), // Placeholder
                             found: Type::unit(),
                         },
                         trait_ty.span,
-                    ));
+                    )));
                 }
             }
         } else {
@@ -2165,7 +2165,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Collect a trait declaration.
-    pub(crate) fn collect_trait(&mut self, trait_decl: &ast::TraitDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_trait(&mut self, trait_decl: &ast::TraitDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(trait_decl.name.node);
 
         // Use pre-registered DefId if it exists (from forward reference support phase),
@@ -2228,29 +2228,29 @@ impl<'a> TypeContext<'a> {
                                     if matches!(info.kind, hir::DefKind::Trait) {
                                         supertraits.push(supertrait_def_id);
                                     } else {
-                                        return Err(TypeError::new(
+                                        return Err(Box::new(TypeError::new(
                                             TypeErrorKind::TraitNotFound { name: supertrait_name },
                                             supertrait.span,
-                                        ));
+                                        )));
                                     }
                                 }
                             }
                             _ => {
-                                return Err(TypeError::new(
+                                return Err(Box::new(TypeError::new(
                                     TypeErrorKind::TraitNotFound { name: supertrait_name },
                                     supertrait.span,
-                                ));
+                                )));
                             }
                         }
                     }
                 }
                 _ => {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::UnsupportedFeature {
                             feature: "complex supertrait bounds".to_string(),
                         },
                         supertrait.span,
-                    ));
+                    )));
                 }
             }
         }
@@ -2393,7 +2393,7 @@ impl<'a> TypeContext<'a> {
     /// Returns (effects, row_variable_name) where:
     /// - `effects` is the list of concrete effects in the row
     /// - `row_variable_name` is Some(name) if the row has a polymorphic tail (e.g., `{IO | e}` or just `e`)
-    pub(crate) fn parse_effect_row(&mut self, effect_row: &ast::EffectRow) -> Result<(Vec<EffectRef>, Option<String>), TypeError> {
+    pub(crate) fn parse_effect_row(&mut self, effect_row: &ast::EffectRow) -> Result<(Vec<EffectRef>, Option<String>), Box<TypeError>> {
         match &effect_row.kind {
             ast::EffectRowKind::Pure => Ok((Vec::new(), None)),
             ast::EffectRowKind::Var(var) => {
@@ -2416,7 +2416,7 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Resolve an effect type (like `State<i32>`) to an EffectRef.
-    pub(crate) fn resolve_effect_type(&mut self, ty: &ast::Type) -> Result<Option<EffectRef>, TypeError> {
+    pub(crate) fn resolve_effect_type(&mut self, ty: &ast::Type) -> Result<Option<EffectRef>, Box<TypeError>> {
         match &ty.kind {
             ast::TypeKind::Path(path) => {
                 if path.segments.is_empty() {
@@ -2473,10 +2473,10 @@ impl<'a> TypeContext<'a> {
                     ast::TypeKind::Forall { .. } => "forall type",
                     ast::TypeKind::Path(_) => unreachable!("Path type should be handled by the match above")
                 };
-                Err(TypeError::new(
+                Err(Box::new(TypeError::new(
                     TypeErrorKind::InvalidEffectType { found: found.to_string() },
                     ty.span,
-                ))
+                )))
             }
         }
     }
@@ -2485,7 +2485,7 @@ impl<'a> TypeContext<'a> {
     ///
     /// This makes effect operations like `get()` and `put()` available within functions
     /// that declare they use those effects (e.g., `fn counter() / {State<i32>}`).
-    pub(crate) fn register_effect_operations_in_scope(&mut self, fn_def_id: DefId) -> Result<(), TypeError> {
+    pub(crate) fn register_effect_operations_in_scope(&mut self, fn_def_id: DefId) -> Result<(), Box<TypeError>> {
         use crate::ice;
 
         // Get the function's declared effects
@@ -2534,7 +2534,7 @@ impl<'a> TypeContext<'a> {
     /// For inline modules (`mod foo { ... }`), recursively collect all declarations.
     /// For external modules (`mod foo;`), loads the module from `name.blood` or `name/mod.blood`
     /// relative to the current source file. For `mod std;`, also checks the stdlib_path.
-    pub(crate) fn collect_module(&mut self, module: &ast::ModItemDecl) -> Result<(), TypeError> {
+    pub(crate) fn collect_module(&mut self, module: &ast::ModItemDecl) -> Result<(), Box<TypeError>> {
         let name = self.symbol_to_string(module.name.node);
         let def_id = self.resolver.define_item(
             name.clone(),
@@ -2565,14 +2565,14 @@ impl<'a> TypeContext<'a> {
                 // Phase 1: Pre-register all type names so forward references work within the module
                 for decl in declarations {
                     if let Err(e) = self.register_type_name(decl) {
-                        self.errors.push(e);
+                        self.errors.push(*e);
                     }
                 }
 
                 // Phase 2: Collect all declarations (now that all type names are known)
                 for decl in declarations {
                     if let Err(e) = self.collect_declaration(decl) {
-                        self.errors.push(e);
+                        self.errors.push(*e);
                     }
                 }
 
@@ -2604,7 +2604,7 @@ impl<'a> TypeContext<'a> {
                     None => None,
                 };
 
-                let source_dir = source_dir.ok_or_else(|| TypeError::new(
+                let source_dir = source_dir.ok_or_else(|| Box::new(TypeError::new(
                     TypeErrorKind::UnsupportedFeature {
                         feature: format!(
                             "external modules (`mod {};`) - no source path available. \
@@ -2613,7 +2613,7 @@ impl<'a> TypeContext<'a> {
                         ),
                     },
                     module.span,
-                ))?;
+                )))?;
 
                 // Try to find the module file.
                 // For nested modules (when inside foo.blood), we check:
@@ -2671,22 +2671,22 @@ impl<'a> TypeContext<'a> {
                     if sp.exists() {
                         sp.clone()
                     } else {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::ModuleNotFound {
                                 name: name.clone(),
                                 searched_paths,
                             },
                             module.span,
-                        ));
+                        )));
                     }
                 } else {
-                    return Err(TypeError::new(
+                    return Err(Box::new(TypeError::new(
                         TypeErrorKind::ModuleNotFound {
                             name: name.clone(),
                             searched_paths,
                         },
                         module.span,
-                    ));
+                    )));
                 };
 
                 // Canonicalize the module path to handle diamond dependencies
@@ -2732,19 +2732,19 @@ impl<'a> TypeContext<'a> {
                     Err(errors) => {
                         // Collect parse errors and return the first one
                         if let Some(first_err) = errors.into_iter().next() {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::ParseError {
                                     message: first_err.message,
                                 },
                                 module.span,
-                            ));
+                            )));
                         }
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::ParseError {
                                 message: "unknown parse error".to_string(),
                             },
                             module.span,
-                        ));
+                        )));
                     }
                 };
 

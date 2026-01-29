@@ -31,7 +31,7 @@ impl<'a> TypeContext<'a> {
         effects: Option<&ast::EffectRow>,
         body: &ast::Expr,
         span: Span,
-    ) -> Result<hir::Expr, TypeError> {
+    ) -> Result<hir::Expr, Box<TypeError>> {
         // Save current locals and create fresh ones for closure
         let outer_locals = std::mem::take(&mut self.locals);
         let outer_return_type = self.return_type.take();
@@ -140,21 +140,21 @@ impl<'a> TypeContext<'a> {
                             vars
                         }
                         _ => {
-                            return Err(TypeError::new(
+                            return Err(Box::new(TypeError::new(
                                 TypeErrorKind::NotATuple { ty: param_ty.clone() },
                                 param.span,
-                            ));
+                            )));
                         }
                     };
 
                     if fields.len() != elem_types.len() {
-                        return Err(TypeError::new(
+                        return Err(Box::new(TypeError::new(
                             TypeErrorKind::WrongArity {
                                 expected: elem_types.len(),
                                 found: fields.len(),
                             },
                             param.span,
-                        ));
+                        )));
                     }
 
                     // Define each element of the tuple pattern

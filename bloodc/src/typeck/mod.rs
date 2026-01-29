@@ -46,7 +46,7 @@ pub use ambiguity::{Ambiguity, AmbiguityChecker, AmbiguityCheckResult};
 pub use context::TypeContext;
 pub use dispatch::{DispatchResolver, DispatchResult, MethodCandidate};
 pub use effect::EffectUnifier;
-pub use error::{TypeError, TypeErrorKind};
+pub use error::{TypeError, TypeErrorKind, TypeResult};
 pub use ffi::{FfiValidator, FfiSafety};
 pub use infer::TypeInference;
 pub use lifetime::{LifetimeInference, LifetimeConstraint, LifetimeOrigin, LifetimeSolution};

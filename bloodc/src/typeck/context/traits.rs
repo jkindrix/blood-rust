@@ -16,19 +16,19 @@ impl<'a> TypeContext<'a> {
         ty: &Type,
         bounds: &[DefId],
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         for &trait_def_id in bounds {
             if !self.type_implements_trait(ty, trait_def_id) {
                 let trait_name = self.trait_defs.get(&trait_def_id)
                     .map(|info| info.name.clone())
                     .unwrap_or_else(|| format!("{:?}", trait_def_id));
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::TraitBoundNotSatisfied {
                         ty: ty.clone(),
                         trait_name,
                     },
                     span,
-                ));
+                )));
             }
         }
         Ok(())
@@ -374,7 +374,7 @@ impl<'a> TypeContext<'a> {
         impl_methods: &[ImplMethodInfo],
         impl_assoc_types: &[ImplAssocTypeInfo],
         span: Span,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), Box<TypeError>> {
         let Some(trait_info) = self.trait_defs.get(&trait_id) else {
             // Trait not found - already reported during trait resolution
             return Ok(());
@@ -389,13 +389,13 @@ impl<'a> TypeContext<'a> {
 
             let provided = impl_methods.iter().any(|m| m.name == trait_method.name);
             if !provided {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::MissingTraitMethod {
                         trait_name: trait_info.name.clone(),
                         method: trait_method.name.clone(),
                     },
                     span,
-                ));
+                )));
             }
         }
 
@@ -408,13 +408,13 @@ impl<'a> TypeContext<'a> {
 
             let provided = impl_assoc_types.iter().any(|t| t.name == trait_assoc_type.name);
             if !provided {
-                return Err(TypeError::new(
+                return Err(Box::new(TypeError::new(
                     TypeErrorKind::MissingAssocType {
                         trait_name: trait_info.name.clone(),
                         type_name: trait_assoc_type.name.clone(),
                     },
                     span,
-                ));
+                )));
             }
         }
 
