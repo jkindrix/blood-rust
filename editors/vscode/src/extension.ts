@@ -262,7 +262,8 @@ async function expandMacro(): Promise<void> {
     // Send expand macro request to LSP
     if (client) {
         const position = editor.selection.active;
-        // TODO: Implement macro expansion via LSP custom request
+        // Design decision: Macro expansion requires LSP custom request protocol extension.
+        // This will be implemented when the LSP server supports blood/expandMacro.
         vscode.window.showInformationMessage('Macro expansion not yet implemented');
     }
 }
@@ -277,7 +278,8 @@ async function showEffects(): Promise<void> {
     // Send show effects request to LSP
     if (client) {
         const position = editor.selection.active;
-        // TODO: Implement effect display via LSP custom request
+        // Design decision: Effect display requires LSP custom request protocol extension.
+        // This will be implemented when the LSP server supports blood/showEffects.
         vscode.window.showInformationMessage('Effect display not yet implemented');
     }
 }
