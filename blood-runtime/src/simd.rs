@@ -508,6 +508,7 @@ impl i32x4 {
 
     /// Left shift all lanes.
     #[inline]
+    #[allow(clippy::should_implement_trait)] // SIMD type cannot implement std::ops::Shl generically
     pub fn shl(self, amount: u32) -> Self {
         Self([
             self.0[0] << amount,
@@ -519,6 +520,7 @@ impl i32x4 {
 
     /// Right shift all lanes (arithmetic).
     #[inline]
+    #[allow(clippy::should_implement_trait)] // SIMD type cannot implement std::ops::Shr generically
     pub fn shr(self, amount: u32) -> Self {
         Self([
             self.0[0] >> amount,
@@ -652,6 +654,7 @@ pub struct i32x8([i32; 8]);
 impl i32x8 {
     /// Create from components.
     #[inline]
+    #[allow(clippy::too_many_arguments)] // SIMD lane initialization requires one argument per lane
     pub const fn new(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> Self {
         Self([a, b, c, d, e, f, g, h])
     }

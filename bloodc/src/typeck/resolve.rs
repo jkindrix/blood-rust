@@ -355,9 +355,7 @@ impl<'a> Resolver<'a> {
         // Note: For method families, we only track the first def_id in globals
         // The method family is resolved through the scope bindings
         if self.current_scope().kind == ScopeKind::Root {
-            if !self.globals.contains_key(&name) {
-                self.globals.insert(name, def_id);
-            }
+            self.globals.entry(name).or_insert(def_id);
         }
 
         Ok(def_id)

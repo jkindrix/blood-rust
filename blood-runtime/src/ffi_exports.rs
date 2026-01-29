@@ -1144,18 +1144,31 @@ pub unsafe extern "C" fn string_replace(
 }
 
 /// Convert str to uppercase (alias for string_to_uppercase).
+///
+/// # Safety
+///
+/// `s` must be a valid pointer to a `BloodStr` with a valid UTF-8 `ptr`/`len` pair.
 #[no_mangle]
 pub unsafe extern "C" fn str_to_uppercase(s: *const BloodStr) -> BloodVec {
     string_to_uppercase(s)
 }
 
 /// Convert str to lowercase (alias for string_to_lowercase).
+///
+/// # Safety
+///
+/// `s` must be a valid pointer to a `BloodStr` with a valid UTF-8 `ptr`/`len` pair.
 #[no_mangle]
 pub unsafe extern "C" fn str_to_lowercase(s: *const BloodStr) -> BloodVec {
     string_to_lowercase(s)
 }
 
 /// Replace all occurrences in str (alias for string_replace).
+///
+/// # Safety
+///
+/// All three pointers (`s`, `from`, `to`) must be valid pointers to `BloodStr`
+/// values with valid UTF-8 `ptr`/`len` pairs.
 #[no_mangle]
 pub unsafe extern "C" fn str_replace(
     s: *const BloodStr,
@@ -1200,7 +1213,7 @@ pub extern "C" fn read_line() -> BloodStr {
         let mut buf = buffer.borrow_mut();
         buf.clear();
 
-        match handle.read_until(b'\n', &mut *buf) {
+        match handle.read_until(b'\n', &mut buf) {
             Ok(0) => BloodStr { ptr: std::ptr::null(), len: 0 }, // EOF
             Ok(n) => {
                 // Strip trailing newline if present
@@ -1289,7 +1302,7 @@ pub unsafe extern "C" fn file_open(path: BloodStr, mode: BloodStr) -> i64 {
         "w" => File::create(path_str),
         "a" => OpenOptions::new().append(true).create(true).open(path_str),
         "rw" => OpenOptions::new().read(true).write(true).open(path_str),
-        "rw+" => OpenOptions::new().read(true).write(true).create(true).open(path_str),
+        "rw+" => OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path_str),
         _ => return -1,
     };
 
@@ -4111,7 +4124,7 @@ pub unsafe extern "C" fn vec_push(vec: *mut BloodVec, elem: *const u8, elem_size
         let tag = std::ptr::read(elem as *const i32);
         // Also read payload if we have enough size (assuming { i32, payload } layout)
         let payload = if elem_size >= 16 {
-            std::ptr::read((elem as *const u8).add(8) as *const i64)
+            std::ptr::read(elem.add(8) as *const i64)
         } else {
             -1
         };
@@ -7579,12 +7592,21 @@ mod tests {
 }
 
 /// Debug function to print vec index information
+///
+/// # Safety
+///
+/// This function only prints its arguments and has no pointer validity requirements.
 #[no_mangle]
 pub unsafe extern "C" fn debug_vec_index(idx: i64, byte_offset: i64) {
     eprintln!("[debug_vec_index] idx={} byte_offset={}", idx, byte_offset);
 }
 
 /// Debug function to print data ptr and element ptr
+///
+/// # Safety
+///
+/// Both `data_ptr` and `elem_ptr` must be valid (or null) pointers. They are only
+/// printed as addresses and not dereferenced.
 #[no_mangle]
 pub unsafe extern "C" fn debug_vec_ptrs(data_ptr: *const u8, elem_ptr: *const u8) {
     eprintln!("[debug_vec_ptrs] data_ptr={:p} elem_ptr={:p} offset={}", 
@@ -7592,6 +7614,11 @@ pub unsafe extern "C" fn debug_vec_ptrs(data_ptr: *const u8, elem_ptr: *const u8
 }
 
 /// Debug function to read enum at pointer and print its contents
+///
+/// # Safety
+///
+/// `ptr` must be a valid pointer to at least 16 bytes of readable memory
+/// containing a Blood enum layout (i32 tag at offset 0, i64 payload at offset 8).
 #[no_mangle]
 pub unsafe extern "C" fn debug_read_enum_at(ptr: *const u8) {
     let tag = std::ptr::read(ptr as *const i32);
@@ -7600,6 +7627,13 @@ pub unsafe extern "C" fn debug_read_enum_at(ptr: *const u8) {
 }
 
 /// Debug function to read and print enum at local storage
+///
+/// # Safety
+///
+/// - `ptr` must be a valid pointer to at least 16 bytes of readable memory
+///   containing a Blood enum layout (i32 tag at offset 0, i64 payload at offset 8).
+/// - `name` must be a valid pointer to `name_len` bytes of valid UTF-8 data.
+/// - `name_len` must be non-negative and accurately reflect the length of the name string.
 #[no_mangle]
 pub unsafe extern "C" fn debug_local_enum(ptr: *const u8, name: *const u8, name_len: i64) {
     let name_slice = std::slice::from_raw_parts(name, name_len as usize);

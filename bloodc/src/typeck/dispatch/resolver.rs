@@ -260,7 +260,7 @@ impl<'a> DispatchResolver<'a> {
         for (param_type, arg_type) in method.param_types.iter().zip(arg_types) {
             match self.try_match_type_param(param_type, arg_type, &valid_params, &mut substitutions) {
                 Ok(()) => continue,
-                Err(mismatch) => return mismatch,
+                Err(mismatch) => return *mismatch,
             }
         }
 
@@ -326,18 +326,18 @@ impl<'a> DispatchResolver<'a> {
         arg_type: &Type,
         valid_params: &std::collections::HashSet<TyVarId>,
         substitutions: &mut HashMap<TyVarId, Type>,
-    ) -> Result<(), InstantiationResult> {
+    ) -> Result<(), Box<InstantiationResult>> {
         match param_type.kind.as_ref() {
             // Type parameter: record or verify substitution
             TypeKind::Param(param_id) if valid_params.contains(param_id) => {
                 if let Some(existing) = substitutions.get(param_id) {
                     // Already have a substitution - verify consistency
                     if !self.types_equal(existing, arg_type) {
-                        return Err(InstantiationResult::TypeMismatch {
+                        return Err(Box::new(InstantiationResult::TypeMismatch {
                             param_id: *param_id,
                             expected: existing.clone(),
                             found: arg_type.clone(),
-                        });
+                        }));
                     }
                 } else {
                     // First occurrence - record substitution

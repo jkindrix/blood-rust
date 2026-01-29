@@ -15,6 +15,16 @@ use super::super::error::{TypeError, TypeErrorKind};
 use super::super::exhaustiveness;
 use super::super::resolve::{Binding, ScopeKind};
 
+/// Handler information collected during try/with inference:
+/// (effect_id, op_name, param_types, return_type, ast_handler, effect_type_args).
+type HandlerInfo<'b> = Vec<(DefId, String, Vec<Type>, Type, &'b ast::TryWithHandler, Vec<Type>)>;
+
+/// Resolved method information: (def_id, return_type, first_param_type, impl_generics, method_generics).
+type MethodLookup = Option<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>)>;
+
+/// Full method resolution result: (def_id, return_type, first_param_type, impl_generics, method_generics, needs_auto_ref).
+type MethodResolution = (DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>, bool);
+
 impl<'a> TypeContext<'a> {
     /// Check an expression against an expected type.
     pub(crate) fn check_expr(&mut self, expr: &ast::Expr, expected: &Type) -> Result<hir::Expr, Box<TypeError>> {
@@ -329,7 +339,7 @@ impl<'a> TypeContext<'a> {
     ) -> Result<hir::Expr, Box<TypeError>> {
         // Collect effect info for each handler clause
         // (effect_id, op_name, param_types, return_type, ast_handler, effect_type_args)
-        let mut handler_infos: Vec<(DefId, String, Vec<Type>, Type, &ast::TryWithHandler, Vec<Type>)> = Vec::new();
+        let mut handler_infos: HandlerInfo<'_> = Vec::new();
 
         for handler in handlers {
             // Resolve the effect type path
@@ -2869,7 +2879,7 @@ impl<'a> TypeContext<'a> {
         method_name: &str,
         _args: &[hir::Expr],
         span: Span,
-    ) -> Result<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>, bool), Box<TypeError>> {
+    ) -> Result<MethodResolution, Box<TypeError>> {
         // Try to find the method on the receiver type directly
         if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(receiver_ty, method_name) {
             // Check if we need to auto-ref the receiver
@@ -2896,7 +2906,7 @@ impl<'a> TypeContext<'a> {
 
     /// Find a method for a specific type by searching impl blocks.
     /// Returns (method_def_id, substituted return type, substituted first param type, impl generics, method generics).
-    pub(crate) fn find_method_for_type(&self, ty: &Type, method_name: &str) -> Option<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>)> {
+    pub(crate) fn find_method_for_type(&self, ty: &Type, method_name: &str) -> MethodLookup {
         // First, look for inherent impl methods (impl blocks without trait_ref)
         for impl_block in &self.impl_blocks {
             if impl_block.trait_ref.is_some() {
@@ -3005,7 +3015,7 @@ impl<'a> TypeContext<'a> {
 
     /// Find a builtin method for a type.
     /// Returns (method_def_id, return type, first param type, impl generics, method generics).
-    fn find_builtin_method(&self, ty: &Type, method_name: &str) -> Option<(DefId, Type, Option<Type>, Vec<TyVarId>, Vec<TyVarId>)> {
+    fn find_builtin_method(&self, ty: &Type, method_name: &str) -> MethodLookup {
         use super::BuiltinMethodType;
         use crate::hir::ty::PrimitiveTy;
 
@@ -3657,7 +3667,7 @@ impl<'a> TypeContext<'a> {
                     }
 
                     // Check module_defs for regular modules (e.g., `mod helper;`)
-                    for (_mod_def_id, mod_info) in &self.module_defs {
+                    for mod_info in self.module_defs.values() {
                         if mod_info.name == module_name {
                             // Search for type within this module's items
                             for &item_def_id in &mod_info.items {
@@ -3721,7 +3731,7 @@ impl<'a> TypeContext<'a> {
                     // We need to extract the reexport info first to avoid borrow issues
                     let reexport_match: Option<(DefId, hir::DefKind, Option<super::TypeAliasInfo>)> = {
                         let mut result = None;
-                        for (_mod_def_id, mod_info) in &self.module_defs {
+                        for mod_info in self.module_defs.values() {
                             if mod_info.name == module_name {
                                 for (reexport_name, reexport_def_id, _vis) in &mod_info.reexports {
                                     if reexport_name == &type_name {
@@ -3731,7 +3741,7 @@ impl<'a> TypeContext<'a> {
                                             } else {
                                                 None
                                             };
-                                            result = Some((*reexport_def_id, def_info.kind.clone(), alias_info));
+                                            result = Some((*reexport_def_id, def_info.kind, alias_info));
                                             break;
                                         }
                                     }
@@ -4041,7 +4051,7 @@ impl<'a> TypeContext<'a> {
                     match def_info.kind {
                         hir::DefKind::Struct | hir::DefKind::Enum => {
                             // Extract type arguments from the last segment
-                            let type_args = if let Some(ref args) = path.segments.last().and_then(|s| s.args.as_ref()) {
+                            let type_args = if let Some(args) = path.segments.last().and_then(|s| s.args.as_ref()) {
                                 let mut parsed_args = Vec::new();
                                 for arg in &args.args {
                                     if let ast::TypeArg::Type(arg_ty) = arg {
@@ -4058,7 +4068,7 @@ impl<'a> TypeContext<'a> {
                             // Look up and return the aliased type
                             if let Some(alias_info) = self.type_aliases.get(&item_def_id).cloned() {
                                 // Extract type arguments from the last segment
-                                let type_args = if let Some(ref args) = path.segments.last().and_then(|s| s.args.as_ref()) {
+                                let type_args = if let Some(args) = path.segments.last().and_then(|s| s.args.as_ref()) {
                                     let mut parsed_args = Vec::new();
                                     for arg in &args.args {
                                         if let ast::TypeArg::Type(arg_ty) = arg {
@@ -5082,23 +5092,23 @@ impl<'a> TypeContext<'a> {
                     }
 
                     // Type found but no matching method
-                    return Err(Box::new(TypeError::new(
+                    Err(Box::new(TypeError::new(
                         TypeErrorKind::NotFound { name: format!("{}::{}::{}", module_name, type_name, method_name) },
                         span,
-                    )));
+                    )))
                 } else {
                     // Type not found in module
-                    return Err(self.error_type_not_found(
+                    Err(self.error_type_not_found(
                         &format!("{}::{}", module_name, type_name),
                         span,
-                    ));
+                    ))
                 }
             } else {
                 // Module not found
-                return Err(Box::new(TypeError::new(
+                Err(Box::new(TypeError::new(
                     TypeErrorKind::NotFound { name: format!("module '{}'", module_name) },
                     span,
-                )));
+                )))
             }
         } else {
             let path_str = path.segments.iter()
@@ -5363,7 +5373,7 @@ impl<'a> TypeContext<'a> {
 
         // Check effect compatibility
         if let hir::ExprKind::Def(callee_def_id) = &callee_expr.kind {
-            self.check_effect_compatibility(callee_def_id.clone(), span)?;
+            self.check_effect_compatibility(*callee_def_id, span)?;
         } else {
             // For function-typed expressions (e.g., calling a function parameter),
             // check effect compatibility using the effects from the function type
@@ -6041,6 +6051,8 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Helper: Infer for loop over a range expression.
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn infer_for_range(
         &mut self,
         pattern: &ast::Pattern,
@@ -6220,6 +6232,8 @@ impl<'a> TypeContext<'a> {
     ///     _idx = _idx + 1;
     /// }
     /// ```
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn infer_for_array(
         &mut self,
         pattern: &ast::Pattern,
@@ -6632,6 +6646,8 @@ impl<'a> TypeContext<'a> {
     /// Helper: Infer for loop over a borrowed Vec (&Vec<T> or &mut Vec<T>).
     ///
     /// Generates index-based iteration: `for i in 0..vec.len() { elem = &vec[i]; ... }`
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn infer_for_vec(
         &mut self,
         pattern: &ast::Pattern,

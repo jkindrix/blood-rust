@@ -372,7 +372,7 @@ impl<'a> TypeContext<'a> {
         } else {
             return Err(Box::new(TypeError::new(
                 TypeErrorKind::ImportError {
-                    message: format!("cannot find definition for import path"),
+                    message: "cannot find definition for import path".to_string(),
                 },
                 span,
             )));
@@ -2657,10 +2657,10 @@ impl<'a> TypeContext<'a> {
                 }
 
                 // Search in order: sibling paths first (for nested modules), then parent paths
-                let module_path = if sibling_path.as_ref().map_or(false, |p| p.exists()) {
+                let module_path = if sibling_path.as_ref().is_some_and(|p| p.exists()) {
                     // SAFETY: condition checks sibling_path.as_ref() is Some and exists
                     sibling_path.expect("BUG: just checked sibling_path is Some above")
-                } else if sibling_alt.as_ref().map_or(false, |p| p.exists()) {
+                } else if sibling_alt.as_ref().is_some_and(|p| p.exists()) {
                     // SAFETY: condition checks sibling_alt.as_ref() is Some and exists
                     sibling_alt.expect("BUG: just checked sibling_alt is Some above")
                 } else if file_path.exists() {

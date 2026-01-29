@@ -629,7 +629,7 @@ impl Default for LinearityChecker {
 pub fn check_crate_linearity(krate: &hir::Crate) -> Vec<TypeError> {
     let mut errors = Vec::new();
 
-    for (_body_id, body) in &krate.bodies {
+    for body in krate.bodies.values() {
         let mut checker = LinearityChecker::new();
         errors.extend(checker.check_body(body));
     }
