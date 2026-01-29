@@ -5666,18 +5666,41 @@ pub unsafe extern "C" fn option_is_none(opt: *const u8) -> i32 {
     if tag == 0 { 1 } else { 0 }
 }
 
+/// Decode a packed size+alignment parameter into (size, payload_offset).
+///
+/// The codegen packs payload alignment into the upper 32 bits of the i64 size parameter:
+///   packed = (alignment << 32) | size
+///
+/// The runtime decodes both and computes the correct payload offset within the
+/// Option/Result struct (which has a 4-byte i32 tag at offset 0).
+///
+/// This is backward-compatible: old codegen passes raw size (upper bits = 0),
+/// triggering the legacy size-based heuristic.
+fn decode_size_and_offset(packed: i64) -> (usize, usize) {
+    let raw = packed as u64;
+    let size = (raw & 0xFFFF_FFFF) as usize;
+    let align = ((raw >> 32) & 0xFFFF_FFFF) as usize;
+    let offset = if align > 0 {
+        std::cmp::max(4, align)
+    } else {
+        // Legacy fallback (old codegen without alignment info)
+        if size > 4 { 8 } else { 4 }
+    };
+    (size, offset)
+}
+
 /// Unwrap an Option, panicking if None.
 ///
 /// # Arguments
 /// * `opt` - Pointer to the Option struct
-/// * `payload_size` - Size of the payload in bytes
+/// * `payload_size_raw` - Packed size+alignment of the payload (see `decode_size_and_offset`)
 /// * `out` - Output buffer for the unwrapped value
 ///
 /// # Safety
 /// `opt` must be a valid pointer to an Option<T> struct.
 /// `out` must be valid for at least `payload_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn option_unwrap(opt: *const u8, payload_size: i64, out: *mut u8) {
+pub unsafe extern "C" fn option_unwrap(opt: *const u8, payload_size_raw: i64, out: *mut u8) {
     if opt.is_null() {
         panic!("called `Option::unwrap()` on a `None` value (null pointer)");
     }
@@ -5689,14 +5712,11 @@ pub unsafe extern "C" fn option_unwrap(opt: *const u8, payload_size: i64, out: *
         panic!("called `Option::unwrap()` on a `None` value");
     }
 
-    // Payload offset: after the tag (4 bytes), but may be aligned
-    // For payloads <= 4 bytes, offset is 4
-    // For payloads > 4 bytes that need 8-byte alignment, offset is 8
-    let payload_offset = if payload_size > 4 { 8 } else { 4 };
-    let payload_ptr = opt.add(payload_offset as usize);
+    let (payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
+    let payload_ptr = opt.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size);
     }
 }
 
@@ -5714,7 +5734,7 @@ pub unsafe extern "C" fn option_unwrap(opt: *const u8, payload_size: i64, out: *
 /// `opt` must be a valid pointer to an Option<T> struct.
 /// `out` must be valid for at least `payload_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn option_try(opt: *const u8, payload_size: i64, out: *mut u8) -> i32 {
+pub unsafe extern "C" fn option_try(opt: *const u8, payload_size_raw: i64, out: *mut u8) -> i32 {
     if opt.is_null() {
         return 0; // None
     }
@@ -5726,12 +5746,11 @@ pub unsafe extern "C" fn option_try(opt: *const u8, payload_size: i64, out: *mut
         return 0; // None
     }
 
-    // Payload offset: after the tag (4 bytes), but may be aligned
-    let payload_offset = if payload_size > 4 { 8 } else { 4 };
-    let payload_ptr = opt.add(payload_offset as usize);
+    let (payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
+    let payload_ptr = opt.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size);
     }
 
     1 // Some
@@ -5753,7 +5772,7 @@ pub unsafe extern "C" fn option_try(opt: *const u8, payload_size: i64, out: *mut
 #[no_mangle]
 pub unsafe extern "C" fn option_expect(
     opt: *const u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     msg: *const u8,
     msg_len: i64,
     out: *mut u8,
@@ -5778,11 +5797,11 @@ pub unsafe extern "C" fn option_expect(
         panic!("{}", message);
     }
 
-    let payload_offset = if payload_size > 4 { 8 } else { 4 };
-    let payload_ptr = opt.add(payload_offset as usize);
+    let (payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
+    let payload_ptr = opt.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size);
     }
 }
 
@@ -5801,10 +5820,12 @@ pub unsafe extern "C" fn option_expect(
 #[no_mangle]
 pub unsafe extern "C" fn option_unwrap_or(
     opt: *const u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     default_val: *const u8,
     out: *mut u8,
 ) {
+    let (payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
+
     if out.is_null() {
         return;
     }
@@ -5812,7 +5833,7 @@ pub unsafe extern "C" fn option_unwrap_or(
     if opt.is_null() {
         // Use default
         if !default_val.is_null() {
-            std::ptr::copy_nonoverlapping(default_val, out, payload_size as usize);
+            std::ptr::copy_nonoverlapping(default_val, out, payload_size);
         }
         return;
     }
@@ -5821,13 +5842,12 @@ pub unsafe extern "C" fn option_unwrap_or(
 
     if tag == 1 {
         // Some - copy the value
-        let payload_offset = if payload_size > 4 { 8 } else { 4 };
-        let payload_ptr = opt.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size as usize);
+        let payload_ptr = opt.add(payload_offset);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, payload_size);
     } else {
         // None - use default
         if !default_val.is_null() {
-            std::ptr::copy_nonoverlapping(default_val, out, payload_size as usize);
+            std::ptr::copy_nonoverlapping(default_val, out, payload_size);
         }
     }
 }
@@ -5848,7 +5868,7 @@ pub unsafe extern "C" fn option_unwrap_or(
 #[no_mangle]
 pub unsafe extern "C" fn option_ok_or(
     opt: *const u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     err_val: *const u8,
     err_size: i64,
     out: *mut u8,
@@ -5857,14 +5877,16 @@ pub unsafe extern "C" fn option_ok_or(
         return;
     }
 
-    let max_payload = std::cmp::max(payload_size, err_size);
-    let payload_offset = if max_payload > 4 { 8 } else { 4 };
+    let (payload_size, src_offset) = decode_size_and_offset(payload_size_raw);
+    // Output Result uses max of ok/err sizes for the payload offset heuristic
+    let max_payload = std::cmp::max(payload_size, err_size as usize);
+    let dst_offset = if max_payload > 4 { 8 } else { 4 };
 
     if opt.is_null() {
         // None -> Err(err_val)
         *(out as *mut i32) = 1; // Err tag
         if !err_val.is_null() {
-            let dst_payload = out.add(payload_offset as usize);
+            let dst_payload = out.add(dst_offset);
             std::ptr::copy_nonoverlapping(err_val, dst_payload, err_size as usize);
         }
         return;
@@ -5875,15 +5897,14 @@ pub unsafe extern "C" fn option_ok_or(
     if tag == 1 {
         // Some(val) -> Ok(val)
         *(out as *mut i32) = 0; // Ok tag
-        let src_offset = if payload_size > 4 { 8 } else { 4 };
-        let src_payload = opt.add(src_offset as usize);
-        let dst_payload = out.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(src_payload, dst_payload, payload_size as usize);
+        let src_payload = opt.add(src_offset);
+        let dst_payload = out.add(dst_offset);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, payload_size);
     } else {
         // None -> Err(err_val)
         *(out as *mut i32) = 1; // Err tag
         if !err_val.is_null() {
-            let dst_payload = out.add(payload_offset as usize);
+            let dst_payload = out.add(dst_offset);
             std::ptr::copy_nonoverlapping(err_val, dst_payload, err_size as usize);
         }
     }
@@ -6042,7 +6063,7 @@ pub unsafe extern "C" fn option_xor(
 #[no_mangle]
 pub unsafe extern "C" fn option_as_ref(
     opt: *const u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     out: *mut u8,
 ) {
     if out.is_null() {
@@ -6063,8 +6084,8 @@ pub unsafe extern "C" fn option_as_ref(
     } else {
         // Some(val) -> Some(&val)
         *(out as *mut i32) = 1;
-        let payload_offset = if payload_size > 4 { 8 } else { 4 };
-        let payload_ptr = opt.add(payload_offset as usize);
+        let (_payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
+        let payload_ptr = opt.add(payload_offset);
         // Store pointer to payload at offset 8 (pointer is 8 bytes aligned)
         *(out.add(8) as *mut *const u8) = payload_ptr;
     }
@@ -6083,7 +6104,7 @@ pub unsafe extern "C" fn option_as_ref(
 #[no_mangle]
 pub unsafe extern "C" fn option_as_mut(
     opt: *mut u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     out: *mut u8,
 ) {
     if out.is_null() {
@@ -6104,8 +6125,8 @@ pub unsafe extern "C" fn option_as_mut(
     } else {
         // Some(val) -> Some(&mut val)
         *(out as *mut i32) = 1;
-        let payload_offset = if payload_size > 4 { 8 } else { 4 };
-        let payload_ptr = opt.add(payload_offset as usize);
+        let (_payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
+        let payload_ptr = opt.add(payload_offset);
         // Store pointer to payload at offset 8
         *(out.add(8) as *mut *mut u8) = payload_ptr;
     }
@@ -6124,7 +6145,7 @@ pub unsafe extern "C" fn option_as_mut(
 #[no_mangle]
 pub unsafe extern "C" fn option_take(
     opt: *mut u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     out: *mut u8,
 ) {
     if out.is_null() {
@@ -6144,11 +6165,11 @@ pub unsafe extern "C" fn option_take(
         *(out as *mut i32) = 0;
     } else {
         // Some(val) -> copy to out, set self to None
-        let payload_offset = if payload_size > 4 { 8 } else { 4 };
+        let (payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
         let total_size = payload_offset + payload_size;
 
         // Copy entire Option to out
-        std::ptr::copy_nonoverlapping(opt as *const u8, out, total_size as usize);
+        std::ptr::copy_nonoverlapping(opt as *const u8, out, total_size);
 
         // Set self to None
         *(opt as *mut i32) = 0;
@@ -6170,24 +6191,24 @@ pub unsafe extern "C" fn option_take(
 pub unsafe extern "C" fn option_replace(
     opt: *mut u8,
     value: *const u8,
-    payload_size: i64,
+    payload_size_raw: i64,
     out: *mut u8,
 ) {
     if out.is_null() || opt.is_null() {
         return;
     }
 
-    let payload_offset = if payload_size > 4 { 8 } else { 4 };
+    let (payload_size, payload_offset) = decode_size_and_offset(payload_size_raw);
     let total_size = payload_offset + payload_size;
 
     // Copy current Option to out
-    std::ptr::copy_nonoverlapping(opt as *const u8, out, total_size as usize);
+    std::ptr::copy_nonoverlapping(opt as *const u8, out, total_size);
 
     // Set opt to Some(value)
     *(opt as *mut i32) = 1;
     if !value.is_null() {
-        let dst_payload = opt.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(value, dst_payload, payload_size as usize);
+        let dst_payload = opt.add(payload_offset);
+        std::ptr::copy_nonoverlapping(value, dst_payload, payload_size);
     }
 }
 
@@ -6252,7 +6273,7 @@ pub unsafe extern "C" fn result_is_err(res: *const u8) -> i32 {
 /// `res` must be a valid pointer to a Result<T, E> struct.
 /// `out` must be valid for at least `ok_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn result_unwrap(res: *const u8, ok_size: i64, out: *mut u8) {
+pub unsafe extern "C" fn result_unwrap(res: *const u8, ok_size_raw: i64, out: *mut u8) {
     if res.is_null() {
         panic!("called `Result::unwrap()` on an `Err` value (null pointer)");
     }
@@ -6264,12 +6285,11 @@ pub unsafe extern "C" fn result_unwrap(res: *const u8, ok_size: i64, out: *mut u
         panic!("called `Result::unwrap()` on an `Err` value");
     }
 
-    // Payload offset: after the tag (4 bytes), but may be aligned
-    let payload_offset = if ok_size > 4 { 8 } else { 4 };
-    let payload_ptr = res.add(payload_offset as usize);
+    let (ok_size, payload_offset) = decode_size_and_offset(ok_size_raw);
+    let payload_ptr = res.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size);
     }
 }
 
@@ -6284,7 +6304,7 @@ pub unsafe extern "C" fn result_unwrap(res: *const u8, ok_size: i64, out: *mut u
 /// `res` must be a valid pointer to a Result<T, E> struct.
 /// `out` must be valid for at least `err_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn result_unwrap_err(res: *const u8, err_size: i64, out: *mut u8) {
+pub unsafe extern "C" fn result_unwrap_err(res: *const u8, err_size_raw: i64, out: *mut u8) {
     if res.is_null() {
         panic!("called `Result::unwrap_err()` on null pointer");
     }
@@ -6296,12 +6316,11 @@ pub unsafe extern "C" fn result_unwrap_err(res: *const u8, err_size: i64, out: *
         panic!("called `Result::unwrap_err()` on an `Ok` value");
     }
 
-    // Payload offset: after the tag (4 bytes), but may be aligned
-    let payload_offset = if err_size > 4 { 8 } else { 4 };
-    let payload_ptr = res.add(payload_offset as usize);
+    let (err_size, payload_offset) = decode_size_and_offset(err_size_raw);
+    let payload_ptr = res.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, err_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, err_size);
     }
 }
 
@@ -6319,7 +6338,7 @@ pub unsafe extern "C" fn result_unwrap_err(res: *const u8, err_size: i64, out: *
 /// `res` must be a valid pointer to a Result<T, E> struct.
 /// `out` must be valid for at least `ok_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn result_try(res: *const u8, ok_size: i64, out: *mut u8) -> i32 {
+pub unsafe extern "C" fn result_try(res: *const u8, ok_size_raw: i64, out: *mut u8) -> i32 {
     if res.is_null() {
         return 1; // Err
     }
@@ -6331,12 +6350,11 @@ pub unsafe extern "C" fn result_try(res: *const u8, ok_size: i64, out: *mut u8) 
         return 1; // Err
     }
 
-    // Payload offset: after the tag (4 bytes), but may be aligned
-    let payload_offset = if ok_size > 4 { 8 } else { 4 };
-    let payload_ptr = res.add(payload_offset as usize);
+    let (ok_size, payload_offset) = decode_size_and_offset(ok_size_raw);
+    let payload_ptr = res.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size);
     }
 
     0 // Ok
@@ -6353,7 +6371,7 @@ pub unsafe extern "C" fn result_try(res: *const u8, ok_size: i64, out: *mut u8) 
 /// `res` must be a valid pointer to a Result<T, E> struct.
 /// `out` must be valid for the Option<T> struct size.
 #[no_mangle]
-pub unsafe extern "C" fn result_ok(res: *const u8, ok_size: i64, out: *mut u8) {
+pub unsafe extern "C" fn result_ok(res: *const u8, ok_size_raw: i64, out: *mut u8) {
     if res.is_null() || out.is_null() {
         // Write None to output
         *(out as *mut i32) = 0;
@@ -6365,10 +6383,10 @@ pub unsafe extern "C" fn result_ok(res: *const u8, ok_size: i64, out: *mut u8) {
     if tag == 0 {
         // Ok(value) -> Some(value)
         *(out as *mut i32) = 1; // Some tag
-        let payload_offset = if ok_size > 4 { 8 } else { 4 };
-        let src_payload = res.add(payload_offset as usize);
-        let dst_payload = out.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(src_payload, dst_payload, ok_size as usize);
+        let (ok_size, payload_offset) = decode_size_and_offset(ok_size_raw);
+        let src_payload = res.add(payload_offset);
+        let dst_payload = out.add(payload_offset);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, ok_size);
     } else {
         // Err(_) -> None
         *(out as *mut i32) = 0;
@@ -6386,7 +6404,7 @@ pub unsafe extern "C" fn result_ok(res: *const u8, ok_size: i64, out: *mut u8) {
 /// `res` must be a valid pointer to a Result<T, E> struct.
 /// `out` must be valid for the Option<E> struct size.
 #[no_mangle]
-pub unsafe extern "C" fn result_err(res: *const u8, err_size: i64, out: *mut u8) {
+pub unsafe extern "C" fn result_err(res: *const u8, err_size_raw: i64, out: *mut u8) {
     if res.is_null() || out.is_null() {
         // Write None to output
         *(out as *mut i32) = 0;
@@ -6398,10 +6416,10 @@ pub unsafe extern "C" fn result_err(res: *const u8, err_size: i64, out: *mut u8)
     if tag == 1 {
         // Err(value) -> Some(value)
         *(out as *mut i32) = 1; // Some tag
-        let payload_offset = if err_size > 4 { 8 } else { 4 };
-        let src_payload = res.add(payload_offset as usize);
-        let dst_payload = out.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(src_payload, dst_payload, err_size as usize);
+        let (err_size, payload_offset) = decode_size_and_offset(err_size_raw);
+        let src_payload = res.add(payload_offset);
+        let dst_payload = out.add(payload_offset);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, err_size);
     } else {
         // Ok(_) -> None
         *(out as *mut i32) = 0;
@@ -6424,7 +6442,7 @@ pub unsafe extern "C" fn result_err(res: *const u8, err_size: i64, out: *mut u8)
 #[no_mangle]
 pub unsafe extern "C" fn result_expect(
     res: *const u8,
-    ok_size: i64,
+    ok_size_raw: i64,
     msg: *const u8,
     msg_len: i64,
     out: *mut u8,
@@ -6449,11 +6467,11 @@ pub unsafe extern "C" fn result_expect(
         panic!("{}", message);
     }
 
-    let payload_offset = if ok_size > 4 { 8 } else { 4 };
-    let payload_ptr = res.add(payload_offset as usize);
+    let (ok_size, payload_offset) = decode_size_and_offset(ok_size_raw);
+    let payload_ptr = res.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size);
     }
 }
 
@@ -6473,7 +6491,7 @@ pub unsafe extern "C" fn result_expect(
 #[no_mangle]
 pub unsafe extern "C" fn result_expect_err(
     res: *const u8,
-    err_size: i64,
+    err_size_raw: i64,
     msg: *const u8,
     msg_len: i64,
     out: *mut u8,
@@ -6498,11 +6516,11 @@ pub unsafe extern "C" fn result_expect_err(
         panic!("{}", message);
     }
 
-    let payload_offset = if err_size > 4 { 8 } else { 4 };
-    let payload_ptr = res.add(payload_offset as usize);
+    let (err_size, payload_offset) = decode_size_and_offset(err_size_raw);
+    let payload_ptr = res.add(payload_offset);
 
     if !out.is_null() {
-        std::ptr::copy_nonoverlapping(payload_ptr, out, err_size as usize);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, err_size);
     }
 }
 
@@ -6521,10 +6539,12 @@ pub unsafe extern "C" fn result_expect_err(
 #[no_mangle]
 pub unsafe extern "C" fn result_unwrap_or(
     res: *const u8,
-    ok_size: i64,
+    ok_size_raw: i64,
     default_val: *const u8,
     out: *mut u8,
 ) {
+    let (ok_size, payload_offset) = decode_size_and_offset(ok_size_raw);
+
     if out.is_null() {
         return;
     }
@@ -6532,7 +6552,7 @@ pub unsafe extern "C" fn result_unwrap_or(
     if res.is_null() {
         // Use default
         if !default_val.is_null() {
-            std::ptr::copy_nonoverlapping(default_val, out, ok_size as usize);
+            std::ptr::copy_nonoverlapping(default_val, out, ok_size);
         }
         return;
     }
@@ -6541,13 +6561,12 @@ pub unsafe extern "C" fn result_unwrap_or(
 
     if tag == 0 {
         // Ok - copy the value
-        let payload_offset = if ok_size > 4 { 8 } else { 4 };
-        let payload_ptr = res.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size as usize);
+        let payload_ptr = res.add(payload_offset);
+        std::ptr::copy_nonoverlapping(payload_ptr, out, ok_size);
     } else {
         // Err - use default
         if !default_val.is_null() {
-            std::ptr::copy_nonoverlapping(default_val, out, ok_size as usize);
+            std::ptr::copy_nonoverlapping(default_val, out, ok_size);
         }
     }
 }
@@ -6594,10 +6613,10 @@ pub unsafe extern "C" fn result_and(
     } else {
         // Err -> return Err from self
         *(out as *mut i32) = 1;
-        let payload_offset = if err_size > 4 { 8 } else { 4 };
-        let src_payload = res.add(payload_offset as usize);
-        let dst_payload = out.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(src_payload, dst_payload, err_size as usize);
+        let (err_sz, payload_offset) = decode_size_and_offset(err_size);
+        let src_payload = res.add(payload_offset);
+        let dst_payload = out.add(payload_offset);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, err_sz);
     }
 }
 
@@ -6640,10 +6659,10 @@ pub unsafe extern "C" fn result_or(
     if tag == 0 {
         // Ok -> return self (as Result<T, F>)
         *(out as *mut i32) = 0;
-        let payload_offset = if ok_size > 4 { 8 } else { 4 };
-        let src_payload = res.add(payload_offset as usize);
-        let dst_payload = out.add(payload_offset as usize);
-        std::ptr::copy_nonoverlapping(src_payload, dst_payload, ok_size as usize);
+        let (ok_sz, payload_offset) = decode_size_and_offset(ok_size);
+        let src_payload = res.add(payload_offset);
+        let dst_payload = out.add(payload_offset);
+        std::ptr::copy_nonoverlapping(src_payload, dst_payload, ok_sz);
     } else {
         // Err -> return other
         if !other.is_null() {
@@ -6688,14 +6707,14 @@ pub unsafe extern "C" fn result_as_ref(
     if tag == 0 {
         // Ok(val) -> Ok(&val)
         *(out as *mut i32) = 0;
-        let payload_offset = if ok_size > 4 { 8 } else { 4 };
-        let payload_ptr = res.add(payload_offset as usize);
+        let (_ok_sz, payload_offset) = decode_size_and_offset(ok_size);
+        let payload_ptr = res.add(payload_offset);
         *(out.add(8) as *mut *const u8) = payload_ptr;
     } else {
         // Err(e) -> Err(&e)
         *(out as *mut i32) = 1;
-        let payload_offset = if err_size > 4 { 8 } else { 4 };
-        let payload_ptr = res.add(payload_offset as usize);
+        let (_err_sz, payload_offset) = decode_size_and_offset(err_size);
+        let payload_ptr = res.add(payload_offset);
         *(out.add(8) as *mut *const u8) = payload_ptr;
     }
 }
@@ -6734,14 +6753,14 @@ pub unsafe extern "C" fn result_as_mut(
     if tag == 0 {
         // Ok(val) -> Ok(&mut val)
         *(out as *mut i32) = 0;
-        let payload_offset = if ok_size > 4 { 8 } else { 4 };
-        let payload_ptr = res.add(payload_offset as usize);
+        let (_ok_sz, payload_offset) = decode_size_and_offset(ok_size);
+        let payload_ptr = res.add(payload_offset);
         *(out.add(8) as *mut *mut u8) = payload_ptr;
     } else {
         // Err(e) -> Err(&mut e)
         *(out as *mut i32) = 1;
-        let payload_offset = if err_size > 4 { 8 } else { 4 };
-        let payload_ptr = res.add(payload_offset as usize);
+        let (_err_sz, payload_offset) = decode_size_and_offset(err_size);
+        let payload_ptr = res.add(payload_offset);
         *(out.add(8) as *mut *mut u8) = payload_ptr;
     }
 }

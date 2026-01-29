@@ -1039,3 +1039,10 @@ fn test_dispatch_basic() {
     // Tests: Trait-based dispatch with multiple implementations compiles and runs.
     run_fixture_test("dispatch_basic");
 }
+
+#[test]
+fn test_option_struct_unwrap() {
+    // Tests: Option::unwrap() for struct payloads with size > 4 but alignment 4.
+    // Regression test for BUG-006: payload offset corruption.
+    run_fixture_test("option_struct_unwrap");
+}

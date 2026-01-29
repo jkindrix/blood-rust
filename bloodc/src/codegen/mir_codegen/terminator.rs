@@ -777,7 +777,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(payload_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(payload_ty);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -821,7 +823,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(payload_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(payload_ty);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -840,7 +844,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(ok_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(ok_ty);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -859,7 +865,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if type_args.len() >= 2 {
                                             let llvm_ty = self.lower_type(&type_args[1]);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -877,7 +885,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if type_args.len() >= 2 {
                                             let llvm_ty = self.lower_type(&type_args[1]);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -895,7 +905,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(ok_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(ok_ty);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -929,7 +941,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(ok_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(ok_ty);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -948,7 +962,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     if let crate::hir::TypeKind::Adt { args: type_args, .. } = inner_ty.kind() {
                                         if let Some(ok_ty) = type_args.first() {
                                             let llvm_ty = self.lower_type(ok_ty);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -1161,7 +1177,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     let err_size = if let crate::hir::TypeKind::Adt { args: type_args, .. } = res_inner.kind() {
                                         if type_args.len() >= 2 {
                                             let llvm_ty = self.lower_type(&type_args[1]);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
@@ -1197,7 +1215,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                     let err_size = if let crate::hir::TypeKind::Adt { args: type_args, .. } = res_inner.kind() {
                                         if type_args.len() >= 2 {
                                             let llvm_ty = self.lower_type(&type_args[1]);
-                                            self.get_type_size_in_bytes(llvm_ty)
+                                            let size = self.get_type_size_in_bytes(llvm_ty);
+                                            let align = self.get_type_alignment_for_size(llvm_ty);
+                                            (align << 32) | size
                                         } else {
                                             8
                                         }
