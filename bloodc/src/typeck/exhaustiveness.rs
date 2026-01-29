@@ -187,8 +187,16 @@ fn check_bool_exhaustiveness(patterns: &[&Pattern]) -> (bool, Vec<String>) {
                         PatternKind::Literal(hir::LiteralValue::Bool(b)) => {
                             if *b { has_true = true; } else { has_false = true; }
                         }
-                        // Other patterns (Range, etc.) don't contribute to bool exhaustiveness
-                        _ => {}
+                        // These patterns don't contribute to bool exhaustiveness
+                        PatternKind::Literal(_)
+                        | PatternKind::Variant { .. }
+                        | PatternKind::Struct { .. }
+                        | PatternKind::Tuple(_)
+                        | PatternKind::Slice { .. }
+                        | PatternKind::Ref { .. }
+                        | PatternKind::Range { .. }
+                        | PatternKind::Or(_)
+                        | PatternKind::Binding { subpattern: Some(_), .. } => {}
                     }
                 }
             }

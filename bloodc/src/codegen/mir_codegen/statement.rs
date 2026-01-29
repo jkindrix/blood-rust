@@ -45,6 +45,10 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // expression never returns, so this assignment will never execute.
                 // We skip codegen for these to avoid LLVM type mismatches (Never is i8,
                 // but destination might be a complex ADT).
+                //
+                // Only Use(Copy/Move) can reference a Never-typed place — other rvalue kinds
+                // (BinaryOp, UnaryOp, Aggregate, Ref, Cast, Len, Discriminant) produce concrete
+                // typed results and cannot produce a Never-typed value directly.
                 let is_never_source = match rvalue {
                     Rvalue::Use(Operand::Copy(src_place)) | Rvalue::Use(Operand::Move(src_place)) => {
                         let src_ty = self.get_place_base_type(src_place, body)?;
@@ -1064,7 +1068,19 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 format!("LLVM ptr_to_int error: {}", e), stmt.span
                             )])?
                     }
-                    _ => i64_ty.const_zero(),
+                    BasicValueEnum::FloatValue(fv) => {
+                        self.builder.build_bit_cast(fv, i64_ty, "result_float_bits")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM bitcast error: {}", e), stmt.span
+                            )])?
+                            .into_int_value()
+                    }
+                    BasicValueEnum::ArrayValue(_) | BasicValueEnum::StructValue(_) | BasicValueEnum::VectorValue(_) => {
+                        return Err(vec![Diagnostic::error(
+                            format!("ICE: handler return clause received aggregate value that cannot be converted to i64"),
+                            stmt.span
+                        )]);
+                    }
                 };
 
                 // Get state pointer from state_place

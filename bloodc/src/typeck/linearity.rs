@@ -117,7 +117,28 @@ impl LinearityChecker {
             TypeKind::Array { element, .. } | TypeKind::Slice { element } => {
                 self.check_linearity(element)
             }
-            _ => (false, false),
+            TypeKind::Range { element, .. } => self.check_linearity(element),
+            TypeKind::Record { fields, .. } => {
+                let mut is_linear = false;
+                let mut is_affine = false;
+                for f in fields {
+                    let (l, a) = self.check_linearity(&f.ty);
+                    is_linear |= l;
+                    is_affine |= a;
+                }
+                (is_linear, is_affine)
+            }
+            TypeKind::Forall { body, .. } => self.check_linearity(body),
+            // These types cannot contain linear/affine values
+            TypeKind::Fn { .. }
+            | TypeKind::Closure { .. }
+            | TypeKind::Adt { .. }
+            | TypeKind::DynTrait { .. }
+            | TypeKind::Primitive(_)
+            | TypeKind::Never
+            | TypeKind::Error
+            | TypeKind::Infer(_)
+            | TypeKind::Param(_) => (false, false),
         }
     }
 

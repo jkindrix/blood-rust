@@ -882,6 +882,9 @@ impl EffectLowering {
                     "Effect {:?} not found during lowering",
                     effect_id
                 ));
+                // Type::error() is correct ICE recovery — the real error is propagated
+                // via the `error` field, and the Error expr/type prevents further codegen
+                // from misinterpreting this result.
                 return LoweringResult {
                     expr: Expr {
                         kind: ExprKind::Error,
@@ -908,6 +911,9 @@ impl EffectLowering {
                     "Operation '{}' not found in effect {:?}",
                     operation, effect_id
                 ));
+                // Type::error() is correct ICE recovery — the real error is propagated
+                // via the `error` field, and the Error expr/type prevents further codegen
+                // from misinterpreting this result.
                 return LoweringResult {
                     expr: Expr {
                         kind: ExprKind::Error,

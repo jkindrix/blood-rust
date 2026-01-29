@@ -264,13 +264,64 @@ fn count_resumes(expr: &Expr) -> usize {
             count_resumes(body)
         }
         ExprKind::Return(Some(e)) => count_resumes(e),
+        ExprKind::Return(None) => 0,
         ExprKind::Assign { value, .. } => count_resumes(value),
         ExprKind::Handle { body, .. } => count_resumes(body),
         ExprKind::InlineHandle { body, handlers } => {
             count_resumes(body) + handlers.iter().map(|h| count_resumes(&h.body)).sum::<usize>()
         }
         ExprKind::Perform { args, .. } => args.iter().map(count_resumes).sum(),
-        _ => 0,
+        ExprKind::MethodCall { receiver, args, .. } => {
+            count_resumes(receiver) + args.iter().map(count_resumes).sum::<usize>()
+        }
+        ExprKind::Field { base, .. } => count_resumes(base),
+        ExprKind::Index { base, index } => count_resumes(base) + count_resumes(index),
+        ExprKind::Repeat { value, .. } => count_resumes(value),
+        ExprKind::Struct { fields, base, .. } => {
+            fields.iter().map(|f| count_resumes(&f.value)).sum::<usize>()
+                + base.as_ref().map(|e| count_resumes(e)).unwrap_or(0)
+        }
+        ExprKind::Record { fields } => {
+            fields.iter().map(|f| count_resumes(&f.value)).sum()
+        }
+        ExprKind::Variant { fields, .. } => {
+            fields.iter().map(count_resumes).sum()
+        }
+        ExprKind::Cast { expr, .. }
+        | ExprKind::Borrow { expr, .. }
+        | ExprKind::AddrOf { expr, .. } => count_resumes(expr),
+        ExprKind::Deref(expr)
+        | ExprKind::Unsafe(expr)
+        | ExprKind::Dbg(expr)
+        | ExprKind::SliceLen(expr)
+        | ExprKind::VecLen(expr) => count_resumes(expr),
+        ExprKind::ArrayToSlice { expr, .. } => count_resumes(expr),
+        ExprKind::Let { init, .. } => count_resumes(init),
+        ExprKind::Range { start, end, .. } => {
+            start.as_ref().map(|e| count_resumes(e)).unwrap_or(0)
+                + end.as_ref().map(|e| count_resumes(e)).unwrap_or(0)
+        }
+        ExprKind::Break { value, .. } => {
+            value.as_ref().map(|e| count_resumes(e)).unwrap_or(0)
+        }
+        ExprKind::MacroExpansion { args, named_args, .. } => {
+            args.iter().map(count_resumes).sum::<usize>()
+                + named_args.iter().map(|(_, e)| count_resumes(e)).sum::<usize>()
+        }
+        ExprKind::VecLiteral(exprs) => exprs.iter().map(count_resumes).sum(),
+        ExprKind::VecRepeat { value, count } => count_resumes(value) + count_resumes(count),
+        ExprKind::Assert { condition, message } => {
+            count_resumes(condition) + message.as_ref().map(|e| count_resumes(e)).unwrap_or(0)
+        }
+        // Leaf nodes: no sub-expressions to recurse into
+        ExprKind::Literal(_)
+        | ExprKind::Local(_)
+        | ExprKind::Def(_)
+        | ExprKind::Continue { .. }
+        | ExprKind::Closure { .. } // Closures define their own scope; resumes in body are separate
+        | ExprKind::MethodFamily { .. }
+        | ExprKind::Default
+        | ExprKind::Error => 0,
     }
 }
 

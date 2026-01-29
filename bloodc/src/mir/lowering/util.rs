@@ -1490,7 +1490,46 @@ pub trait ExprLowering {
                     .collect();
                 Type::tuple(new_elements)
             }
-            _ => ty.clone(),
+            TypeKind::Fn { params, ret, effects } => {
+                let new_params: Vec<Type> = params.iter()
+                    .map(|p| self.substitute_type(p, subst))
+                    .collect();
+                let new_ret = self.substitute_type(ret, subst);
+                Type::new(TypeKind::Fn { params: new_params, ret: new_ret, effects: effects.clone() })
+            }
+            TypeKind::Closure { def_id, params, ret } => {
+                let new_params: Vec<Type> = params.iter()
+                    .map(|p| self.substitute_type(p, subst))
+                    .collect();
+                let new_ret = self.substitute_type(ret, subst);
+                Type::new(TypeKind::Closure { def_id: *def_id, params: new_params, ret: new_ret })
+            }
+            TypeKind::Ptr { inner, mutable } => {
+                Type::new(TypeKind::Ptr { inner: self.substitute_type(inner, subst), mutable: *mutable })
+            }
+            TypeKind::Range { element, inclusive } => {
+                Type::new(TypeKind::Range { element: self.substitute_type(element, subst), inclusive: *inclusive })
+            }
+            TypeKind::Ownership { qualifier, inner } => {
+                Type::ownership(*qualifier, self.substitute_type(inner, subst))
+            }
+            TypeKind::Record { fields, row_var } => {
+                let new_fields: Vec<_> = fields.iter()
+                    .map(|f| crate::hir::ty::RecordField {
+                        name: f.name.clone(),
+                        ty: self.substitute_type(&f.ty, subst),
+                    })
+                    .collect();
+                Type::record(new_fields, *row_var)
+            }
+            TypeKind::Forall { params, body } => {
+                Type::forall(params.clone(), self.substitute_type(body, subst))
+            }
+            TypeKind::DynTrait { .. }
+            | TypeKind::Primitive(_)
+            | TypeKind::Never
+            | TypeKind::Error
+            | TypeKind::Infer(_) => ty.clone(),
         }
     }
 

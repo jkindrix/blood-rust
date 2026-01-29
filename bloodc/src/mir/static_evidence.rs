@@ -194,7 +194,8 @@ pub fn analyze_inline_evidence_mode(
         0 => unreachable!("after_push should never return 0"),
         1 => InlineEvidenceMode::Inline,
         2 => InlineEvidenceMode::SpecializedPair,
-        _ => InlineEvidenceMode::Vector,
+        // At depth 3+, there are too many handlers for inline representation
+        3.. => InlineEvidenceMode::Vector,
     }
 }
 

@@ -193,8 +193,8 @@ impl LifetimeInference {
                                 self.solutions.insert(right, sol);
                                 changed = true;
                             }
-                            // (Some, Some) or (None, None): no propagation needed
-                            _ => {}
+                            (Some(_), Some(_)) => {} // Both have solutions: already propagated
+                            (None, None) => {} // Neither has a solution yet
                         }
                     }
                     LifetimeConstraint::Static { lifetime, .. } => {

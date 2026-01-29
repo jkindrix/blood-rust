@@ -59,7 +59,8 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
                             return false;
                         }
                     }
-                    _ => {}
+                    hir::Stmt::Let { init: None, .. } => {} // No initializer to check
+                    hir::Stmt::Item(_) => {} // Nested items don't contain resumes at this scope
                 }
             }
             // Check final expression - it IS in tail position if block is

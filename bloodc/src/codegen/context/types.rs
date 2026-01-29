@@ -471,8 +471,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let substituted_ret = self.substitute_type_params(ret, args);
                 Type::function(substituted_params, substituted_ret)
             }
-            // Primitive types and other non-generic types return as-is
-            _ => ty.clone(),
+            // Non-generic types pass through unchanged — they contain no type parameters
+            // to substitute. Closure, Range, Record, Forall, Ownership, DynTrait could
+            // theoretically contain params but are not currently used in generic ADT fields.
+            TypeKind::Closure { .. }
+            | TypeKind::Range { .. }
+            | TypeKind::Record { .. }
+            | TypeKind::Forall { .. }
+            | TypeKind::Ownership { .. }
+            | TypeKind::DynTrait { .. }
+            | TypeKind::Primitive(_)
+            | TypeKind::Never
+            | TypeKind::Error
+            | TypeKind::Infer(_) => ty.clone(),
         }
     }
 }

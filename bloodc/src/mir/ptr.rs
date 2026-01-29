@@ -271,11 +271,14 @@ pub enum MemoryTier {
 impl MemoryTier {
     /// Create from the 4-bit tier field.
     pub fn from_bits(bits: u32) -> Self {
+        debug_assert!(bits <= 0xF, "MemoryTier bits must fit in 4-bit field, got {}", bits);
         match bits {
             0 => MemoryTier::Stack,
             1 => MemoryTier::Region,
             2 => MemoryTier::Persistent,
-            _ => MemoryTier::Reserved,
+            // Values 3..=15 are reserved for future memory tiers
+            3..=0xF => MemoryTier::Reserved,
+            _ => unreachable!("4-bit field cannot exceed 0xF"),
         }
     }
 
