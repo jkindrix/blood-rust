@@ -4,7 +4,7 @@
 
 use inkwell::types::BasicType;
 use inkwell::values::BasicValueEnum;
-use inkwell::AddressSpace;
+use inkwell::{AddressSpace, IntPredicate};
 
 use crate::diagnostics::Diagnostic;
 use crate::effects::evidence::HandlerStateKind;
@@ -160,6 +160,66 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         // not being used after StorageDead (which is a correctness invariant)
                     }
                     let _ = gen_alloca; // Suppress unused warning
+                }
+
+                // If this local was persistent-allocated (has entry in persistent_slot_ids),
+                // we must decrement its reference count. This enables automatic RC lifecycle:
+                // when the local goes out of scope, the persistent slot's refcount decreases,
+                // and the slot is freed when refcount reaches zero.
+                if let Some(&slot_id_alloca) = self.persistent_slot_ids.get(local) {
+                    let i64_ty = self.context.i64_type();
+
+                    // Load the slot ID from the alloca
+                    let slot_id = self.builder.build_load(slot_id_alloca, "persistent_slot_id")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), stmt.span
+                        )])?
+                        .into_int_value();
+
+                    // Only decrement if slot_id != 0 (0 means allocation failed)
+                    let is_valid = self.builder.build_int_compare(
+                        IntPredicate::NE,
+                        slot_id,
+                        i64_ty.const_int(0, false),
+                        "slot_id_valid"
+                    ).map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM compare error: {}", e), stmt.span
+                    )])?;
+
+                    let current_fn = self.current_fn.ok_or_else(|| {
+                        vec![Diagnostic::error("No current function", stmt.span)]
+                    })?;
+
+                    let decrement_bb = self.context.append_basic_block(current_fn, "persistent_decrement");
+                    let after_bb = self.context.append_basic_block(current_fn, "after_persistent_decrement");
+
+                    self.builder.build_conditional_branch(is_valid, decrement_bb, after_bb)
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM branch error: {}", e), stmt.span
+                        )])?;
+
+                    // Decrement block
+                    self.builder.position_at_end(decrement_bb);
+
+                    // Get or declare blood_persistent_decrement(id: u64)
+                    let decrement_fn = self.module.get_function("blood_persistent_decrement")
+                        .unwrap_or_else(|| {
+                            let fn_type = self.context.void_type().fn_type(&[i64_ty.into()], false);
+                            self.module.add_function("blood_persistent_decrement", fn_type, None)
+                        });
+
+                    self.builder.build_call(decrement_fn, &[slot_id.into()], "")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM call error: {}", e), stmt.span
+                        )])?;
+
+                    self.builder.build_unconditional_branch(after_bb)
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM branch error: {}", e), stmt.span
+                        )])?;
+
+                    // Continue after decrement
+                    self.builder.position_at_end(after_bb);
                 }
             }
 

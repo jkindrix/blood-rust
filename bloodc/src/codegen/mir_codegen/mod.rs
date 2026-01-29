@@ -143,7 +143,7 @@ pub trait MirCodegen<'ctx, 'a>:
     /// effect operations.
     fn type_may_contain_genref(&self, ty: &Type) -> bool;
 
-    /// Allocate memory using blood_alloc for Region/Persistent tier.
+    /// Allocate memory using blood_alloc for Region tier.
     ///
     /// This calls the runtime's blood_alloc function which:
     /// 1. Allocates memory on the heap
@@ -152,6 +152,21 @@ pub trait MirCodegen<'ctx, 'a>:
     ///
     /// Returns a pointer to the allocated memory.
     fn allocate_with_blood_alloc(
+        &mut self,
+        llvm_ty: BasicTypeEnum<'ctx>,
+        local_id: LocalId,
+        span: Span,
+    ) -> Result<PointerValue<'ctx>, Vec<Diagnostic>>;
+
+    /// Allocate memory using blood_persistent_alloc for Persistent (Tier 3) tier.
+    ///
+    /// This calls the runtime's blood_persistent_alloc function which:
+    /// 1. Allocates a reference-counted persistent slot
+    /// 2. Returns a pointer to the allocated memory and a slot ID
+    /// 3. The slot ID is stored for RC lifecycle management (decrement on StorageDead)
+    ///
+    /// Returns a pointer to the allocated memory.
+    fn allocate_with_persistent_alloc(
         &mut self,
         llvm_ty: BasicTypeEnum<'ctx>,
         local_id: LocalId,
@@ -191,6 +206,7 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         self.current_fn_def_id = Some(def_id);
         self.locals.clear();
         self.local_generations.clear();
+        self.persistent_slot_ids.clear();
 
         // Create LLVM basic blocks for all MIR blocks
         let mut llvm_blocks: HashMap<BasicBlockId, BasicBlock<'ctx>> = HashMap::new();
@@ -251,10 +267,16 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     }
                     alloca_ptr
                 }
-                MemoryTier::Region | MemoryTier::Persistent => {
+                MemoryTier::Region => {
                     // Region allocation - use blood_alloc for generational tracking
                     // This is the safe path for escaping values that need generation checks
                     self.allocate_with_blood_alloc(llvm_ty, local.id, body.span)?
+                }
+                MemoryTier::Persistent => {
+                    // Persistent (Tier 3) allocation - use blood_persistent_alloc for RC lifecycle
+                    // Unlike region allocation which uses generational references,
+                    // persistent values use reference counting with cycle collection
+                    self.allocate_with_persistent_alloc(llvm_ty, local.id, body.span)?
                 }
                 MemoryTier::Reserved => {
                     // Reserved tier should never be returned by escape analysis.
@@ -393,5 +415,14 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         span: Span,
     ) -> Result<PointerValue<'ctx>, Vec<Diagnostic>> {
         memory::allocate_with_blood_alloc_impl(self, llvm_ty, local_id, span)
+    }
+
+    fn allocate_with_persistent_alloc(
+        &mut self,
+        llvm_ty: BasicTypeEnum<'ctx>,
+        local_id: LocalId,
+        span: Span,
+    ) -> Result<PointerValue<'ctx>, Vec<Diagnostic>> {
+        memory::allocate_with_persistent_alloc_impl(self, llvm_ty, local_id, span)
     }
 }

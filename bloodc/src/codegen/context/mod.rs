@@ -623,6 +623,9 @@ pub struct CodegenContext<'ctx, 'a> {
     /// Map from region-allocated LocalId to generation storage (stack alloca).
     /// Used for generation validation on dereference.
     pub local_generations: HashMap<LocalId, PointerValue<'ctx>>,
+    /// Map from persistent-tier LocalId to slot ID storage (stack alloca holding u64 slot ID).
+    /// Used for RC lifecycle management: blood_persistent_decrement on StorageDead.
+    pub persistent_slot_ids: HashMap<LocalId, PointerValue<'ctx>>,
     /// Generated vtables: (trait_id, type_def_id) -> vtable global variable.
     /// For non-ADT types, type_def_id is DefId::DUMMY.
     pub(super) vtables: HashMap<(DefId, DefId), inkwell::values::GlobalValue<'ctx>>,
@@ -712,6 +715,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             handler_ops: HashMap::new(),
             builtin_fns: HashMap::new(),
             local_generations: HashMap::new(),
+            persistent_slot_ids: HashMap::new(),
             vtables: HashMap::new(),
             vtable_layouts: HashMap::new(),
             wasm_imports: HashMap::new(),
@@ -2153,6 +2157,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.current_fn = Some(fn_value);
         self.locals.clear();
         self.local_generations.clear();
+        self.persistent_slot_ids.clear();
         self.loop_stack.clear();
 
         // Create entry block
@@ -2543,6 +2548,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // This is necessary because compile_mir_body modifies these fields
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_local_generations = std::mem::take(&mut self.local_generations);
+        let saved_persistent_slot_ids = std::mem::take(&mut self.persistent_slot_ids);
         let saved_current_fn = self.current_fn.take();
         let saved_current_fn_def_id = self.current_fn_def_id.take();
         let saved_insert_block = self.builder.get_insert_block();
@@ -2567,6 +2573,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Clear state for each closure compilation
                 self.locals.clear();
                 self.local_generations.clear();
+        self.persistent_slot_ids.clear();
 
                 // Run escape analysis on the closure
                 let mut analyzer = EscapeAnalyzer::new();
@@ -2583,6 +2590,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Restore previous function state
         self.locals = saved_locals;
         self.local_generations = saved_local_generations;
+        self.persistent_slot_ids = saved_persistent_slot_ids;
         self.current_fn = saved_current_fn;
         self.current_fn_def_id = saved_current_fn_def_id;
 

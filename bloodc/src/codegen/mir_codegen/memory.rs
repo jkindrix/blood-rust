@@ -227,3 +227,82 @@ pub(super) fn allocate_with_blood_alloc_impl<'ctx, 'a>(
 
     Ok(typed_ptr)
 }
+
+/// Allocate memory using blood_persistent_alloc for Persistent (Tier 3) tier.
+///
+/// This function:
+/// 1. Calls blood_persistent_alloc(size, align, type_fp, &out_id) -> *mut u8
+/// 2. Stores the returned slot ID in a stack alloca for RC lifecycle management
+/// 3. Returns a typed pointer to the allocated memory
+///
+/// The slot ID is tracked in `persistent_slot_ids` so that `StorageDead` can
+/// emit `blood_persistent_decrement` to manage the reference count.
+pub(super) fn allocate_with_persistent_alloc_impl<'ctx, 'a>(
+    ctx: &mut CodegenContext<'ctx, 'a>,
+    llvm_ty: BasicTypeEnum<'ctx>,
+    local_id: LocalId,
+    span: Span,
+) -> Result<PointerValue<'ctx>, Vec<Diagnostic>> {
+    let i8_ptr_ty = ctx.context.i8_type().ptr_type(AddressSpace::default());
+    let i32_ty = ctx.context.i32_type();
+    let i64_ty = ctx.context.i64_type();
+
+    // Get or declare blood_persistent_alloc(size: i64, align: i64, type_fp: i32, out_id: *i64) -> *i8
+    // Note: Uses i64 for size/align since usize == u64 on 64-bit targets
+    let alloc_fn = ctx.module.get_function("blood_persistent_alloc")
+        .unwrap_or_else(|| {
+            let fn_type = i8_ptr_ty.fn_type(
+                &[i64_ty.into(), i64_ty.into(), i32_ty.into(), i64_ty.ptr_type(AddressSpace::default()).into()],
+                false,
+            );
+            ctx.module.add_function("blood_persistent_alloc", fn_type, None)
+        });
+
+    // Calculate size and alignment of the type
+    let type_size = ctx.get_type_size_in_bytes(llvm_ty);
+    let type_align = ctx.get_type_alignment_for_size(llvm_ty) as u64;
+    let size_val = i64_ty.const_int(type_size, false);
+    let align_val = i64_ty.const_int(type_align, false);
+    let type_fp = i32_ty.const_int(0, false); // Type fingerprint (0 = unknown)
+
+    // Create stack alloca for the slot ID output parameter
+    let slot_id_alloca = ctx.builder.build_alloca(i64_ty, &format!("_{}_slot_id", local_id.index))
+        .map_err(|e| vec![Diagnostic::error(
+            format!("LLVM alloca error: {}", e), span
+        )])?;
+
+    // Initialize slot ID to 0
+    ctx.builder.build_store(slot_id_alloca, i64_ty.const_int(0, false))
+        .map_err(|e| vec![Diagnostic::error(
+            format!("LLVM store error: {}", e), span
+        )])?;
+
+    // Call blood_persistent_alloc(size, align, type_fp, &out_id) -> *u8
+    let raw_ptr = ctx.builder.build_call(
+        alloc_fn,
+        &[size_val.into(), align_val.into(), type_fp.into(), slot_id_alloca.into()],
+        &format!("_{}_persistent_ptr", local_id.index)
+    ).map_err(|e| vec![Diagnostic::error(
+        format!("LLVM call error: {}", e), span
+    )])?
+        .try_as_basic_value()
+        .left()
+        .ok_or_else(|| vec![Diagnostic::error(
+            "blood_persistent_alloc returned void", span
+        )])?
+        .into_pointer_value();
+
+    // Cast the i8* to the appropriate type pointer
+    let typed_ptr = ctx.builder.build_pointer_cast(
+        raw_ptr,
+        llvm_ty.ptr_type(AddressSpace::default()),
+        &format!("_{}_persistent_typed", local_id.index)
+    ).map_err(|e| vec![Diagnostic::error(
+        format!("LLVM pointer cast error: {}", e), span
+    )])?;
+
+    // Store the slot ID alloca for later decrement on StorageDead
+    ctx.persistent_slot_ids.insert(local_id, slot_id_alloca);
+
+    Ok(typed_ptr)
+}
