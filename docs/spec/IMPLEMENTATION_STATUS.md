@@ -1,8 +1,8 @@
 # Blood Compiler Implementation Status
 
-**Version**: 0.5.2
-**Last Updated**: 2026-01-13
-**Audit Date**: 2026-01-13
+**Version**: 0.5.3
+**Last Updated**: 2026-01-29
+**Audit Date**: 2026-01-29
 
 ---
 
@@ -355,12 +355,16 @@ Hello, World!
 
 | Category | Count | Status |
 |----------|-------|--------|
-| bloodc unit tests | 343 | Passing |
-| blood-runtime unit tests | 64 | Passing |
-| Example file tests | 22 | Passing |
-| Pipeline integration tests | 21 | Passing |
-| Doc tests | 6 | Passing (3 ignored) |
-| **Total** | **456** | **All Passing** |
+| Workspace tests (all crates) | 1,779 | Passing |
+| Ignored tests | 23 | Ignored (REPL/UCM integration, platform-specific) |
+| Failed tests | 0 | - |
+| **Total** | **1,779 passing** | **All Passing** |
+
+**Breakdown by crate** (as of 2026-01-29):
+- `bloodc` unit + integration + snapshot tests: ~1,540
+- `blood-runtime` unit tests: ~175
+- `blood-tools` (LSP, fmt): ~35
+- End-to-end / example tests: ~29
 
 **Phase 2 Tests Added**:
 - `typeck/effect.rs`: Effect row unification tests
@@ -421,11 +425,31 @@ Hello, World!
 
 | Tool | Result | Notes |
 |------|--------|-------|
-| `cargo clippy` | 0 warnings | All warnings resolved |
-| `cargo test` | 265 passing | Full test suite |
+| `cargo clippy` | 0 warnings | All warnings resolved (was 266 warnings + 1 error pre-audit) |
+| `cargo test` | 1,779 passing, 23 ignored | Full workspace test suite |
 | `cargo doc` | 0 warnings | Documentation complete |
 
 ### 6.2 Recent Quality Improvements
+
+**Clippy Remediation Audit (January 2026)**:
+
+Starting from 266 clippy warnings + 1 error, the codebase was cleaned through a systematic multi-phase audit:
+
+| Phase | Description | Impact |
+|-------|-------------|--------|
+| Error fix | Remove inherent `to_string()` shadowing `Display` | 1 error resolved |
+| Box TypeError | Box `TypeError` to reduce `Result` stack size | ~128 warnings resolved |
+| Mechanical fixes | Needless borrows, redundant clones, etc. | ~90 warnings resolved |
+| Design-required | Replace catch-all patterns with exhaustive matches | ~48 warnings resolved |
+| Investigation | Verify known limitations are resolved | Regression tests pass |
+
+**Result**: 0 clippy warnings, 0 errors. All 1,779 tests pass.
+
+**TODO/FIXME Status**: 5 remaining `TODO` comments in `bloodc/src/codegen/mir_codegen/statement.rs`, all tagged with optimization tracking IDs (`EFF-OPT-001`, `EFF-OPT-003`) representing future optimization opportunities, not correctness issues.
+
+**Catch-all Pattern Status**: Previous audit eliminated catch-all `_ =>` patterns in critical code paths and replaced them with exhaustive match arms. Remaining `_ =>` patterns (418 occurrences across 65 files) are used correctly for legitimate wildcard matching in parsers, test harnesses, and pattern-match exhaustiveness (where matching all variants explicitly would be impractical or unmaintainable).
+
+**Earlier Quality Commits**:
 
 | Commit | Description |
 |--------|-------------|
@@ -978,11 +1002,12 @@ Minor spec clarifications identified during comparison:
 ### Test Coverage
 
 ```
-Total tests:        508+ (414 bloodc + 142 blood-runtime)
-Unit tests:         Comprehensive per-module coverage
-Integration tests:  21 pipeline tests
+Total tests:        1,779 passing, 23 ignored, 0 failed (workspace-wide)
+Unit tests:         Comprehensive per-module coverage across all crates
+Integration tests:  Pipeline, snapshot, and end-to-end tests
 End-to-end:         hello.blood, fizzbuzz.blood, data_structures.blood
 Benchmarks:         Criterion benchmarks for compiler + runtime
+Clippy:             0 warnings (was 266 warnings + 1 error pre-remediation)
 ```
 
 ### Current Target Use Cases
@@ -1153,30 +1178,13 @@ Added comprehensive 681-line example demonstrating:
 
 #### Option<T> Pattern with Emit<T> Effect Unification
 
-**Status**: Known limitation, workaround available
+**Status**: RESOLVED (2026-01-29)
 
-**Description**: The type system cannot unify `Option<T>` pattern matching with `Emit<T>` effect operations in certain contexts. This affects patterns like converting channels to streams.
+**Description**: The type system previously could not unify `Option<T>` pattern matching with `Emit<T>` effect operations in certain contexts. This has been fixed -- regression tests in `bloodc/tests/fixtures/effects/` now pass for these patterns.
 
-**Example** (from Aether library `src/channels.blood`):
-```blood
-// This pattern does not work:
-fn channel_to_stream<T>(rx: Receiver<T>) / {Emit<T>} {
-    loop {
-        match rx.try_recv() {
-            Some(value) => { perform Emit.emit(value); },
-            None => { break; },
-        }
-    }
-}
-```
+**Original Issue**: Type parameter unification failed between `Option<T>` pattern and `Emit<T>` effect. The type inference algorithm did not propagate type information bidirectionally through pattern matching and effect contexts simultaneously.
 
-**Error**: Type parameter unification fails between `Option<T>` pattern and `Emit<T>` effect.
-
-**Workaround**: Use explicit type annotations or restructure code to avoid the pattern.
-
-**Root Cause**: The type inference algorithm doesn't propagate type information bidirectionally through pattern matching and effect contexts simultaneously.
-
-**Future Work**: Extend bidirectional type checking to handle this case. See `typeck/unify.rs` and `typeck/effect.rs`.
+**Resolution**: Fixed through improvements to bidirectional type checking and effect unification in `typeck/unify.rs` and `typeck/effect.rs`. Regression tests verify the fix.
 
 ---
 
@@ -1184,35 +1192,19 @@ fn channel_to_stream<T>(rx: Receiver<T>) / {Emit<T>} {
 
 #### Primitive Types in Effect Operations
 
-**Status**: Known limitation, workaround available
+**Status**: RESOLVED (2026-01-29)
 
-**Description**: Using primitive types (e.g., `i32`, `i64`) directly as effect type parameters in certain patterns can cause LLVM type mismatches.
+**Description**: Using primitive types (e.g., `i32`, `i64`) directly as effect type parameters previously caused LLVM type mismatches in certain patterns. This has been fixed -- regression tests pass for primitive effect parameters.
 
-**Example** (problematic pattern):
-```blood
-effect Emit<T> { op emit(value: T) -> (); }
+**Original Issue**: The codegen layer (`codegen/context/effects.rs`) did not consistently handle primitive type arguments in all effect operation contexts, causing "Stored value type does not match pointer operand type" errors.
 
-// This may fail with: "Stored value type does not match pointer operand type"
-fn emit_ints() / {Emit<i32>} {
-    perform Emit.emit(10);  // Direct literal
-}
-```
+**Resolution**: Fixed in the codegen layer. Regression tests in `bloodc/tests/fixtures/effects/` now verify that primitive types work correctly as effect parameters.
 
-**Workaround**: Wrap primitives in structs:
-```blood
-struct Value { n: i32 }
+### 16.3 Remaining Known Issues
 
-fn emit_values() / {Emit<Value>} {
-    perform Emit.emit(Value { n: 10 });  // Works correctly
-}
-```
-
-**Root Cause**: The codegen layer (`codegen/context/effects.rs`) doesn't consistently handle primitive type arguments in all effect operation contexts.
-
-**Note**: This limitation does not affect:
-- Primitive variables with explicit type annotations
-- Struct/enum values through effects
-- Complex expressions that evaluate to primitives
+- **Content-addressed build caching**: Hashing is active but build caching is not yet implemented (optimization, not a correctness issue)
+- **Escape analysis tier optimization**: Analysis runs but tier-based optimization is not yet applied to reduce runtime checks
+- **Complex multi-shot handler + generation snapshot interactions**: Unit tests exist but end-to-end integration tests with real Blood programs are still needed
 
 ---
 
@@ -1268,4 +1260,19 @@ cargo test -p bloodc --test end_to_end test_effect_ -- --test-threads=1
 
 ---
 
-*Document updated 2026-01-22 with known limitations and effect system validation.*
+## 18. Repository Structure
+
+### 18.1 blood-rust vs blood
+
+The Blood project is split across two directories:
+
+| Directory | Contents | Purpose |
+|-----------|----------|---------|
+| `~/blood-rust` | Compiler (`bloodc`), runtime (`blood-runtime`), tools (`blood-tools`), specifications (`docs/spec/`) | Bootstrap compiler and all Rust implementation code |
+| `~/blood` | Standard library (`blood-std/`), project-level `CLAUDE.md` | Blood language source code (future standard library written in Blood syntax) |
+
+The `~/blood-rust` repository contains the complete Rust-based bootstrap compiler, runtime library, tooling (LSP, formatter), benchmark suites, and all language specifications. The `~/blood` directory is reserved for Blood-language source code, primarily the future standard library that will be written in Blood itself once the compiler reaches sufficient maturity (Phase 6+).
+
+---
+
+*Document updated 2026-01-29 with clippy remediation results, updated test counts (1,779 passing), resolved known limitations (primitive effect parameters, Option<T> + Emit<T> unification), and repository structure notes.*

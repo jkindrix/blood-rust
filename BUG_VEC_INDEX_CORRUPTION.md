@@ -77,7 +77,7 @@ Testing span.line:
   d1.name.span.line = 2 ✓
 ```
 
-All 169 tests pass.
+All tests pass (169 at time of fix; 1,779 as of 2026-01-29).
 
 ---
 
