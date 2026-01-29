@@ -420,7 +420,7 @@ fn substitute_statement_types(stmt: &mut crate::mir::types::Statement, subst: &H
                 for ty in &mut op.param_types {
                     substitute_type(ty, subst);
                 }
-                substitute_type(&mut op.return_type, subst);
+                substitute_type(&op.return_type, subst);
             }
         }
         // These statement kinds don't contain types that need substitution
@@ -535,10 +535,8 @@ fn collect_closure_def_ids(mir: &MirBody) -> Vec<DefId> {
 
     for block in &mir.basic_blocks {
         for stmt in &block.statements {
-            if let StatementKind::Assign(_, rvalue) = &stmt.kind {
-                if let Rvalue::Aggregate { kind: AggregateKind::Closure { def_id }, .. } = rvalue {
-                    closure_ids.push(*def_id);
-                }
+            if let StatementKind::Assign(_, Rvalue::Aggregate { kind: AggregateKind::Closure { def_id }, .. }) = &stmt.kind {
+                closure_ids.push(*def_id);
             }
         }
     }
@@ -552,11 +550,9 @@ fn remap_closure_def_ids(mir: &mut MirBody, remap: &HashMap<DefId, DefId>) {
 
     for block in &mut mir.basic_blocks {
         for stmt in &mut block.statements {
-            if let StatementKind::Assign(_, rvalue) = &mut stmt.kind {
-                if let Rvalue::Aggregate { kind: AggregateKind::Closure { def_id }, .. } = rvalue {
-                    if let Some(&new_id) = remap.get(def_id) {
-                        *def_id = new_id;
-                    }
+            if let StatementKind::Assign(_, Rvalue::Aggregate { kind: AggregateKind::Closure { def_id }, .. }) = &mut stmt.kind {
+                if let Some(&new_id) = remap.get(def_id) {
+                    *def_id = new_id;
                 }
             }
         }
@@ -2198,16 +2194,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         } else if let Some(value) = result {
             self.builder.build_return(Some(&value))
                 .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+        } else if is_main {
+            // main must return i32 for C runtime - return 0 on success
+            let zero = self.context.i32_type().const_int(0, false);
+            self.builder.build_return(Some(&zero))
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
         } else {
-            if is_main {
-                // main must return i32 for C runtime - return 0 on success
-                let zero = self.context.i32_type().const_int(0, false);
-                self.builder.build_return(Some(&zero))
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
-            } else {
-                self.builder.build_return(None)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
-            }
+            self.builder.build_return(None)
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
         }
 
         self.current_fn = None;
@@ -2294,7 +2288,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             format!("def{}${}", def_id.index(), name)
         } else {
             let param_mangles: Vec<String> = sig.inputs.iter()
-                .map(|ty| Self::mangle_type(ty))
+                .map(Self::mangle_type)
                 .collect();
             format!("def{}${}${}", def_id.index(), name, param_mangles.join("$"))
         }
@@ -2333,7 +2327,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             },
             TypeKind::Tuple(elems) => {
                 let elem_mangles: Vec<String> = elems.iter()
-                    .map(|t| Self::mangle_type(t))
+                    .map(Self::mangle_type)
                     .collect();
                 format!("T{}", elem_mangles.join("_"))
             }
@@ -2362,14 +2356,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     format!("D{}", def_id.index())
                 } else {
                     let arg_mangles: Vec<String> = args.iter()
-                        .map(|t| Self::mangle_type(t))
+                        .map(Self::mangle_type)
                         .collect();
                     format!("D{}_{}", def_id.index(), arg_mangles.join("_"))
                 }
             }
             TypeKind::Fn { params, ret, .. } => {
                 let param_mangles: Vec<String> = params.iter()
-                    .map(|t| Self::mangle_type(t))
+                    .map(Self::mangle_type)
                     .collect();
                 format!("F{}_{}", param_mangles.join("_"), Self::mangle_type(ret))
             }
@@ -2515,7 +2509,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // is stable across compilation units. Combined with LinkOnceODR linkage,
         // this allows the linker to merge identical instantiations.
         let param_mangles: Vec<String> = concrete_params.iter()
-            .map(|ty| Self::mangle_type(ty))
+            .map(Self::mangle_type)
             .collect();
         let llvm_name = if param_mangles.is_empty() {
             format!("blood_mono_{}", generic_def_id.index())

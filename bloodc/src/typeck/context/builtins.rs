@@ -3144,6 +3144,8 @@ impl<'a> TypeContext<'a> {
         )
     }
 
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn register_builtin_method_with_generics(
         &mut self,
         type_match: super::BuiltinMethodType,

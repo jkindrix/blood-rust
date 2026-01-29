@@ -61,6 +61,7 @@ pub enum Edition {
 
 impl Edition {
     /// Parse an edition from a string.
+    #[allow(clippy::should_implement_trait)] // Uses custom ManifestError, not compatible with FromStr trait
     pub fn from_str(s: &str) -> Result<Self, ManifestError> {
         match s {
             "2024" => Ok(Edition::Edition2024),
@@ -315,6 +316,7 @@ pub struct ProfileSection {
 
 impl Manifest {
     /// Parse a manifest from a TOML string.
+    #[allow(clippy::should_implement_trait)] // Uses custom ManifestError, not compatible with FromStr trait
     pub fn from_str(content: &str) -> Result<Self, ManifestError> {
         let manifest: Manifest = toml::from_str(content)?;
         manifest.validate()?;

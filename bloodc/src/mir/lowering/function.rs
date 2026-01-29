@@ -26,7 +26,7 @@ use crate::mir::types::{
 
 use super::LoopContext;
 use super::util::{is_irrefutable_pattern, ExprLowering, LoopContextInfo};
-use super::{InlineHandlerBody, InlineHandlerBodies, InlineHandlerCaptureInfo};
+use super::{InlineHandlerBody, InlineHandlerBodies, InlineHandlerCaptureInfo, PendingClosures};
 
 use std::collections::HashSet;
 
@@ -275,7 +275,7 @@ pub struct FunctionLowering<'hir, 'ctx> {
     /// Counter for unique temporary names.
     temp_counter: u32,
     /// Pending closures to be lowered after this function.
-    pending_closures: &'ctx mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
+    pending_closures: &'ctx mut PendingClosures,
     /// Counter for generating synthetic closure DefIds.
     closure_counter: &'ctx mut u32,
     /// Inline handler bodies to be compiled during codegen.
@@ -291,7 +291,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         sig: &hir::FnSig,
         body: &'hir Body,
         hir: &'hir HirCrate,
-        pending_closures: &'ctx mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
+        pending_closures: &'ctx mut PendingClosures,
         closure_counter: &'ctx mut u32,
         inline_handler_bodies: &'ctx mut InlineHandlerBodies,
     ) -> Self {
@@ -2375,7 +2375,7 @@ impl<'hir, 'ctx> ExprLowering for FunctionLowering<'hir, 'ctx> {
         &mut self.temp_counter
     }
 
-    fn pending_closures_mut(&mut self) -> &mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)> {
+    fn pending_closures_mut(&mut self) -> &mut PendingClosures {
         self.pending_closures
     }
 

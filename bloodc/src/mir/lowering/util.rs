@@ -36,6 +36,8 @@ use crate::mir::types::{
 };
 use crate::span::Span;
 
+use super::PendingClosures;
+
 // ============================================================================
 // Operator Conversion
 // ============================================================================
@@ -213,7 +215,7 @@ pub trait ExprLowering {
     fn temp_counter_mut(&mut self) -> &mut u32;
 
     /// Get a mutable reference to pending closures.
-    fn pending_closures_mut(&mut self) -> &mut Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>;
+    fn pending_closures_mut(&mut self) -> &mut PendingClosures;
 
     /// Get a mutable reference to the closure counter.
     fn closure_counter_mut(&mut self) -> &mut u32;
@@ -1516,7 +1518,7 @@ pub trait ExprLowering {
             TypeKind::Record { fields, row_var } => {
                 let new_fields: Vec<_> = fields.iter()
                     .map(|f| crate::hir::ty::RecordField {
-                        name: f.name.clone(),
+                        name: f.name,
                         ty: self.substitute_type(&f.ty, subst),
                     })
                     .collect();
@@ -2034,7 +2036,7 @@ pub trait ExprLowering {
                 self.test_pattern_slice(prefix, slice.as_deref(), suffix, place, pattern.span)
             }
             PatternKind::Range { start, end, inclusive } => {
-                self.test_pattern_range(start.as_ref(), end.as_ref(), *inclusive, place, &pattern.ty, pattern.span)
+                self.test_pattern_range(start.as_deref(), end.as_deref(), *inclusive, place, &pattern.ty, pattern.span)
             }
             PatternKind::Ref { inner, .. } => {
                 let deref_place = place.project(PlaceElem::Deref);
@@ -2308,8 +2310,8 @@ pub trait ExprLowering {
     /// Test a range pattern.
     fn test_pattern_range(
         &mut self,
-        start: Option<&Box<Pattern>>,
-        end: Option<&Box<Pattern>>,
+        start: Option<&Pattern>,
+        end: Option<&Pattern>,
         inclusive: bool,
         place: &Place,
         ty: &Type,
@@ -2810,6 +2812,8 @@ pub trait ExprLowering {
     }
 
     /// Test slice pattern with control flow.
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn test_pattern_slice_cf(
         &mut self,
         prefix: &[Pattern],

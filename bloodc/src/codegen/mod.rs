@@ -525,6 +525,8 @@ pub fn compile_mir_to_object_with_opt(
 /// * `all_mir_bodies` - All MIR bodies in the crate (for monomorphization of generic functions)
 /// * `inline_handler_bodies` - Inline handler bodies for try/with blocks
 /// * `output_path` - Path to write the object file
+// Compiler-internal: decomposing would reduce clarity
+#[allow(clippy::too_many_arguments)]
 pub fn compile_definition_to_object(
     def_id: DefId,
     hir_crate: &hir::Crate,

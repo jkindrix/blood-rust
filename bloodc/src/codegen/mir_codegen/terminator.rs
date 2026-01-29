@@ -217,6 +217,8 @@ impl<'ctx, 'a> MirTerminatorCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
 // Helper implementations for complex terminators
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn compile_call_terminator(
         &mut self,
         func: &Operand,
@@ -415,7 +417,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Compile to direct LLVM load instruction
                         let ptr_arg = arg_vals.first().ok_or_else(|| {
                             vec![Diagnostic::error(
-                                format!("ptr_read requires a pointer argument"), span
+                                "ptr_read requires a pointer argument".to_string(), span
                             )]
                         })?.into_int_value();
 
@@ -473,7 +475,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Compile to direct LLVM store instruction
                         if arg_vals.len() < 2 {
                             return Err(vec![Diagnostic::error(
-                                format!("ptr_write requires pointer and value arguments"), span
+                                "ptr_write requires pointer and value arguments".to_string(), span
                             )]);
                         }
                         let ptr_arg = arg_vals[0].into_int_value();
@@ -1889,6 +1891,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(())
     }
 
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn compile_assert_terminator(
         &mut self,
         cond: &Operand,
@@ -1975,6 +1979,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         Ok(())
     }
 
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     fn compile_perform_terminator(
         &mut self,
         effect_id: &crate::hir::DefId,

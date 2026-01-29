@@ -1532,13 +1532,9 @@ impl Statement {
 /// Each macro expansion gets a unique hygiene ID to prevent
 /// accidental variable capture (hygienic macros).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct HygieneId(pub u32);
 
-impl Default for HygieneId {
-    fn default() -> Self {
-        HygieneId(0)
-    }
-}
 
 /// A token with hygiene information for macro expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1692,6 +1688,7 @@ pub enum FragmentKind {
 
 impl FragmentKind {
     /// Parse a fragment kind from its string representation.
+    #[allow(clippy::should_implement_trait)] // Returns Option, not Result<_, Err> as FromStr requires
     pub fn from_str(s: &str) -> Option<FragmentKind> {
         match s {
             "expr" => Some(FragmentKind::Expr),

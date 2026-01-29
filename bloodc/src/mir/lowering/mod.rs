@@ -53,6 +53,9 @@ use crate::diagnostics::Diagnostic;
 use super::body::MirBody;
 use super::types::BasicBlockId;
 
+/// A pending closure to be lowered: (body_id, synthetic def_id, captures with types).
+pub type PendingClosures = Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>;
+
 /// A captured variable for inline handler bodies.
 #[derive(Debug, Clone)]
 pub struct InlineHandlerCaptureInfo {
@@ -114,7 +117,7 @@ pub struct MirLowering<'hir> {
     /// Counter for generating synthetic closure DefIds.
     closure_counter: u32,
     /// Pending closure bodies to be lowered (body_id, synthetic def_id, captures with types).
-    pending_closures: Vec<(hir::BodyId, DefId, Vec<(hir::Capture, Type)>)>,
+    pending_closures: PendingClosures,
     /// Inline handler bodies collected during lowering.
     /// Maps synthetic DefId to the handler body info for codegen.
     inline_handler_bodies: InlineHandlerBodies,

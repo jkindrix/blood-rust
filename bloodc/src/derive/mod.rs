@@ -47,6 +47,7 @@ pub enum DeriveKind {
 
 impl DeriveKind {
     /// Parse a derive kind from a string.
+    #[allow(clippy::should_implement_trait)] // Returns Option, not Result<_, Err> as FromStr requires
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "Debug" => Some(DeriveKind::Debug),
@@ -121,6 +122,8 @@ pub struct DeriveExpander<'a> {
 
 impl<'a> DeriveExpander<'a> {
     /// Create a new derive expander.
+    // Compiler-internal: decomposing would reduce clarity
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         struct_defs: &'a HashMap<DefId, StructInfo>,
         enum_defs: &'a HashMap<DefId, EnumInfo>,
