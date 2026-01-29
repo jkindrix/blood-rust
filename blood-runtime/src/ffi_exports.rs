@@ -2923,6 +2923,7 @@ pub unsafe extern "C" fn blood_snapshot_get_stale_entry(
 // ============================================================================
 
 use crate::memory::{register_allocation, unregister_allocation};
+use crate::memory::{persistent_alloc, persistent_increment, persistent_decrement, persistent_is_alive};
 
 /// Register a new allocation in the slot registry.
 ///
@@ -2978,6 +2979,75 @@ pub extern "C" fn blood_validate_generation(address: u64, expected_generation: u
             }
         }
     }
+}
+
+// ============================================================================
+// Persistent Tier (Tier 3) RC Operations
+// ============================================================================
+
+/// Allocate a persistent (Tier 3) value with reference counting.
+///
+/// Returns a pointer to the allocated memory. The slot ID is written to `out_id`.
+/// Returns null on failure.
+///
+/// # Arguments
+/// * `size` - Size of the allocation in bytes
+/// * `align` - Required alignment
+/// * `type_fp` - Type fingerprint for cycle collection
+/// * `out_id` - Output pointer for the assigned slot ID
+///
+/// # Safety
+/// `out_id` must be a valid pointer to a `u64`.
+#[no_mangle]
+pub unsafe extern "C" fn blood_persistent_alloc(
+    size: usize,
+    align: usize,
+    type_fp: u32,
+    out_id: *mut u64,
+) -> *mut u8 {
+    match persistent_alloc(size, align, type_fp) {
+        Some((id, ptr)) => {
+            *out_id = id;
+            ptr
+        }
+        None => {
+            *out_id = 0;
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Increment the reference count for a persistent slot.
+///
+/// Returns 1 on success (slot exists), 0 on failure (slot not found).
+///
+/// # Arguments
+/// * `id` - The slot ID returned by `blood_persistent_alloc`
+#[no_mangle]
+pub extern "C" fn blood_persistent_increment(id: u64) -> c_int {
+    if persistent_increment(id) { 1 } else { 0 }
+}
+
+/// Decrement the reference count for a persistent slot.
+///
+/// When the count reaches zero, the slot is queued for deferred cleanup.
+///
+/// # Arguments
+/// * `id` - The slot ID returned by `blood_persistent_alloc`
+#[no_mangle]
+pub extern "C" fn blood_persistent_decrement(id: u64) {
+    persistent_decrement(id)
+}
+
+/// Check if a persistent slot is alive (has refcount > 0).
+///
+/// Returns 1 if alive, 0 if dead or not found.
+///
+/// # Arguments
+/// * `id` - The slot ID to check
+#[no_mangle]
+pub extern "C" fn blood_persistent_is_alive(id: u64) -> c_int {
+    if persistent_is_alive(id) { 1 } else { 0 }
 }
 
 // ============================================================================
