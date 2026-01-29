@@ -102,10 +102,6 @@ impl ModulePath {
         self.segments.first().map_or(false, |s| s == "crate")
     }
 
-    /// Format as a string (e.g., "crate::foo::bar").
-    pub fn to_string(&self) -> String {
-        self.segments.join("::")
-    }
 }
 
 impl std::fmt::Display for ModulePath {
