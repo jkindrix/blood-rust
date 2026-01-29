@@ -1011,3 +1011,17 @@ fn test_effect_struct_emit() {
     // Regression test for: "unsupported argument type in perform expression"
     run_effect_test("struct_emit");
 }
+
+#[test]
+fn test_effect_primitive_emit() {
+    // Tests: Using primitive types (i32) directly as effect type parameters.
+    // Previously a known limitation (LLVM type mismatch), now working.
+    run_effect_test("primitive_emit");
+}
+
+#[test]
+fn test_effect_option_emit_unification() {
+    // Tests: Pattern matching a generic enum in a function using effects.
+    // Previously a known limitation (type variable unification), now working.
+    run_effect_test("option_effect_unify");
+}
