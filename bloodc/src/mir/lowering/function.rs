@@ -704,6 +704,18 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
+        // Handle Ref/RefMut BEFORE lower_expr. These need the operand as a PLACE
+        // (lvalue), not a VALUE (rvalue). Using lower_expr would copy the value
+        // into a temporary, and the reference would point to the copy — mutations
+        // through the reference would be lost on function return.
+        if matches!(op, UnaryOp::Ref | UnaryOp::RefMut) {
+            let mutable = matches!(op, UnaryOp::RefMut);
+            let place = self.lower_place(operand)?;
+            let ref_temp = self.new_temp(ty.clone(), span);
+            self.push_assign(Place::local(ref_temp), Rvalue::Ref { place, mutable });
+            return Ok(Operand::Copy(Place::local(ref_temp)));
+        }
+
         let operand_val = self.lower_expr(operand)?;
 
         let mir_op = match op {
@@ -718,21 +730,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
                 }
                 return Ok(Operand::Copy(Place::local(temp)));
             }
-            UnaryOp::Ref | UnaryOp::RefMut => {
-                // Create a reference to the operand's place
-                let mutable = matches!(op, UnaryOp::RefMut);
-                let place = if let Some(p) = operand_val.place() {
-                    p.clone()
-                } else {
-                    // Need to materialize the operand into a temp
-                    let temp = self.new_temp(operand.ty.clone(), span);
-                    self.push_assign(Place::local(temp), Rvalue::Use(operand_val));
-                    Place::local(temp)
-                };
-                let ref_temp = self.new_temp(ty.clone(), span);
-                self.push_assign(Place::local(ref_temp), Rvalue::Ref { place, mutable });
-                return Ok(Operand::Copy(Place::local(ref_temp)));
-            }
+            UnaryOp::Ref | UnaryOp::RefMut => unreachable!(), // handled above
         };
 
         let temp = self.new_temp(ty.clone(), span);

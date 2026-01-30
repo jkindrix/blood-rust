@@ -1056,3 +1056,11 @@ fn test_option_struct_unwrap() {
     // Regression test for BUG-006: payload offset corruption.
     run_fixture_test("option_struct_unwrap");
 }
+
+#[test]
+fn test_mut_ref_field_mutations_preserved() {
+    // Regression test for BUG-005: Mutations through &mut struct.field were
+    // silently lost because lower_unary evaluated the operand as an rvalue
+    // (copying to a temp) instead of using lower_place for the original location.
+    run_fixture_test("mut_ref_field");
+}
