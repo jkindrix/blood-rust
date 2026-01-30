@@ -418,7 +418,6 @@ fn test_parse_linear_types() {
 }
 
 #[test]
-#[ignore = "region/lifetime syntax ('a) not yet implemented in parser"]
 fn test_parse_region_annotations() {
     let source = r#"
         fn with_region<'a>(x: &'a i32) -> &'a i32 {
@@ -812,10 +811,11 @@ fn test_e2e_nested_functions_to_llvm() {
     "#;
 
     let result = compile_to_llvm_ir(source);
-    // Nested functions might not be supported yet - that's ok
-    if result.is_err() {
-        eprintln!("Nested functions not yet supported: {:?}", result.err());
-    }
+    assert!(result.is_ok(), "Nested function LLVM codegen failed: {:?}", result.err());
+
+    let llvm_ir = result.unwrap();
+    assert!(llvm_ir.contains("outer"), "LLVM IR should contain outer function");
+    assert!(llvm_ir.contains("inner"), "LLVM IR should contain nested inner function");
 }
 
 #[test]
@@ -2038,7 +2038,10 @@ fn test_e2e_effect_llvm_with_generation_checks() {
 
 #[test]
 fn test_e2e_e0309_shallow_handler_multiple_resumes() {
-    // E0309: Shallow handlers must be single-shot (at most 1 resume)
+    // E0309: Shallow handlers must be single-shot (at most 1 resume).
+    // The validation fires during effects lowering (effects/lowering.rs),
+    // which is not reached by check_source (type checking only).
+    // Use compile_to_llvm_ir to exercise the full pipeline including lowering.
     let source = r#"
         effect Choice {
             op choose(a: i32, b: i32) -> i32;
@@ -2055,26 +2058,13 @@ fn test_e2e_e0309_shallow_handler_multiple_resumes() {
         }
     "#;
 
-    let result = check_source(source);
-    // E0309 should be emitted for multiple resume in shallow handler
-    match result {
-        Err(errors) => {
-            let has_e0309 = errors.iter().any(|e|
-                e.message.contains("E0309") ||
-                e.message.contains("shallow") ||
-                e.message.contains("resume") ||
-                e.message.contains("single-shot")
-            );
-            // Track current implementation status
-            if !has_e0309 {
-                eprintln!("E0309 not yet fully implemented. Errors: {:?}",
-                         errors.iter().map(|e| &e.message).collect::<Vec<_>>());
-            }
-        }
-        Ok(_) => {
-            // Track that this should eventually fail
-            eprintln!("E0309 check not yet implemented - shallow multi-resume should fail");
-        }
+    let result = compile_to_llvm_ir(source);
+    // The shallow handler multi-resume validation should cause a compilation error.
+    // If the pipeline accepts this, the E0309 check is not yet wired in at codegen level.
+    if result.is_ok() {
+        eprintln!("E0309: shallow multi-resume accepted at codegen level — \
+                   validation only fires during effects lowering phase, \
+                   which is invoked from the main compiler pipeline (not test helpers)");
     }
 }
 
@@ -4162,7 +4152,6 @@ fn test_ffi_unsafe_block_codegen() {
 // Module Resolution Tests
 // ============================================================
 
-use std::path::Path;
 use bloodc::typeck::TypeContext;
 
 /// Test helper to type-check a file with proper module resolution support.

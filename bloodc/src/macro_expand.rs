@@ -40,7 +40,6 @@ pub enum CapturedValue {
 }
 
 /// Context for macro expansion.
-#[allow(dead_code)] // Infrastructure for declarative macro expansion
 pub struct MacroExpander {
     /// Map from macro name to its definition.
     macros: HashMap<String, MacroDecl>,
@@ -50,8 +49,6 @@ pub struct MacroExpander {
     source: String,
     /// Current macro content being processed (for text extraction).
     current_content: String,
-    /// Next hygiene ID for fresh scopes.
-    next_hygiene: u32,
     /// Current expansion depth.
     depth: u32,
     /// Collected errors during expansion.
@@ -66,7 +63,6 @@ impl MacroExpander {
             interner,
             source: String::new(),
             current_content: String::new(),
-            next_hygiene: 1, // 0 is the default/no hygiene
             depth: 0,
             errors: Vec::new(),
         }
@@ -79,7 +75,6 @@ impl MacroExpander {
             interner,
             source: source.to_string(),
             current_content: String::new(),
-            next_hygiene: 1,
             depth: 0,
             errors: Vec::new(),
         }

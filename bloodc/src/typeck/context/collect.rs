@@ -1256,7 +1256,10 @@ impl<'a> TypeContext<'a> {
                         }
                     }
                     ast::WherePredicate::Lifetime { .. } => {
-                        // Lifetime bounds are not yet enforced
+                        // Lifetime bounds (e.g., 'a: 'b) are parsed but not enforced.
+                        // Blood uses generational pointers for memory safety rather than
+                        // Rust-style borrow checking, so lifetime outlives constraints
+                        // are accepted syntactically but do not affect type checking.
                     }
                 }
             }

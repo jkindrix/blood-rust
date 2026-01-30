@@ -78,9 +78,6 @@ pub struct EffectLowering {
     evidence_reqs: HashMap<DefId, EvidenceRequirement>,
     /// Mapping from handler DefId to its compiled form.
     handlers: HashMap<DefId, HandlerInfo>,
-    /// Counter for generating fresh variable names.
-    #[allow(dead_code)] // Used by fresh_name() for Phase 2.4 evidence translation
-    fresh_counter: u64,
 }
 
 /// Complete information about an effect declaration.
@@ -205,7 +202,6 @@ impl EffectLowering {
             effect_ops: HashMap::new(),
             evidence_reqs: HashMap::new(),
             handlers: HashMap::new(),
-            fresh_counter: 0,
         }
     }
 
@@ -997,14 +993,6 @@ impl EffectLowering {
         }
     }
 
-    /// Generate a fresh variable name (used in Phase 2.4).
-    #[allow(dead_code)] // Infrastructure for Phase 2.4 evidence variable naming
-    fn fresh_name(&mut self, prefix: &str) -> String {
-        let id = self.fresh_counter;
-        self.fresh_counter += 1;
-        format!("{}_{}", prefix, id)
-    }
-
     /// Check if a function requires evidence.
     pub fn requires_evidence(&self, def_id: DefId) -> bool {
         self.evidence_reqs
@@ -1106,16 +1094,6 @@ mod tests {
         );
 
         assert!(lowering.effect_ops.contains_key(&effect_id));
-    }
-
-    #[test]
-    fn test_fresh_name() {
-        let mut lowering = EffectLowering::new();
-
-        let name1 = lowering.fresh_name("ev");
-        let name2 = lowering.fresh_name("ev");
-
-        assert_ne!(name1, name2);
     }
 
     #[test]

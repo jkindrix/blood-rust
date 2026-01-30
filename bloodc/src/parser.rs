@@ -223,12 +223,6 @@ impl<'src> Parser<'src> {
         self.current.kind == TokenKind::Ident || Self::is_contextual_keyword(self.current.kind)
     }
 
-    /// Check if the next token is an identifier or a contextual keyword.
-    #[allow(dead_code)] // Infrastructure for lookahead parsing
-    fn check_ident_next(&self) -> bool {
-        self.next.kind == TokenKind::Ident || Self::is_contextual_keyword(self.next.kind)
-    }
-
     /// Check if we've reached the end of input.
     fn is_at_end(&self) -> bool {
         self.current.kind == TokenKind::Eof
@@ -470,11 +464,6 @@ impl<'src> Parser<'src> {
 
     fn error_at_current(&mut self, message: &str, code: ErrorCode) {
         self.error_at(self.current.span, message, code);
-    }
-
-    #[allow(dead_code)] // Infrastructure for error reporting at previous token position
-    fn error_at_previous(&mut self, message: &str, code: ErrorCode) {
-        self.error_at(self.previous.span, message, code);
     }
 
     fn error_at(&mut self, span: Span, message: &str, code: ErrorCode) {
