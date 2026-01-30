@@ -422,7 +422,6 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Check if two types match for impl overlap checking.
-    #[allow(dead_code)] // Infrastructure for impl overlap detection
     pub(crate) fn types_match_for_impl(&self, ty_a: &Type, ty_b: &Type) -> bool {
         self.impls_could_overlap(ty_a, ty_b)
     }
