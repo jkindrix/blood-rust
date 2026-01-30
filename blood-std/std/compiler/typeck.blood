@@ -2144,6 +2144,861 @@ fn resolve_primitive(name: &str) -> Option<PrimitiveTy> {
 }
 
 // ============================================================
+// Trait Resolution & Method Dispatch
+// ============================================================
+
+/// A candidate method found during dispatch resolution.
+struct MethodCandidate {
+    def_id: DefId,
+    name: String,
+    param_types: [Type],
+    return_type: Type,
+    /// Type parameters on this method (uninstantiated)
+    type_params: [TypeParamInfo],
+    /// Effect row for this method
+    effects: EffectRow,
+    /// The trait this method belongs to (None for inherent methods)
+    trait_id: Option<DefId>,
+    /// Whether auto-ref is needed (method takes &self but caller has self)
+    needs_auto_ref: bool,
+}
+
+/// Result of method resolution
+enum MethodResolution {
+    /// Exactly one matching method found
+    Resolved(MethodCandidate),
+    /// No matching method found
+    NoMatch { ty_name: String, method_name: String },
+    /// Multiple equally-specific matches (ambiguity)
+    Ambiguous { method_name: String, candidates: [String] },
+}
+
+/// Result of generic type parameter instantiation
+enum InstantiationResult {
+    /// Successfully instantiated all type parameters
+    Success { substitutions: [(TyVarId, Type)], candidate: MethodCandidate },
+    /// Arity mismatch between params and args
+    ArityMismatch { expected: u32, found: u32 },
+    /// Type parameter bound to inconsistent types
+    TypeMismatch { param_id: TyVarId, expected: Type, found: Type },
+    /// A constraint on a type parameter is not satisfied
+    ConstraintNotSatisfied { param_name: String, constraint: String },
+}
+
+/// Trait resolver: finds the right method/impl for a given type and method name.
+struct TraitResolver<'ctx> {
+    ctx: &'ctx TypeContext,
+}
+
+impl<'ctx> TraitResolver<'ctx> {
+    fn new(ctx: &'ctx TypeContext) -> TraitResolver<'ctx> {
+        TraitResolver { ctx }
+    }
+
+    /// Resolve a method call: find the method to invoke for `receiver.method_name(args)`.
+    ///
+    /// Priority order:
+    /// 1. Inherent impl methods (impl Type { fn method() })
+    /// 2. Trait impl methods (impl Trait for Type { fn method() })
+    /// 3. Trait bounds on type parameters (where T: Trait)
+    /// 4. Auto-deref: if receiver is &T, try methods on T
+    fn resolve_method(
+        &self,
+        receiver_ty: &Type,
+        method_name: &str,
+        arg_types: &[Type],
+    ) -> MethodResolution {
+        let mut candidates = [];
+
+        // 1. Collect inherent methods
+        self.collect_inherent_methods(receiver_ty, method_name, &mut candidates);
+
+        // 2. Collect trait impl methods
+        self.collect_trait_methods(receiver_ty, method_name, &mut candidates);
+
+        // 3. Collect methods from trait bounds (for type parameters)
+        self.collect_bound_methods(receiver_ty, method_name, &mut candidates);
+
+        // 4. Try auto-deref if no direct match
+        if candidates.is_empty() {
+            match receiver_ty.kind {
+                TypeKind::Ref { inner, .. } => {
+                    self.collect_inherent_methods(&inner, method_name, &mut candidates);
+                    self.collect_trait_methods(&inner, method_name, &mut candidates);
+                }
+                _ => {}
+            }
+        }
+
+        // 5. Select the best candidate
+        if candidates.is_empty() {
+            return MethodResolution::NoMatch {
+                ty_name: self.type_name(receiver_ty),
+                method_name: method_name.to_string(),
+            };
+        }
+
+        if candidates.len() == 1 {
+            return MethodResolution::Resolved(candidates.pop().unwrap());
+        }
+
+        // Multiple candidates: find the most specific
+        let maximal = self.find_most_specific(&candidates, arg_types);
+        if maximal.len() == 1 {
+            return MethodResolution::Resolved(maximal[0].clone());
+        }
+
+        MethodResolution::Ambiguous {
+            method_name: method_name.to_string(),
+            candidates: maximal.iter().map(|c| c.name.clone()).collect(),
+        }
+    }
+
+    /// Collect inherent methods (impl blocks without a trait) for a type.
+    fn collect_inherent_methods(
+        &self,
+        ty: &Type,
+        method_name: &str,
+        candidates: &mut [MethodCandidate],
+    ) {
+        for impl_block in &self.ctx.impl_blocks {
+            // Skip trait impls
+            match impl_block.trait_ref {
+                Some(_) => continue,
+                None => {}
+            }
+            // Check if self_ty matches
+            if !self.types_match(&impl_block.self_ty, ty, &impl_block.type_params) {
+                continue;
+            }
+            // Find matching method
+            for method_sig in &impl_block.methods {
+                if method_sig.name == method_name {
+                    // Build substitution from impl generics
+                    let subst = self.extract_impl_substitution(
+                        &impl_block.type_params, &impl_block.self_ty, ty,
+                    );
+                    let return_type = self.apply_subst_with_map(
+                        &method_sig.return_type, &subst,
+                    );
+                    let mut param_types = [];
+                    for p in &method_sig.params {
+                        param_types.push(self.apply_subst_with_map(&p.ty, &subst));
+                    }
+                    // Check if first param is &self (auto-ref needed)
+                    let needs_auto_ref = if !method_sig.params.is_empty() {
+                        match method_sig.params[0].ty.kind {
+                            TypeKind::Ref { .. } => {
+                                match ty.kind {
+                                    TypeKind::Ref { .. } => false,
+                                    _ => true,
+                                }
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+                    candidates.push(MethodCandidate {
+                        def_id: method_sig.def_id,
+                        name: method_sig.name.clone(),
+                        param_types,
+                        return_type,
+                        type_params: method_sig.type_params.clone(),
+                        effects: method_sig.effects.clone(),
+                        trait_id: None,
+                        needs_auto_ref,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Collect methods from trait implementations for a type.
+    fn collect_trait_methods(
+        &self,
+        ty: &Type,
+        method_name: &str,
+        candidates: &mut [MethodCandidate],
+    ) {
+        for impl_block in &self.ctx.impl_blocks {
+            // Only trait impls
+            let trait_ref = match impl_block.trait_ref {
+                Some(ref tr) => tr,
+                None => continue,
+            };
+            // Check if self_ty matches
+            if !self.types_match(&impl_block.self_ty, ty, &impl_block.type_params) {
+                continue;
+            }
+            // Find matching method
+            for method_sig in &impl_block.methods {
+                if method_sig.name == method_name {
+                    let subst = self.extract_impl_substitution(
+                        &impl_block.type_params, &impl_block.self_ty, ty,
+                    );
+                    let return_type = self.apply_subst_with_map(
+                        &method_sig.return_type, &subst,
+                    );
+                    let mut param_types = [];
+                    for p in &method_sig.params {
+                        param_types.push(self.apply_subst_with_map(&p.ty, &subst));
+                    }
+                    let needs_auto_ref = if !method_sig.params.is_empty() {
+                        match method_sig.params[0].ty.kind {
+                            TypeKind::Ref { .. } => {
+                                match ty.kind {
+                                    TypeKind::Ref { .. } => false,
+                                    _ => true,
+                                }
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+                    candidates.push(MethodCandidate {
+                        def_id: method_sig.def_id,
+                        name: method_sig.name.clone(),
+                        param_types,
+                        return_type,
+                        type_params: method_sig.type_params.clone(),
+                        effects: method_sig.effects.clone(),
+                        trait_id: Some(trait_ref.trait_id),
+                        needs_auto_ref,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Collect methods available through trait bounds on type parameters.
+    /// When we have `fn foo<T: Display>(x: T)`, T has methods from Display.
+    fn collect_bound_methods(
+        &self,
+        ty: &Type,
+        method_name: &str,
+        candidates: &mut [MethodCandidate],
+    ) {
+        // Only applicable for type parameters
+        let param_id = match ty.kind {
+            TypeKind::Param(v) => v,
+            _ => return,
+        };
+        // Look up bounds for this type parameter in the current scope
+        // (bounds are registered during function signature processing)
+        // For each bound trait, look up the method in the trait definition
+        for (trait_def_id, trait_info) in &self.ctx.trait_defs {
+            for method_sig in &trait_info.methods {
+                if method_sig.name == method_name {
+                    let mut param_types = [];
+                    for p in &method_sig.params {
+                        param_types.push(p.ty.clone());
+                    }
+                    candidates.push(MethodCandidate {
+                        def_id: method_sig.def_id,
+                        name: method_sig.name.clone(),
+                        param_types,
+                        return_type: method_sig.return_type.clone(),
+                        type_params: method_sig.type_params.clone(),
+                        effects: method_sig.effects.clone(),
+                        trait_id: Some(*trait_def_id),
+                        needs_auto_ref: false,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Check if a type matches an impl block's self type, considering generics.
+    fn types_match(&self, impl_ty: &Type, concrete_ty: &Type, generics: &[TypeParamInfo]) -> bool {
+        if generics.is_empty() {
+            return self.types_equal(impl_ty, concrete_ty);
+        }
+        // With generics, try to extract a substitution
+        let subst = self.extract_impl_substitution(generics, impl_ty, concrete_ty);
+        !subst.is_empty() || self.types_equal(impl_ty, concrete_ty)
+    }
+
+    /// Extract type parameter substitutions by matching an impl type against a concrete type.
+    fn extract_impl_substitution(
+        &self,
+        generics: &[TypeParamInfo],
+        impl_ty: &Type,
+        concrete_ty: &Type,
+    ) -> [(TyVarId, Type)] {
+        let mut subst = [];
+        self.match_types(impl_ty, concrete_ty, generics, &mut subst);
+        subst
+    }
+
+    /// Recursively match two types, extracting type parameter bindings.
+    fn match_types(
+        &self,
+        param_ty: &Type,
+        arg_ty: &Type,
+        generics: &[TypeParamInfo],
+        subst: &mut [(TyVarId, Type)],
+    ) {
+        match param_ty.kind {
+            TypeKind::Param(v) => {
+                // Check if this is one of the generic params
+                let mut is_generic = false;
+                for g in generics {
+                    if g.var_id.id == v.id {
+                        is_generic = true;
+                        break;
+                    }
+                }
+                if is_generic {
+                    // Check for existing binding
+                    let mut already_bound = false;
+                    for (bound_var, _) in &*subst {
+                        if bound_var.id == v.id {
+                            already_bound = true;
+                            break;
+                        }
+                    }
+                    if !already_bound {
+                        subst.push((v, arg_ty.clone()));
+                    }
+                }
+            }
+            TypeKind::Adt { def_id: p_def, args: p_args } => {
+                match arg_ty.kind {
+                    TypeKind::Adt { def_id: a_def, args: a_args } => {
+                        if p_def.module == a_def.module && p_def.local == a_def.local
+                            && p_args.len() == a_args.len()
+                        {
+                            let mut i: usize = 0;
+                            while i < p_args.len() {
+                                self.match_types(&p_args[i], &a_args[i], generics, subst);
+                                i = i + 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            TypeKind::Ref { inner: p_inner, mutable: p_mut } => {
+                match arg_ty.kind {
+                    TypeKind::Ref { inner: a_inner, mutable: a_mut } => {
+                        if p_mut == a_mut {
+                            self.match_types(&p_inner, &a_inner, generics, subst);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            TypeKind::Tuple(p_elems) => {
+                match arg_ty.kind {
+                    TypeKind::Tuple(a_elems) => {
+                        if p_elems.len() == a_elems.len() {
+                            let mut i: usize = 0;
+                            while i < p_elems.len() {
+                                self.match_types(&p_elems[i], &a_elems[i], generics, subst);
+                                i = i + 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            TypeKind::Array { element: p_elem, size: p_size } => {
+                match arg_ty.kind {
+                    TypeKind::Array { element: a_elem, size: a_size } => {
+                        if p_size == a_size {
+                            self.match_types(&p_elem, &a_elem, generics, subst);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            TypeKind::Slice { element: p_elem } => {
+                match arg_ty.kind {
+                    TypeKind::Slice { element: a_elem } => {
+                        self.match_types(&p_elem, &a_elem, generics, subst);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply a substitution map to a type.
+    fn apply_subst_with_map(&self, ty: &Type, subst: &[(TyVarId, Type)]) -> Type {
+        match ty.kind {
+            TypeKind::Param(v) => {
+                for (from, to) in subst {
+                    if from.id == v.id {
+                        return to.clone();
+                    }
+                }
+                ty.clone()
+            }
+            TypeKind::Adt { def_id, args } => {
+                let mut new_args = [];
+                for a in &args {
+                    new_args.push(self.apply_subst_with_map(a, subst));
+                }
+                Type { kind: TypeKind::Adt { def_id, args: new_args } }
+            }
+            TypeKind::Fn { params, ret, effects } => {
+                let mut new_params = [];
+                for p in &params {
+                    new_params.push(self.apply_subst_with_map(p, subst));
+                }
+                Type { kind: TypeKind::Fn {
+                    params: new_params,
+                    ret: Box::new(self.apply_subst_with_map(&ret, subst)),
+                    effects,
+                }}
+            }
+            TypeKind::Ref { inner, mutable } => {
+                Type { kind: TypeKind::Ref {
+                    inner: Box::new(self.apply_subst_with_map(&inner, subst)),
+                    mutable,
+                }}
+            }
+            TypeKind::Tuple(elems) => {
+                let mut new_elems = [];
+                for e in &elems {
+                    new_elems.push(self.apply_subst_with_map(e, subst));
+                }
+                Type { kind: TypeKind::Tuple(new_elems) }
+            }
+            TypeKind::Array { element, size } => {
+                Type { kind: TypeKind::Array {
+                    element: Box::new(self.apply_subst_with_map(&element, subst)),
+                    size,
+                }}
+            }
+            TypeKind::Slice { element } => {
+                Type { kind: TypeKind::Slice {
+                    element: Box::new(self.apply_subst_with_map(&element, subst)),
+                }}
+            }
+            TypeKind::Ptr { inner, mutable } => {
+                Type { kind: TypeKind::Ptr {
+                    inner: Box::new(self.apply_subst_with_map(&inner, subst)),
+                    mutable,
+                }}
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    /// Check if two types are structurally equal.
+    fn types_equal(&self, a: &Type, b: &Type) -> bool {
+        match (&a.kind, &b.kind) {
+            (TypeKind::Primitive(p1), TypeKind::Primitive(p2)) => p1 == p2,
+            (TypeKind::Param(v1), TypeKind::Param(v2)) => v1.id == v2.id,
+            (TypeKind::Infer(v1), TypeKind::Infer(v2)) => v1.id == v2.id,
+            (TypeKind::Adt { def_id: d1, args: a1 },
+             TypeKind::Adt { def_id: d2, args: a2 }) => {
+                d1.module == d2.module && d1.local == d2.local
+                    && a1.len() == a2.len()
+                    && {
+                        let mut eq = true;
+                        let mut i: usize = 0;
+                        while i < a1.len() {
+                            if !self.types_equal(&a1[i], &a2[i]) {
+                                eq = false;
+                                break;
+                            }
+                            i = i + 1;
+                        }
+                        eq
+                    }
+            }
+            (TypeKind::Tuple(t1), TypeKind::Tuple(t2)) => {
+                t1.len() == t2.len() && {
+                    let mut eq = true;
+                    let mut i: usize = 0;
+                    while i < t1.len() {
+                        if !self.types_equal(&t1[i], &t2[i]) {
+                            eq = false;
+                            break;
+                        }
+                        i = i + 1;
+                    }
+                    eq
+                }
+            }
+            (TypeKind::Ref { inner: i1, mutable: m1 },
+             TypeKind::Ref { inner: i2, mutable: m2 }) => {
+                m1 == m2 && self.types_equal(i1, i2)
+            }
+            (TypeKind::Ptr { inner: i1, mutable: m1 },
+             TypeKind::Ptr { inner: i2, mutable: m2 }) => {
+                m1 == m2 && self.types_equal(i1, i2)
+            }
+            (TypeKind::Array { element: e1, size: s1 },
+             TypeKind::Array { element: e2, size: s2 }) => {
+                s1 == s2 && self.types_equal(e1, e2)
+            }
+            (TypeKind::Slice { element: e1 }, TypeKind::Slice { element: e2 }) => {
+                self.types_equal(e1, e2)
+            }
+            (TypeKind::Never, TypeKind::Never) => true,
+            (TypeKind::Error, TypeKind::Error) => true,
+            _ => false,
+        }
+    }
+
+    /// Find the most specific candidates from a set of applicable methods.
+    /// Uses parameter subtyping and effect specificity for tiebreaking.
+    fn find_most_specific(
+        &self,
+        candidates: &[MethodCandidate],
+        arg_types: &[Type],
+    ) -> [MethodCandidate] {
+        let mut maximal = [];
+        for candidate in candidates {
+            let is_maximal = {
+                let mut dominated = false;
+                for other in candidates {
+                    if other.def_id.module == candidate.def_id.module
+                        && other.def_id.local == candidate.def_id.local
+                    {
+                        continue;
+                    }
+                    if self.is_more_specific(other, candidate) {
+                        dominated = true;
+                        break;
+                    }
+                }
+                !dominated
+            };
+            if is_maximal {
+                maximal.push(candidate.clone());
+            }
+        }
+        maximal
+    }
+
+    /// Check if method m1 is strictly more specific than m2.
+    /// m1 is more specific if all its parameters are subtypes of m2's
+    /// and at least one is strictly more specific.
+    fn is_more_specific(&self, m1: &MethodCandidate, m2: &MethodCandidate) -> bool {
+        if m1.param_types.len() != m2.param_types.len() {
+            return false;
+        }
+        let mut all_at_least = true;
+        let mut some_strictly = false;
+        let mut i: usize = 0;
+        while i < m1.param_types.len() {
+            let sub_12 = self.is_subtype(&m1.param_types[i], &m2.param_types[i]);
+            let sub_21 = self.is_subtype(&m2.param_types[i], &m1.param_types[i]);
+            if !sub_12 {
+                all_at_least = false;
+                break;
+            }
+            if sub_12 && !sub_21 {
+                some_strictly = true;
+            }
+            i = i + 1;
+        }
+        all_at_least && some_strictly
+    }
+
+    /// Subtype check: is `a` a subtype of `b`?
+    ///
+    /// Subtyping rules:
+    /// - Any type is a subtype of itself
+    /// - Never is a subtype of everything (bottom type)
+    /// - &mut T <: &T (mutable ref can be used where immutable is expected)
+    /// - Immutable refs are covariant: &A <: &B if A <: B
+    /// - Functions are contravariant in params, covariant in return
+    fn is_subtype(&self, a: &Type, b: &Type) -> bool {
+        // Identity
+        if self.types_equal(a, b) {
+            return true;
+        }
+        // Never is bottom
+        match a.kind {
+            TypeKind::Never => return true,
+            _ => {}
+        }
+        // Type variables unify with anything
+        match b.kind {
+            TypeKind::Infer(_) => return true,
+            TypeKind::Param(_) => return true,
+            _ => {}
+        }
+        match (&a.kind, &b.kind) {
+            // &mut T <: &T (coerce mutable to immutable)
+            (TypeKind::Ref { inner: a_inner, mutable: true },
+             TypeKind::Ref { inner: b_inner, mutable: false }) => {
+                self.is_subtype(a_inner, b_inner)
+            }
+            // Covariant immutable refs
+            (TypeKind::Ref { inner: a_inner, mutable: false },
+             TypeKind::Ref { inner: b_inner, mutable: false }) => {
+                self.is_subtype(a_inner, b_inner)
+            }
+            // Invariant mutable refs
+            (TypeKind::Ref { inner: a_inner, mutable: true },
+             TypeKind::Ref { inner: b_inner, mutable: true }) => {
+                self.types_equal(a_inner, b_inner)
+            }
+            // Function subtyping: contravariant params, covariant return
+            (TypeKind::Fn { params: a_params, ret: a_ret, .. },
+             TypeKind::Fn { params: b_params, ret: b_ret, .. }) => {
+                if a_params.len() != b_params.len() {
+                    return false;
+                }
+                // Contravariant params: b <: a for each param
+                let mut i: usize = 0;
+                while i < a_params.len() {
+                    if !self.is_subtype(&b_params[i], &a_params[i]) {
+                        return false;
+                    }
+                    i = i + 1;
+                }
+                // Covariant return
+                self.is_subtype(a_ret, b_ret)
+            }
+            _ => false,
+        }
+    }
+
+    /// Get a human-readable name for a type (for error messages).
+    fn type_name(&self, ty: &Type) -> String {
+        match ty.kind {
+            TypeKind::Primitive(prim) => {
+                match prim {
+                    PrimitiveTy::Bool => "bool".to_string(),
+                    PrimitiveTy::I8 => "i8".to_string(),
+                    PrimitiveTy::I16 => "i16".to_string(),
+                    PrimitiveTy::I32 => "i32".to_string(),
+                    PrimitiveTy::I64 => "i64".to_string(),
+                    PrimitiveTy::I128 => "i128".to_string(),
+                    PrimitiveTy::Isize => "isize".to_string(),
+                    PrimitiveTy::U8 => "u8".to_string(),
+                    PrimitiveTy::U16 => "u16".to_string(),
+                    PrimitiveTy::U32 => "u32".to_string(),
+                    PrimitiveTy::U64 => "u64".to_string(),
+                    PrimitiveTy::U128 => "u128".to_string(),
+                    PrimitiveTy::Usize => "usize".to_string(),
+                    PrimitiveTy::F32 => "f32".to_string(),
+                    PrimitiveTy::F64 => "f64".to_string(),
+                    PrimitiveTy::Char => "char".to_string(),
+                    PrimitiveTy::Str => "str".to_string(),
+                    PrimitiveTy::Unit => "()".to_string(),
+                }
+            }
+            TypeKind::Adt { def_id, .. } => {
+                // Try to find the name
+                match self.ctx.get_struct(&def_id) {
+                    Some(info) => info.name.clone(),
+                    None => match self.ctx.get_enum(&def_id) {
+                        Some(info) => info.name.clone(),
+                        None => format!("type({}:{})", def_id.module, def_id.local),
+                    },
+                }
+            }
+            TypeKind::Ref { mutable: true, .. } => "&mut _".to_string(),
+            TypeKind::Ref { mutable: false, .. } => "&_".to_string(),
+            TypeKind::Tuple(_) => "(...)".to_string(),
+            TypeKind::Array { .. } => "[_; N]".to_string(),
+            TypeKind::Slice { .. } => "[_]".to_string(),
+            TypeKind::Never => "!".to_string(),
+            TypeKind::Error => "<error>".to_string(),
+            TypeKind::Infer(_) => "?_".to_string(),
+            TypeKind::Param(v) => format!("T{}", v.id),
+            _ => "<unknown>".to_string(),
+        }
+    }
+}
+
+// ============================================================
+// Trait Bounds & Supertrait Checking
+// ============================================================
+
+impl TypeContext {
+    /// Check that a type implements a given trait.
+    /// Searches impl blocks for an implementation.
+    fn type_implements_trait(&self, ty: &Type, trait_def_id: &DefId) -> bool {
+        let resolver = TraitResolver::new(self);
+
+        // Check explicit impl blocks
+        for impl_block in &self.impl_blocks {
+            match impl_block.trait_ref {
+                Some(ref trait_ref) => {
+                    if trait_ref.trait_id.module == trait_def_id.module
+                        && trait_ref.trait_id.local == trait_def_id.local
+                        && resolver.types_match(&impl_block.self_ty, ty, &impl_block.type_params)
+                    {
+                        return true;
+                    }
+                }
+                None => {}
+            }
+        }
+
+        // Check if the type is a type parameter with a bound for this trait
+        match ty.kind {
+            TypeKind::Param(v) => {
+                // Look for bounds in the current scope that reference this trait
+                // (This would be populated during function signature checking)
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Check that all trait bounds in a where clause are satisfied.
+    fn check_where_clause(
+        &mut self,
+        where_clause: &[WherePredicate],
+        subst: &[(TyVarId, Type)],
+        span: Span,
+    ) {
+        for predicate in where_clause {
+            // Apply substitution to get concrete type
+            let concrete_ty = self.unifier.apply_subst(&predicate.ty, subst);
+            // Check each bound
+            for bound in &predicate.bounds {
+                let bound_ty = self.unifier.apply_subst(bound, subst);
+                // Extract trait DefId from the bound type
+                match bound_ty.kind {
+                    TypeKind::Adt { def_id, .. } => {
+                        if !self.type_implements_trait(&concrete_ty, &def_id) {
+                            let trait_name = match self.get_trait(&def_id) {
+                                Some(info) => info.name.clone(),
+                                None => format!("trait({}:{})", def_id.module, def_id.local),
+                            };
+                            self.error(TypeErrorKind::UnsupportedFeature {
+                                feature: format!("{} does not implement {}",
+                                    TraitResolver::new(self).type_name(&concrete_ty),
+                                    trait_name),
+                            }, span);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Validate that a trait impl block is complete (all required methods/assoc types present).
+    fn validate_trait_impl(
+        &mut self,
+        trait_id: &DefId,
+        impl_methods: &[FnSig],
+        impl_assoc_types: &[(String, Type)],
+        span: Span,
+    ) {
+        let trait_info = match self.get_trait(trait_id) {
+            Some(info) => info.clone(),
+            None => return,
+        };
+
+        // Check required methods
+        for trait_method in &trait_info.methods {
+            let mut provided = false;
+            for impl_method in impl_methods {
+                if impl_method.name == trait_method.name {
+                    provided = true;
+                    break;
+                }
+            }
+            if !provided {
+                self.error(TypeErrorKind::MissingFields {
+                    ty_name: trait_info.name.clone(),
+                    fields: [trait_method.name.clone()],
+                }, span);
+            }
+        }
+
+        // Check required associated types
+        for assoc_type in &trait_info.assoc_types {
+            match assoc_type.default {
+                Some(_) => continue, // Has default, not required
+                None => {}
+            }
+            let mut provided = false;
+            for (name, _) in impl_assoc_types {
+                if *name == assoc_type.name {
+                    provided = true;
+                    break;
+                }
+            }
+            if !provided {
+                self.error(TypeErrorKind::MissingFields {
+                    ty_name: trait_info.name.clone(),
+                    fields: [assoc_type.name.clone()],
+                }, span);
+            }
+        }
+    }
+
+    /// Check supertrait obligations: if type implements trait T,
+    /// and T has supertraits S1, S2, then type must also implement S1 and S2.
+    fn check_supertrait_obligations(
+        &mut self,
+        ty: &Type,
+        trait_id: &DefId,
+        span: Span,
+    ) {
+        let supertraits = match self.get_trait(trait_id) {
+            Some(info) => info.supertraits.clone(),
+            None => return,
+        };
+
+        for supertrait_id in &supertraits {
+            if !self.type_implements_trait(ty, supertrait_id) {
+                let trait_name = match self.get_trait(trait_id) {
+                    Some(info) => info.name.clone(),
+                    None => "?".to_string(),
+                };
+                let super_name = match self.get_trait(supertrait_id) {
+                    Some(info) => info.name.clone(),
+                    None => "?".to_string(),
+                };
+                self.error(TypeErrorKind::UnsupportedFeature {
+                    feature: format!("{} requires supertrait {} but {} does not implement it",
+                        trait_name, super_name,
+                        TraitResolver::new(self).type_name(ty)),
+                }, span);
+            }
+            // Recursively check supertraits of supertraits
+            self.check_supertrait_obligations(ty, supertrait_id, span);
+        }
+    }
+
+    /// Resolve a method call on a type, reporting errors.
+    fn resolve_method_call(
+        &mut self,
+        receiver_ty: &Type,
+        method_name: &str,
+        arg_types: &[Type],
+        span: Span,
+    ) -> Option<MethodCandidate> {
+        let resolver = TraitResolver::new(self);
+        match resolver.resolve_method(receiver_ty, method_name, arg_types) {
+            MethodResolution::Resolved(candidate) => Some(candidate),
+            MethodResolution::NoMatch { ty_name, method_name } => {
+                self.error(TypeErrorKind::NoMatchingMethod {
+                    ty_name,
+                    method: method_name,
+                }, span);
+                None
+            }
+            MethodResolution::Ambiguous { method_name, candidates } => {
+                self.error(TypeErrorKind::AmbiguousMethod {
+                    method: method_name,
+                    candidates,
+                }, span);
+                None
+            }
+        }
+    }
+}
+
+// ============================================================
 // Public API
 // ============================================================
 
