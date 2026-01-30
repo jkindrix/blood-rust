@@ -246,8 +246,15 @@ SELF-001-003 complete. Continue toward full self-hosting.
     - No record types with row polymorphism
     - Character/string escape handling simplified
     - Parser grew from 2992 → 3508 lines (516 lines of fixes and new features)
-- [ ] **SELF-VERIFY-002**: Create test suite in Blood for parser
-  - Will execute once Blood can run Blood code
+- [x] **SELF-VERIFY-002**: Create test suite in Blood for parser ✅ COMPLETE
+  - Created `blood-std/tests/test_parser.blood` with 105 test functions
+  - Test categories: literals (5), binary ops (6), assignment (2), ranges (2),
+    unary ops (5), postfix (6), collections (8), control flow (11), closures (3),
+    effects (4), blocks (2), types (15), patterns (14), declarations (18),
+    effect system (7), imports (4), effect rows (3), let statements (3),
+    generics (4), complete programs (2), error recovery (2), edge cases (5)
+  - Cannot execute until self-hosting bootstrap is reached
+  - Serves as specification and regression suite for parser behavior
 
 ### 4.2 Type Checker Implementation [P1]
 
@@ -375,11 +382,11 @@ Identified in PERF-007 hot path profiling.
 | Pointer Optimization | 0 | 3 | 3 | 1 | **7** | 7 |
 | Effect Optimizations | 0 | 0 | 6 | 1 | **7** | 7 |
 | Closure Optimization | 0 | 4 | 0 | 0 | **4** | 4 |
-| Self-Hosting | 0 | 7 | 2 | 0 | **9** | 1 |
+| Self-Hosting | 0 | 7 | 2 | 0 | **9** | 2 |
 | Formal Verification | 0 | 0 | 0 | 4 | **4** | 0 |
 | MIR Deduplication | 0 | 0 | 3 | 0 | **3** | 3 |
 | Performance Optimization | 0 | 0 | 1 | 0 | **1** | 1 |
-| **Total** | **0** | **14** | **15** | **6** | **35** | **23** |
+| **Total** | **0** | **14** | **15** | **6** | **35** | **24** |
 
 **Recently Completed (Section 1.2 - Persistent Tier Thin Pointers):**
 - PTR-IMPL-004: Verified persistent tier already uses 64-bit thin pointers
