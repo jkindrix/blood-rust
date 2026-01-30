@@ -1168,8 +1168,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 }
             }
 
-            // Return MIR bodies, escape analysis, and inline handler bodies for codegen
-            Some((mir_bodies, escape_results, inline_handler_bodies))
+            // Return MIR bodies, escape analysis, inline handler bodies, and closure analysis for codegen
+            Some((mir_bodies, escape_results, inline_handler_bodies, closure_analysis))
         }
         Err(errors) => {
             // MIR lowering is mandatory - errors are fatal
@@ -1196,7 +1196,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     let _output_obj = args.file.with_extension("o");
     let output_exe = args.file.with_extension("");
 
-    let (ref mir_bodies, ref escape_map, ref inline_handler_bodies) = mir_result
+    let (ref mir_bodies, ref escape_map, ref inline_handler_bodies, ref closure_analysis) = mir_result
         .expect("MIR result should be present (errors return early)");
 
     // Track object files for linking
@@ -1221,7 +1221,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
 
         let output_obj = obj_dir.join("whole_module.o");
-        match codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, inline_handler_bodies, &output_obj, builtin_def_ids) {
+        match codegen::compile_mir_to_object(&hir_crate, mir_bodies, escape_map, inline_handler_bodies, &output_obj, builtin_def_ids, Some(closure_analysis)) {
             Ok(()) => {
                 object_files.push(output_obj);
                 if verbosity > 0 {
@@ -1310,6 +1310,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                 Some(inline_handler_bodies),
                 &obj_path,
                 builtin_def_ids,
+                Some(closure_analysis),
             ) {
                 Ok(()) => {
                     compiled_count += 1;
@@ -1372,7 +1373,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             }
 
             // Cache miss - compile this handler
-            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(mir_bodies), Some(inline_handler_bodies), &obj_path, builtin_def_ids) {
+            match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(mir_bodies), Some(inline_handler_bodies), &obj_path, builtin_def_ids, Some(closure_analysis)) {
                 Ok(()) => {
                     compiled_count += 1;
                     if verbosity > 2 {

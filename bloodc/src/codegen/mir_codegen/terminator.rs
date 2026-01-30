@@ -1719,25 +1719,98 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             // Closure with captures - extract and prepend env pointer
                             let closure_val = self.compile_mir_operand(func, body, escape_results)?;
 
-                            // Extract the environment pointer from the closure struct (field 1)
-                            // The closure struct is { fn_ptr, env_ptr }
-                            let env_ptr = if let BasicValueEnum::StructValue(sv) = closure_val {
-                                self.builder.build_extract_value(sv, 1, "closure.env")
-                                    .map_err(|e| vec![Diagnostic::error(
-                                        format!("LLVM extract error: {}", e), span
-                                    )])?
+                            // Check if this closure uses inline environment storage.
+                            // Inline closures have struct { fn_ptr, capture_0, capture_1, ... }
+                            // instead of { fn_ptr, env_ptr }.
+                            let is_inline = self.should_inline_closure_env(
+                                &closure_def_id,
+                                place.as_local(),
+                            );
+
+                            let env_ptr = if is_inline {
+                                // Inline environment: extract captures from struct fields 1..N,
+                                // build a captures struct, store to alloca, and pass pointer.
+                                let sv = if let BasicValueEnum::StructValue(sv) = closure_val {
+                                    sv
+                                } else {
+                                    let ptr = closure_val.into_pointer_value();
+                                    self.builder.build_load(ptr, "closure.load")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM load error: {}", e), span
+                                        )])?
+                                        .into_struct_value()
+                                };
+
+                                let struct_ty = sv.get_type();
+                                let num_fields = struct_ty.count_fields();
+                                // Fields 1..N are captures (field 0 is fn_ptr)
+                                let num_captures = num_fields - 1;
+
+                                if num_captures > 0 {
+                                    // Extract capture values and build captures struct
+                                    let mut capture_types = Vec::with_capacity(num_captures as usize);
+                                    let mut capture_vals = Vec::with_capacity(num_captures as usize);
+                                    for i in 0..num_captures {
+                                        let val = self.builder.build_extract_value(
+                                            sv, i + 1, &format!("inline_cap_{}", i)
+                                        ).map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM extract error: {}", e), span
+                                        )])?;
+                                        capture_types.push(val.get_type());
+                                        capture_vals.push(val);
+                                    }
+
+                                    let captures_ty = self.context.struct_type(&capture_types, false);
+                                    let mut captures_val = captures_ty.get_undef();
+                                    for (i, val) in capture_vals.iter().enumerate() {
+                                        captures_val = self.builder.build_insert_value(
+                                            captures_val, *val, i as u32,
+                                            &format!("rebuild_cap_{}", i)
+                                        ).map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM insert error: {}", e), span
+                                        )])?
+                                        .into_struct_value();
+                                    }
+
+                                    // Store to alloca and cast to i8* for env_ptr
+                                    let env_alloca = self.builder.build_alloca(captures_ty, "inline_env")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM alloca error: {}", e), span
+                                        )])?;
+                                    self.builder.build_store(env_alloca, captures_val)
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM store error: {}", e), span
+                                        )])?;
+
+                                    let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
+                                    self.builder.build_pointer_cast(env_alloca, i8_ptr_ty, "inline_env_ptr")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM pointer cast error: {}", e), span
+                                        )])?
+                                        .into()
+                                } else {
+                                    let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
+                                    i8_ptr_ty.const_null().into()
+                                }
                             } else {
-                                // If it's a pointer, load the struct first
-                                let ptr = closure_val.into_pointer_value();
-                                let loaded = self.builder.build_load(ptr, "closure.load")
-                                    .map_err(|e| vec![Diagnostic::error(
-                                        format!("LLVM load error: {}", e), span
-                                    )])?;
-                                let sv = loaded.into_struct_value();
-                                self.builder.build_extract_value(sv, 1, "closure.env")
-                                    .map_err(|e| vec![Diagnostic::error(
-                                        format!("LLVM extract error: {}", e), span
-                                    )])?
+                                // Standard fat pointer: extract env_ptr from field 1
+                                if let BasicValueEnum::StructValue(sv) = closure_val {
+                                    self.builder.build_extract_value(sv, 1, "closure.env")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM extract error: {}", e), span
+                                        )])?
+                                } else {
+                                    let ptr = closure_val.into_pointer_value();
+                                    let loaded = self.builder.build_load(ptr, "closure.load")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM load error: {}", e), span
+                                        )])?;
+                                    let sv = loaded.into_struct_value();
+                                    self.builder.build_extract_value(sv, 1, "closure.env")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM extract error: {}", e), span
+                                        )])?
+                                }
                             };
 
                             let mut full_args = Vec::with_capacity(args.len() + 1);

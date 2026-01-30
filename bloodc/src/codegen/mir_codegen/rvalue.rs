@@ -1455,11 +1455,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
 
             AggregateKind::Closure { def_id } => {
-                // Closure is a fat pointer: { fn_ptr: i8*, env_ptr: i8* }
-                // fn_ptr points to the closure function
-                // env_ptr points to the captured environment (or null if no captures)
                 let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
-                let closure_struct_ty = self.context.struct_type(&[i8_ptr_ty.into(), i8_ptr_ty.into()], false);
 
                 // Get the closure function pointer
                 let fn_ptr = if let Some(&fn_value) = self.functions.get(def_id) {
@@ -1476,125 +1472,156 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     )]);
                 };
 
-                // Check if the closure escapes (is returned from a function or stored
-                // in a heap-allocated location). If so, we must heap-allocate the
-                // captured environment so it survives after the creating function returns.
-                let closure_escapes = dest_local
-                    .and_then(|local| escape_results.map(|er| er.get(local)))
-                    .map(|state| state != EscapeState::NoEscape)
-                    .unwrap_or(true); // Conservative: assume escapes if unknown
+                // Check if this closure qualifies for inline environment optimization.
+                // Inline closures store captures directly in the closure struct:
+                //   { fn_ptr: i8*, capture_0: T0, capture_1: T1, ... }
+                // instead of through a separate env_ptr allocation:
+                //   { fn_ptr: i8*, env_ptr: i8* }
+                // This eliminates one alloca and improves cache locality.
+                let use_inline_env = !vals.is_empty()
+                    && self.should_inline_closure_env(def_id, dest_local);
 
-                // Build the environment pointer
-                let env_ptr = if vals.is_empty() {
-                    // No captures - use null pointer
-                    i8_ptr_ty.const_null()
-                } else {
-                    // Build a struct with captured values
-                    let types: Vec<_> = vals.iter().map(|v| v.get_type()).collect();
-                    let captures_struct_ty = self.context.struct_type(&types, false);
-                    let mut captures_val = captures_struct_ty.get_undef();
+                if use_inline_env {
+                    // Inline environment: captures stored directly in closure struct.
+                    // Struct layout: { fn_ptr: i8*, capture_0: T0, capture_1: T1, ... }
+                    let mut field_types: Vec<inkwell::types::BasicTypeEnum> = Vec::with_capacity(vals.len() + 1);
+                    field_types.push(i8_ptr_ty.into());
+                    for val in vals.iter() {
+                        field_types.push(val.get_type());
+                    }
+                    let inline_struct_ty = self.context.struct_type(&field_types, false);
+
+                    let mut closure_val = inline_struct_ty.get_undef();
+                    closure_val = self.builder.build_insert_value(closure_val, fn_ptr, 0, "closure.fn_ptr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM insert error: {}", e), Span::dummy()
+                        )])?
+                        .into_struct_value();
                     for (i, val) in vals.iter().enumerate() {
-                        captures_val = self.builder.build_insert_value(captures_val, *val, i as u32, &format!("capture_{}", i))
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM insert error: {}", e), Span::dummy()
-                            )])?
-                            .into_struct_value();
+                        closure_val = self.builder.build_insert_value(
+                            closure_val, *val, (i + 1) as u32,
+                            &format!("closure.capture_{}", i)
+                        )
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM insert error: {}", e), Span::dummy()
+                        )])?
+                        .into_struct_value();
                     }
 
-                    if closure_escapes {
-                        // Closure escapes - heap-allocate the environment using blood_alloc_or_abort.
-                        // This ensures the captured values survive after the creating function returns.
-                        let i32_ty = self.context.i32_type();
+                    Ok(closure_val.into())
+                } else {
+                    // Standard fat pointer: { fn_ptr: i8*, env_ptr: i8* }
+                    let closure_struct_ty = self.context.struct_type(
+                        &[i8_ptr_ty.into(), i8_ptr_ty.into()], false
+                    );
 
-                        // Get blood_alloc_or_abort function - signature is:
-                        // blood_alloc_or_abort(size: i64, out_generation: *i32) -> i64
-                        let alloc_fn = self.module.get_function("blood_alloc_or_abort")
-                            .ok_or_else(|| vec![Diagnostic::error(
-                                "Runtime function blood_alloc_or_abort not found", Span::dummy()
-                            )])?;
+                    // Check if the closure escapes (is returned from a function or stored
+                    // in a heap-allocated location). If so, we must heap-allocate the
+                    // captured environment so it survives after the creating function returns.
+                    let closure_escapes = dest_local
+                        .and_then(|local| escape_results.map(|er| er.get(local)))
+                        .map(|state| state != EscapeState::NoEscape)
+                        .unwrap_or(true); // Conservative: assume escapes if unknown
 
-                        // Calculate size of the captures struct
-                        let size_of_captures = captures_struct_ty.size_of()
-                            .ok_or_else(|| vec![Diagnostic::error(
-                                "Cannot determine size of closure captures struct", Span::dummy()
-                            )])?;
-
-                        // Create a dummy alloca for the generation output (not used for closures,
-                        // but required by the blood_alloc_or_abort signature)
-                        let gen_alloca = self.builder.build_alloca(i32_ty, "closure_env_gen")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM alloca error: {}", e), Span::dummy()
-                            )])?;
-
-                        // Allocate heap memory for the captures
-                        // blood_alloc_or_abort(size: i64, out_gen: *i32) -> i64 (address)
-                        let heap_addr = self.builder.build_call(
-                            alloc_fn,
-                            &[size_of_captures.into(), gen_alloca.into()],
-                            "closure_env_addr"
-                        ).map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM call error: {}", e), Span::dummy()
-                        )])?
-                        .try_as_basic_value()
-                        .left()
-                        .ok_or_else(|| vec![Diagnostic::error(
-                            "blood_alloc_or_abort did not return a value", Span::dummy()
-                        )])?
-                        .into_int_value();
-
-                        // Convert i64 address to pointer
-                        let heap_ptr = self.builder.build_int_to_ptr(
-                            heap_addr,
-                            captures_struct_ty.ptr_type(AddressSpace::default()),
-                            "closure_env_ptr"
-                        ).map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM int_to_ptr error: {}", e), Span::dummy()
-                        )])?;
-
-                        // Store the captured values
-                        self.builder.build_store(heap_ptr, captures_val)
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM store error: {}", e), Span::dummy()
-                            )])?;
-
-                        // Cast to i8* for the closure type
-                        self.builder.build_pointer_cast(heap_ptr, i8_ptr_ty, "env_ptr")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM pointer cast error: {}", e), Span::dummy()
-                            )])?
+                    // Build the environment pointer
+                    let env_ptr = if vals.is_empty() {
+                        // No captures - use null pointer
+                        i8_ptr_ty.const_null()
                     } else {
-                        // Closure doesn't escape - use stack allocation (original behavior)
-                        let captures_alloca = self.builder.build_alloca(captures_struct_ty, "closure_env")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM alloca error: {}", e), Span::dummy()
-                            )])?;
-                        self.builder.build_store(captures_alloca, captures_val)
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM store error: {}", e), Span::dummy()
-                            )])?;
+                        // Build a struct with captured values
+                        let types: Vec<_> = vals.iter().map(|v| v.get_type()).collect();
+                        let captures_struct_ty = self.context.struct_type(&types, false);
+                        let mut captures_val = captures_struct_ty.get_undef();
+                        for (i, val) in vals.iter().enumerate() {
+                            captures_val = self.builder.build_insert_value(captures_val, *val, i as u32, &format!("capture_{}", i))
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM insert error: {}", e), Span::dummy()
+                                )])?
+                                .into_struct_value();
+                        }
 
-                        // Cast to i8* for the closure type
-                        self.builder.build_pointer_cast(captures_alloca, i8_ptr_ty, "env_ptr")
-                            .map_err(|e| vec![Diagnostic::error(
-                                format!("LLVM pointer cast error: {}", e), Span::dummy()
+                        if closure_escapes {
+                            // Closure escapes - heap-allocate the environment
+                            let i32_ty = self.context.i32_type();
+                            let alloc_fn = self.module.get_function("blood_alloc_or_abort")
+                                .ok_or_else(|| vec![Diagnostic::error(
+                                    "Runtime function blood_alloc_or_abort not found", Span::dummy()
+                                )])?;
+
+                            let size_of_captures = captures_struct_ty.size_of()
+                                .ok_or_else(|| vec![Diagnostic::error(
+                                    "Cannot determine size of closure captures struct", Span::dummy()
+                                )])?;
+
+                            let gen_alloca = self.builder.build_alloca(i32_ty, "closure_env_gen")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), Span::dummy()
+                                )])?;
+
+                            let heap_addr = self.builder.build_call(
+                                alloc_fn,
+                                &[size_of_captures.into(), gen_alloca.into()],
+                                "closure_env_addr"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM call error: {}", e), Span::dummy()
                             )])?
-                    }
-                };
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or_else(|| vec![Diagnostic::error(
+                                "blood_alloc_or_abort did not return a value", Span::dummy()
+                            )])?
+                            .into_int_value();
 
-                // Build the closure fat pointer struct { fn_ptr, env_ptr }
-                let mut closure_val = closure_struct_ty.get_undef();
-                closure_val = self.builder.build_insert_value(closure_val, fn_ptr, 0, "closure.with_fn")
-                    .map_err(|e| vec![Diagnostic::error(
-                        format!("LLVM insert error: {}", e), Span::dummy()
-                    )])?
-                    .into_struct_value();
-                closure_val = self.builder.build_insert_value(closure_val, env_ptr, 1, "closure.with_env")
-                    .map_err(|e| vec![Diagnostic::error(
-                        format!("LLVM insert error: {}", e), Span::dummy()
-                    )])?
-                    .into_struct_value();
+                            let heap_ptr = self.builder.build_int_to_ptr(
+                                heap_addr,
+                                captures_struct_ty.ptr_type(AddressSpace::default()),
+                                "closure_env_ptr"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM int_to_ptr error: {}", e), Span::dummy()
+                            )])?;
 
-                Ok(closure_val.into())
+                            self.builder.build_store(heap_ptr, captures_val)
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM store error: {}", e), Span::dummy()
+                                )])?;
+
+                            self.builder.build_pointer_cast(heap_ptr, i8_ptr_ty, "env_ptr")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), Span::dummy()
+                                )])?
+                        } else {
+                            // Closure doesn't escape - use stack allocation
+                            let captures_alloca = self.builder.build_alloca(captures_struct_ty, "closure_env")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM alloca error: {}", e), Span::dummy()
+                                )])?;
+                            self.builder.build_store(captures_alloca, captures_val)
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM store error: {}", e), Span::dummy()
+                                )])?;
+
+                            self.builder.build_pointer_cast(captures_alloca, i8_ptr_ty, "env_ptr")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM pointer cast error: {}", e), Span::dummy()
+                                )])?
+                        }
+                    };
+
+                    // Build the closure fat pointer struct { fn_ptr, env_ptr }
+                    let mut closure_val = closure_struct_ty.get_undef();
+                    closure_val = self.builder.build_insert_value(closure_val, fn_ptr, 0, "closure.with_fn")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM insert error: {}", e), Span::dummy()
+                        )])?
+                        .into_struct_value();
+                    closure_val = self.builder.build_insert_value(closure_val, env_ptr, 1, "closure.with_env")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM insert error: {}", e), Span::dummy()
+                        )])?
+                        .into_struct_value();
+
+                    Ok(closure_val.into())
+                }
             }
 
             AggregateKind::Record => {

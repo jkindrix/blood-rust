@@ -15,7 +15,7 @@ use inkwell::AddressSpace;
 
 use crate::hir::{self, DefId, LocalId, Type, PrimitiveTy, IntTy, UintTy, FloatTy};
 use crate::hir::ty::{TypeKind, TyVarId};
-use crate::mir::{EscapeAnalyzer, EscapeResults, MirBody, InlineHandlerBodies};
+use crate::mir::{EscapeAnalyzer, EscapeResults, MirBody, InlineHandlerBodies, ClosureAnalysisResults};
 use crate::codegen::mir_codegen::MirTypesCodegen;
 use crate::diagnostics::Diagnostic;
 use crate::span::Span;
@@ -752,6 +752,10 @@ pub struct CodegenContext<'ctx, 'a> {
     /// Built at the start of codegen by walking the HIR module tree.
     /// Used for stable linker symbol names that don't depend on DefId indices.
     pub(super) def_paths: HashMap<DefId, String>,
+    /// Closure analysis results for inline environment optimization.
+    /// When a closure's environment is ≤16 bytes and the closure doesn't escape,
+    /// captures are stored directly in the closure struct instead of through a pointer.
+    pub(super) closure_analysis: Option<ClosureAnalysisResults>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -807,6 +811,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             option_def_id: None,
             result_def_id: None,
             def_paths: HashMap::new(),
+            closure_analysis: None,
         }
     }
 
@@ -835,6 +840,47 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     /// - Apply tier-appropriate allocation strategies
     pub fn set_escape_analysis(&mut self, escape_analysis: HashMap<DefId, EscapeResults>) {
         self.escape_analysis = escape_analysis;
+    }
+
+    /// Set closure analysis results for inline environment optimization.
+    ///
+    /// When set, closures with small environments (≤16 bytes) that don't escape
+    /// will have their captures stored directly in the closure struct rather than
+    /// through a separate env_ptr allocation.
+    pub fn set_closure_analysis(&mut self, closure_analysis: ClosureAnalysisResults) {
+        self.closure_analysis = Some(closure_analysis);
+    }
+
+    /// Check if a closure should use inline environment storage.
+    ///
+    /// Returns true when:
+    /// 1. Closure analysis results are available
+    /// 2. The closure's environment size is within the inline threshold
+    /// 3. The closure doesn't escape (only used in direct calls)
+    pub fn should_inline_closure_env(&self, closure_def_id: &DefId, dest_local: Option<LocalId>) -> bool {
+        // Check closure analysis says it's an inline candidate
+        let is_inline_candidate = self.closure_analysis
+            .as_ref()
+            .and_then(|ca| ca.get(*closure_def_id))
+            .map(|info| info.is_inline_candidate)
+            .unwrap_or(false);
+
+        if !is_inline_candidate {
+            return false;
+        }
+
+        // Check escape analysis says the closure doesn't escape.
+        // If it escapes, it may be stored in a fn() variable which requires the
+        // fat pointer { fn_ptr, env_ptr } ABI for indirect calls.
+        let does_not_escape = dest_local
+            .and_then(|local| {
+                self.current_fn_def_id
+                    .and_then(|fn_id| self.escape_analysis.get(&fn_id))
+                    .map(|er| er.get(local) == crate::mir::escape::EscapeState::NoEscape)
+            })
+            .unwrap_or(false);
+
+        does_not_escape
     }
 
     /// Store MIR bodies for generic functions (for monomorphization).

@@ -68,7 +68,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::hir::{self, DefId};
-use crate::mir::{EscapeResults, MirBody, InlineHandlerBodies};
+use crate::mir::{EscapeResults, MirBody, InlineHandlerBodies, ClosureAnalysisResults};
 use crate::diagnostics::Diagnostic;
 
 /// Type alias for escape analysis results per function.
@@ -361,6 +361,7 @@ pub fn compile_mir_to_object(
     inline_handler_bodies: &InlineHandlerBodies,
     output_path: &Path,
     builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
+    closure_analysis: Option<&ClosureAnalysisResults>,
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_program");
@@ -375,6 +376,9 @@ pub fn compile_mir_to_object(
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
     codegen.set_inline_handler_bodies(inline_handler_bodies.clone());
+    if let Some(ca) = closure_analysis {
+        codegen.set_closure_analysis(ca.clone());
+    }
     codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
     // First pass: declare types and functions from HIR
@@ -444,6 +448,7 @@ pub fn compile_mir_to_object_with_opt(
     output_path: &Path,
     opt_level: BloodOptLevel,
     builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
+    closure_analysis: Option<&ClosureAnalysisResults>,
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_program");
@@ -457,6 +462,9 @@ pub fn compile_mir_to_object_with_opt(
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
     codegen.set_inline_handler_bodies(inline_handler_bodies.clone());
+    if let Some(ca) = closure_analysis {
+        codegen.set_closure_analysis(ca.clone());
+    }
     codegen.set_builtin_def_ids(builtin_def_ids.0, builtin_def_ids.1, builtin_def_ids.2, builtin_def_ids.3);
 
     // First pass: declare types and functions from HIR
@@ -536,6 +544,7 @@ pub fn compile_definition_to_object(
     inline_handler_bodies: Option<&InlineHandlerBodies>,
     output_path: &Path,
     builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
+    closure_analysis: Option<&ClosureAnalysisResults>,
 ) -> Result<(), Vec<Diagnostic>> {
     let context = Context::create();
     let module_name = format!("blood_def_{}", def_id.index());
@@ -560,6 +569,11 @@ pub fn compile_definition_to_object(
     // Set up inline handler bodies if provided
     if let Some(handlers) = inline_handler_bodies {
         codegen.set_inline_handler_bodies(handlers.clone());
+    }
+
+    // Set up closure analysis if provided
+    if let Some(ca) = closure_analysis {
+        codegen.set_closure_analysis(ca.clone());
     }
 
     // Declare all types and external functions from the crate
@@ -717,6 +731,7 @@ pub fn compile_definitions_to_objects(
     inline_handler_bodies: Option<&InlineHandlerBodies>,
     output_dir: &Path,
     builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
+    closure_analysis: Option<&ClosureAnalysisResults>,
 ) -> Result<Vec<(DefId, std::path::PathBuf)>, Vec<Diagnostic>> {
     let mut results = Vec::new();
     let mut errors = Vec::new();
@@ -726,7 +741,7 @@ pub fn compile_definitions_to_objects(
         let escape_results = escape_analysis.get(&def_id);
         let output_path = output_dir.join(format!("def_{}.o", def_id.index()));
 
-        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, Some(mir_bodies), inline_handler_bodies, &output_path, builtin_def_ids) {
+        match compile_definition_to_object(def_id, hir_crate, mir_body, escape_results, Some(mir_bodies), inline_handler_bodies, &output_path, builtin_def_ids, closure_analysis) {
             Ok(()) => {
                 results.push((def_id, output_path));
             }
