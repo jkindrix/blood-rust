@@ -977,6 +977,16 @@ fn test_effect_record_through_effects() {
     run_effect_test("record_through_effects");
 }
 
+#[test]
+fn test_effect_snapshot_effect_resume() {
+    // Tests: Struct data integrity across multiple suspend/resume cycles
+    // with nested (up to 3-level) deep handlers. Indirectly validates
+    // generation snapshot capture/restore correctness.
+    // 5 test cases covering single resume, multiple resumes, 2-level nesting,
+    // interleaved accumulation, and 3-level nesting.
+    run_effect_test("snapshot_effect_resume");
+}
+
 /// Compile-failure test: expects compilation to fail with a specific error code.
 fn run_effect_compile_failure_test(name: &str, expected_error: &str) {
     let cache_dir = create_test_cache(&format!("effect_{}", name));

@@ -642,14 +642,14 @@ Blood contains unique feature interactions requiring validation before release. 
 | Snapshot overhead | < 100ns per reference | ✅ **6.6ns** (benchmarked) |
 | Validation overhead | < 50ns per reference | ✅ **~6ns/ref** (benchmarked) |
 
-**Note**: Code and benchmarks exist. End-to-end validation with real Blood programs using effects + snapshots needs additional integration tests.
+**Note**: Code and benchmarks exist. Indirect end-to-end validation now exists via `snapshot_effect_resume.blood`, which verifies struct data integrity across multiple suspend/resume cycles with up to 3-level nested deep handlers. Direct generation number testing is not possible from user-level Blood code (generation numbers are an internal runtime mechanism).
 
 #### Spike 2: Effects + Linear Types (P1)
 **Goal**: Validate that linear values cannot be captured in multi-shot handlers.
 
 | Criterion | Status |
 |-----------|--------|
-| Linear value captured in multi-shot handler | 🔶 Type system supports; needs integration test |
+| Linear value captured in multi-shot handler | ✅ Validated (`linear_multishot_reject.blood` — E0304 compile-failure test) |
 | Affine in deep handler | 🔶 Handler analysis exists; needs integration test |
 | Linear returned from handler | 🔶 Type system supports; needs integration test |
 
@@ -683,7 +683,7 @@ Blood contains unique feature interactions requiring validation before release. 
    - ✅ Rust runtime linked to compiled programs
 
 2. **Needs Integration Testing**:
-   - 🔶 End-to-end tests for effects + generation snapshots (snapshot capture around effect handlers)
+   - ✅ End-to-end tests for effects + generation snapshots: `snapshot_effect_resume.blood` provides indirect validation (struct integrity across nested handler suspend/resume cycles)
 
 3. **Planned (1.0)**:
    - 📋 Full standard library in Blood syntax
@@ -975,8 +975,8 @@ Minor spec clarifications identified during comparison:
 | Effect Handlers | `effects/`, `ffi_exports.rs` | Code + FFI exports exist; basic handlers work |
 | Generational Pointers | `mir/ptr.rs`, `codegen/` | Code exists; needs stress testing |
 | Fiber Scheduler | `blood-runtime` | Code + unit tests; not exercised by Blood programs yet |
-| Multiple Dispatch | `codegen/`, `ffi_exports.rs` | Code + FFI; needs end-to-end test |
-| Generation Snapshots | `mir/snapshot.rs` | Code + benchmarks; needs effect resume validation |
+| Multiple Dispatch | `codegen/`, `ffi_exports.rs` | Code + FFI; ✅ validated (`dispatch_basic.blood`) |
+| Generation Snapshots | `mir/snapshot.rs` | Code + benchmarks; ✅ indirect validation via `snapshot_effect_resume.blood` |
 
 ### What's Optimization/Future Work
 
@@ -1203,7 +1203,19 @@ Added comprehensive 681-line example demonstrating:
 
 - **Build caching**: Content-addressed incremental build caching IS active (local + distributed). Per-definition hashing with BLAKE3 enables skip-recompilation of unchanged definitions. Build cache is working in `main.rs` compilation pipeline.
 - **Escape analysis tier optimization**: Analysis runs and `get_local_tier()` / `should_skip_gen_check()` consult escape results. Further tier-based optimizations may reduce remaining runtime checks.
-- **Complex multi-shot handler + generation snapshot interactions**: Unit tests exist but end-to-end integration tests with real Blood programs are still needed
+- **Complex multi-shot handler + generation snapshot interactions**: Unit tests exist; indirect end-to-end validation via `snapshot_effect_resume.blood` (struct integrity across nested handlers with multiple suspend/resume cycles)
+
+#### BUG-006: Option/Result Struct Unwrap Payload Offset Corruption
+
+**Status**: RESOLVED (2026-01-29)
+
+**Description**: `Option::unwrap()` and `Result::unwrap()` for struct payloads with `size > 4` but `alignment == 4` (e.g., `Point { x: i32, y: i32 }`) returned corrupted data. The payload offset was hardcoded to 4 bytes instead of being computed from the discriminant's aligned size.
+
+**Root Cause**: In `codegen/context/enums.rs`, the `generate_unwrap_method` function used a fixed 4-byte payload offset regardless of actual discriminant alignment requirements. For structs where `align_of(payload) > size_of(discriminant)`, the payload start address was incorrect.
+
+**Fix**: Compute payload offset as `max(align_of(payload), size_of(discriminant))` to ensure proper alignment, matching the layout used by enum construction code.
+
+**Regression Test**: `bloodc/tests/fixtures/option_struct_unwrap.blood` (4 test cases)
 
 ---
 
@@ -1233,6 +1245,8 @@ The Blood compiler's effect system has been validated against patterns from the 
 | Record types through effect handlers | `record_through_effects.blood` | ✅ Working |
 | Linear type multi-shot rejection (E0304) | `linear_multishot_reject.blood` | ✅ Compile-failure verified |
 | Trait-based multiple dispatch | `dispatch_basic.blood` | ✅ Working |
+| Struct integrity across nested deep handler suspend/resume | `snapshot_effect_resume.blood` | ✅ Working |
+| Option/Result struct unwrap (payload alignment) | `option_struct_unwrap.blood` | ✅ Working |
 
 ### 17.3 Regression Tests
 
@@ -1249,6 +1263,7 @@ These tests serve as regression tests for previously fixed bugs:
 | Non-deterministic closure DefId assignment | `mir/lowering/mod.rs` | `aether_streams.blood`, `aether_structs.blood` |
 | Primitive type effect parameter LLVM mismatch | `codegen/context/effects.rs` | `primitive_emit.blood` |
 | Generic enum + effect type unification | `typeck/context.rs` | `option_effect_unify.blood` |
+| Option/Result struct unwrap payload offset corruption (BUG-006) | `codegen/context/enums.rs` | `option_struct_unwrap.blood` |
 
 ### 17.4 Integration Test Command
 
@@ -1268,8 +1283,10 @@ cargo test -p bloodc --test end_to_end test_effect_ -- --test-threads=1
 - **record_through_effects.blood**: 3 test cases (record creation, field access in handlers)
 - **linear_multishot_reject.blood**: 1 compile-failure test (E0304 rejection)
 - **dispatch_basic.blood**: 2 test cases (trait dispatch with multiple impls)
+- **snapshot_effect_resume.blood**: 5 test cases (struct integrity across nested deep handlers with multiple suspend/resume cycles)
+- **option_struct_unwrap.blood**: 4 test cases (Option/Result unwrap for struct payloads — BUG-006 regression)
 
-**Total**: 29 test cases covering core effect system functionality, plus 1 compile-failure test and 2 dispatch tests.
+**Total**: 39 test cases across 12 fixture files (27 core effect tests + 5 snapshot/resume tests + 2 dispatch tests + 4 unwrap regression tests + 1 compile-failure test).
 
 ---
 
