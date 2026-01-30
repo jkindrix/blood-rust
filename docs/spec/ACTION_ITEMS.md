@@ -145,28 +145,28 @@ Derived from EFF-001 audit findings. EFF-002 (caching) already implemented.
 
 ---
 
-## 3. Closure Optimization [P1]
+## 3. Closure Optimization [P1] ✅ COMPLETE
 
-CLOS-003 from v1 is partially complete. Infrastructure exists, full optimization deferred.
+### 3.1 Inline Small Closures [P1] ✅ COMPLETE
 
-**Assessment (2026-01-14):** ClosureAnalyzer is now integrated into the pipeline (use `-vv`
-for reports). Inline optimization requires significant ABI changes across multiple modules.
-Given Blood now matches C performance (1.0x), this optimization is lower priority.
-
-### 3.1 Inline Small Closures [P1]
-
-- [ ] **CLOS-IMPL-001**: Modify closure ABI to inline small environments
-  - Current: `{ fn_ptr: i8*, env_ptr: i8* }` with separate alloca
-  - Optimal: `{ fn_ptr: i8*, env: [captures inline] }` for ≤16 bytes
-  - Threshold identified by `ClosureAnalyzer` (CLOS-001)
-  - **Complexity**: Requires variable-sized closure types, coordinated changes
-- [ ] **CLOS-IMPL-002**: Update `codegen/mir_codegen/rvalue.rs` for inline captures
-  - Emit inline capture storage instead of separate allocation
-  - Handle both inline and pointer-based based on environment size
-- [ ] **CLOS-IMPL-003**: Update `codegen/mir_codegen/terminator.rs` for inline call
-  - Read captures from inline storage on call
-- [ ] **CLOS-IMPL-004**: Update `mir/lowering/closure.rs` for capture access
-  - Generate correct field projections for inline vs pointer access
+- [x] **CLOS-IMPL-001**: Modify closure ABI to inline small environments ✅ COMPLETE
+  - ✅ Added `closure_analysis` field and `should_inline_closure_env()` to `CodegenContext`
+  - ✅ Threaded `ClosureAnalysisResults` through `compile_mir_to_object`, `compile_definition_to_object`,
+    and `compile_definitions_to_objects`
+  - ✅ Inline eligible: env ≤16 bytes AND closure doesn't escape (NoEscape)
+  - ✅ Inline layout: `{ fn_ptr: i8*, capture_0: T0, capture_1: T1, ... }`
+  - ✅ Non-inline layout preserved: `{ fn_ptr: i8*, env_ptr: i8* }` (for escaping or large closures)
+- [x] **CLOS-IMPL-002**: Update `codegen/mir_codegen/rvalue.rs` for inline captures ✅ COMPLETE
+  - ✅ Inline closures build `{ fn_ptr, capture_0, capture_1, ... }` struct directly
+  - ✅ Non-inline closures continue using alloca + env_ptr (heap or stack based on escape)
+- [x] **CLOS-IMPL-003**: Update `codegen/mir_codegen/terminator.rs` for inline call ✅ COMPLETE
+  - ✅ Direct calls to inline closures extract captures from struct fields 1..N
+  - ✅ Rebuilds captures struct, stores to alloca, casts to `i8*` for env_ptr
+  - ✅ Indirect calls through `fn()` still use standard fat pointer ABI
+- [x] **CLOS-IMPL-004**: Update `mir/lowering/closure.rs` for capture access ✅ NO CHANGE NEEDED
+  - ✅ MIR lowering generates `__env` field projections unchanged
+  - ✅ Codegen handles different storage layouts transparently
+  - ✅ Updated `mod.rs` to create correctly-typed allocas for inline closure locals
 
 ---
 
@@ -302,18 +302,18 @@ Identified in PERF-007 hot path profiling.
 
 ## Summary Statistics
 
-**Status as of 2026-01-14:**
+**Status as of 2026-01-30:**
 
 | Category | P0 | P1 | P2 | P3 | Total | Done |
 |----------|----|----|----|----|-------|------|
 | Pointer Optimization | 0 | 0 | 3 | 1 | **4** | 3 |
 | Effect Optimizations | 0 | 0 | 6 | 1 | **7** | 6 |
-| Closure Optimization | 0 | 4 | 0 | 0 | **4** | 0 |
+| Closure Optimization | 0 | 4 | 0 | 0 | **4** | 4 |
 | Self-Hosting | 0 | 7 | 2 | 0 | **9** | 0 |
 | Formal Verification | 0 | 0 | 0 | 4 | **4** | 0 |
 | MIR Deduplication | 0 | 0 | 3 | 0 | **3** | 3 |
 | Performance Optimization | 0 | 0 | 1 | 0 | **1** | 1 |
-| **Total** | **0** | **11** | **15** | **6** | **32** | **13** |
+| **Total** | **0** | **11** | **15** | **6** | **32** | **17** |
 
 **Recently Completed (Section 2.2 - Inline Small Evidence):**
 - EFF-OPT-003: Pass 1-2 handlers inline instead of via pointer (INFRASTRUCTURE COMPLETE)
