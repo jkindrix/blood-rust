@@ -1675,7 +1675,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             ConstantKind::Int(v) => {
                 let llvm_ty = self.lower_type(&constant.ty);
                 if let BasicTypeEnum::IntType(int_ty) = llvm_ty {
-                    Ok(int_ty.const_int(*v as u64, *v < 0).into())
+                    if int_ty.get_bit_width() > 64 {
+                        // Use arbitrary precision to avoid truncating i128 values to u64
+                        let bits = *v as u128;
+                        let lo = bits as u64;
+                        let hi = (bits >> 64) as u64;
+                        Ok(int_ty.const_int_arbitrary_precision(&[lo, hi]).into())
+                    } else {
+                        Ok(int_ty.const_int(*v as u64, *v < 0).into())
+                    }
                 } else {
                     Ok(self.context.i64_type().const_int(*v as u64, *v < 0).into())
                 }
@@ -1684,7 +1692,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             ConstantKind::Uint(v) => {
                 let llvm_ty = self.lower_type(&constant.ty);
                 if let BasicTypeEnum::IntType(int_ty) = llvm_ty {
-                    Ok(int_ty.const_int(*v as u64, false).into())
+                    if int_ty.get_bit_width() > 64 {
+                        // Use arbitrary precision to avoid truncating u128 values to u64
+                        let lo = *v as u64;
+                        let hi = (*v >> 64) as u64;
+                        Ok(int_ty.const_int_arbitrary_precision(&[lo, hi]).into())
+                    } else {
+                        Ok(int_ty.const_int(*v as u64, false).into())
+                    }
                 } else {
                     Ok(self.context.i64_type().const_int(*v as u64, false).into())
                 }

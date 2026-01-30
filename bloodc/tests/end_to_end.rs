@@ -1044,6 +1044,33 @@ fn run_fixture_test(name: &str) {
     cleanup_test_cache(&cache_dir);
 }
 
+/// Run a fixture test expecting a specific exit code.
+fn run_fixture_test_exit_code(name: &str, expected_exit: i32) {
+    let cache_dir = create_test_cache(&format!("fixture_{}", name));
+    let source = fixtures_dir().join(format!("{}.blood", name));
+
+    assert!(source.exists(), "Fixture test not found: {:?}", source);
+
+    let result = compile_with_cache(&source, &cache_dir);
+    assert!(
+        result.success,
+        "Fixture test '{}' compilation failed: {}",
+        name, result.stderr
+    );
+
+    let executable = result.executable.expect("No executable produced");
+    let run_result = run_executable(&executable);
+
+    assert_eq!(
+        run_result.exit_code, expected_exit,
+        "Fixture test '{}' expected exit code {} but got {}",
+        name, expected_exit, run_result.exit_code
+    );
+
+    clear_obj_files(&source);
+    cleanup_test_cache(&cache_dir);
+}
+
 #[test]
 fn test_dispatch_basic() {
     // Tests: Trait-based dispatch with multiple implementations compiles and runs.
@@ -1063,4 +1090,32 @@ fn test_mut_ref_field_mutations_preserved() {
     // silently lost because lower_unary evaluated the operand as an rvalue
     // (copying to a temp) instead of using lower_place for the original location.
     run_fixture_test("mut_ref_field");
+}
+
+#[test]
+fn test_enum_nested_basic() {
+    // Regression test for BUG-002: enum-in-struct-in-enum nesting with i32 payload.
+    // Verifies the basic nesting pattern works correctly.
+    run_fixture_test_exit_code("enum_nested_basic", 42);
+}
+
+#[test]
+fn test_enum_nested_i64() {
+    // Regression test for BUG-002: enum-in-struct-in-enum nesting with i64 payload.
+    // Tests 8-byte aligned payload through nested enum pattern.
+    run_fixture_test_exit_code("enum_nested_i64", 42);
+}
+
+#[test]
+fn test_enum_nested_i128() {
+    // Regression test for BUG-002: enum-in-struct-in-enum nesting with i128 payload.
+    // The exact pattern that triggered payload corruption in the self-hosted compiler.
+    run_fixture_test_exit_code("enum_nested_i128", 42);
+}
+
+#[test]
+fn test_enum_nested_multi_field() {
+    // Regression test for BUG-002: multi-field struct containing an enum,
+    // wrapped in another enum. Verifies both fields are accessible (7 + 42 = 49).
+    run_fixture_test_exit_code("enum_nested_multi_field", 49);
 }
