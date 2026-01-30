@@ -296,6 +296,79 @@ impl MemoryTier {
     pub fn is_ref_counted(self) -> bool {
         matches!(self, MemoryTier::Persistent)
     }
+
+    /// Get the pointer kind for this memory tier.
+    ///
+    /// Maps allocation tier to codegen pointer behavior:
+    /// - Stack → Thin (no runtime checks)
+    /// - Region → Generational (generation check on dereference)
+    /// - Persistent → RefCounted (RC lifecycle, no generation check)
+    /// - Reserved → Thin (fallback, should not occur in practice)
+    pub fn ptr_kind(self) -> PtrKind {
+        match self {
+            MemoryTier::Stack => PtrKind::Thin,
+            MemoryTier::Region => PtrKind::Generational,
+            MemoryTier::Persistent => PtrKind::RefCounted,
+            MemoryTier::Reserved => PtrKind::Thin,
+        }
+    }
+}
+
+// ============================================================================
+// Pointer Kind (Codegen Behavior)
+// ============================================================================
+
+/// Describes the codegen behavior of a pointer.
+///
+/// All pointer kinds use 64-bit thin pointers at the LLVM IR level.
+/// The distinction is in lifecycle management and runtime checks:
+///
+/// | Kind | LLVM Representation | Runtime Check | Lifecycle |
+/// |------|---------------------|---------------|-----------|
+/// | Thin | `T*` (alloca) | None | Lexical scope |
+/// | Generational | `T*` (blood_alloc) | Generation check on deref | Region scope |
+/// | RefCounted | `T*` (persistent_alloc) | None | Reference counting |
+///
+/// Note: Despite the `BloodPtr` struct being 128-bit (address + generation + metadata),
+/// the LLVM codegen uses 64-bit pointers for ALL tiers. Generation counters are tracked
+/// out-of-band in the `local_generations` map, and RC slot IDs are tracked in
+/// `persistent_slot_ids`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PtrKind {
+    /// Stack-allocated thin pointer. No runtime checks needed.
+    /// Used for `NoEscape` locals that are safe by lexical scoping.
+    Thin,
+
+    /// Region-allocated pointer with generational check on dereference.
+    /// The generation counter is stored out-of-band in `local_generations`.
+    /// `blood_validate_generation()` is called before each dereference.
+    Generational,
+
+    /// Persistent-allocated pointer with reference counting lifecycle.
+    /// No generation check needed (uses `PERSISTENT_MARKER` generation).
+    /// RC slot ID tracked in `persistent_slot_ids` for `blood_persistent_decrement`.
+    RefCounted,
+}
+
+impl PtrKind {
+    /// Whether this pointer kind requires generation checks on dereference.
+    pub fn needs_generation_check(self) -> bool {
+        matches!(self, PtrKind::Generational)
+    }
+
+    /// Whether this pointer kind uses reference counting.
+    pub fn is_ref_counted(self) -> bool {
+        matches!(self, PtrKind::RefCounted)
+    }
+
+    /// Convert to the corresponding memory tier.
+    pub fn to_memory_tier(self) -> MemoryTier {
+        match self {
+            PtrKind::Thin => MemoryTier::Stack,
+            PtrKind::Generational => MemoryTier::Region,
+            PtrKind::RefCounted => MemoryTier::Persistent,
+        }
+    }
 }
 
 
@@ -655,6 +728,43 @@ mod tests {
         assert!(!MemoryTier::Stack.needs_generation_check());
         assert!(MemoryTier::Region.needs_generation_check());
         assert!(!MemoryTier::Persistent.needs_generation_check());
+    }
+
+    #[test]
+    fn test_ptr_kind_from_memory_tier() {
+        assert_eq!(MemoryTier::Stack.ptr_kind(), PtrKind::Thin);
+        assert_eq!(MemoryTier::Region.ptr_kind(), PtrKind::Generational);
+        assert_eq!(MemoryTier::Persistent.ptr_kind(), PtrKind::RefCounted);
+        assert_eq!(MemoryTier::Reserved.ptr_kind(), PtrKind::Thin);
+    }
+
+    #[test]
+    fn test_ptr_kind_to_memory_tier() {
+        assert_eq!(PtrKind::Thin.to_memory_tier(), MemoryTier::Stack);
+        assert_eq!(PtrKind::Generational.to_memory_tier(), MemoryTier::Region);
+        assert_eq!(PtrKind::RefCounted.to_memory_tier(), MemoryTier::Persistent);
+    }
+
+    #[test]
+    fn test_ptr_kind_needs_generation_check() {
+        assert!(!PtrKind::Thin.needs_generation_check());
+        assert!(PtrKind::Generational.needs_generation_check());
+        assert!(!PtrKind::RefCounted.needs_generation_check());
+    }
+
+    #[test]
+    fn test_ptr_kind_is_ref_counted() {
+        assert!(!PtrKind::Thin.is_ref_counted());
+        assert!(!PtrKind::Generational.is_ref_counted());
+        assert!(PtrKind::RefCounted.is_ref_counted());
+    }
+
+    #[test]
+    fn test_ptr_kind_roundtrip() {
+        // PtrKind → MemoryTier → PtrKind should be identity
+        for kind in [PtrKind::Thin, PtrKind::Generational, PtrKind::RefCounted] {
+            assert_eq!(kind.to_memory_tier().ptr_kind(), kind);
+        }
     }
 
     #[test]

@@ -68,9 +68,10 @@ pub use escape::{EscapeAnalyzer, EscapeState, EscapeResults, EscapeStatistics, E
 pub use static_evidence::{
     analyze_handler_state, analyze_handler_allocation_tier,
     handler_evidence_escapes, HandleAnalysis,
+    analyze_handler_deduplication, HandlerDeduplicationResults, HandlerFingerprint,
 };
 pub use lowering::{MirLowering, InlineHandlerBody, InlineHandlerBodies, InlineHandlerCaptureInfo};
-pub use ptr::{BloodPtr, PtrMetadata, MemoryTier, PtrFlags};
+pub use ptr::{BloodPtr, PtrMetadata, MemoryTier, PtrFlags, PtrKind};
 pub use snapshot::{GenerationSnapshot, SnapshotEntry, LazySnapshot, LazyValidationStats};
 pub use visitor::{Visitor, Location, PlaceContext, walk_body, collect_rvalue_locals, collect_operand_locals};
 pub use types::{

@@ -488,7 +488,7 @@ impl StaticEvidenceId {
 /// Classification of handler state for static evidence optimization.
 ///
 /// Determines whether a handler's state can be pre-allocated at compile time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HandlerStateKind {
     /// Handler has no state (unit type `()`).
     /// Optimal: no state allocation or initialization needed.

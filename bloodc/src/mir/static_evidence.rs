@@ -829,6 +829,132 @@ fn contains_escaping_control_flow_stmt(stmt: &crate::hir::Stmt) -> bool {
     }
 }
 
+// ============================================================================
+// Handler Deduplication Analysis (EFF-OPT-007)
+// ============================================================================
+
+use std::collections::HashMap;
+use crate::hir::DefId;
+use super::types::{StatementKind, BasicBlockId};
+use super::body::MirBody;
+
+/// A handler installation fingerprint for deduplication.
+///
+/// Two handler installations are considered identical when they have the same
+/// handler_id and state_kind. This enables sharing evidence vectors across
+/// call sites that install the same handler configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HandlerFingerprint {
+    /// The handler definition ID.
+    pub handler_id: DefId,
+    /// The handler state classification.
+    pub state_kind: HandlerStateKind,
+}
+
+/// A specific handler installation site in a MIR body.
+#[derive(Debug, Clone)]
+pub struct HandlerInstallSite {
+    /// The basic block containing this installation.
+    pub block: BasicBlockId,
+    /// The statement index within the block.
+    pub statement_index: usize,
+    /// The handler fingerprint.
+    pub fingerprint: HandlerFingerprint,
+}
+
+/// Results of handler deduplication analysis for a single MIR body.
+///
+/// Identifies groups of handler installations with identical fingerprints,
+/// enabling the codegen to share evidence vectors instead of creating
+/// separate ones for each call site.
+#[derive(Debug, Clone, Default)]
+pub struct HandlerDeduplicationResults {
+    /// All handler installation sites found in the body.
+    pub sites: Vec<HandlerInstallSite>,
+    /// Groups of sites that share the same fingerprint.
+    /// Key: fingerprint, Value: indices into `sites`.
+    pub groups: HashMap<HandlerFingerprint, Vec<usize>>,
+    /// Number of handler installations that could share evidence.
+    pub deduplicated_count: usize,
+    /// Total number of handler installations analyzed.
+    pub total_count: usize,
+}
+
+impl HandlerDeduplicationResults {
+    /// Check if any deduplication opportunities were found.
+    pub fn has_duplicates(&self) -> bool {
+        self.deduplicated_count > 0
+    }
+
+    /// Get the number of unique handler patterns.
+    pub fn unique_patterns(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Get the potential savings (handler installations that could be skipped).
+    pub fn potential_savings(&self) -> usize {
+        self.deduplicated_count
+    }
+}
+
+/// Analyze a MIR body for handler deduplication opportunities.
+///
+/// Scans all basic blocks for `PushHandler` statements, groups them by
+/// handler fingerprint (handler_id + state_kind), and identifies groups
+/// where evidence vectors could be shared.
+///
+/// # Arguments
+///
+/// * `body` - The MIR body to analyze
+///
+/// # Returns
+///
+/// `HandlerDeduplicationResults` with deduplication opportunities.
+pub fn analyze_handler_deduplication(body: &MirBody) -> HandlerDeduplicationResults {
+    let mut sites = Vec::new();
+    let mut groups: HashMap<HandlerFingerprint, Vec<usize>> = HashMap::new();
+
+    // Scan all basic blocks for PushHandler statements
+    for (bb_id, block) in body.blocks() {
+        for (stmt_idx, stmt) in block.statements.iter().enumerate() {
+            if let StatementKind::PushHandler {
+                handler_id,
+                state_kind,
+                ..
+            } = &stmt.kind
+            {
+                let fingerprint = HandlerFingerprint {
+                    handler_id: *handler_id,
+                    state_kind: *state_kind,
+                };
+
+                let site_idx = sites.len();
+                sites.push(HandlerInstallSite {
+                    block: bb_id,
+                    statement_index: stmt_idx,
+                    fingerprint: fingerprint.clone(),
+                });
+
+                groups.entry(fingerprint).or_default().push(site_idx);
+            }
+        }
+    }
+
+    // Count deduplicated installations (sites beyond the first in each group)
+    let total_count = sites.len();
+    let deduplicated_count = groups.values()
+        .filter(|indices| indices.len() > 1)
+        .map(|indices| indices.len() - 1) // All but first are duplicates
+        .sum();
+
+    HandlerDeduplicationResults {
+        sites,
+        groups,
+        deduplicated_count,
+        total_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1452,5 +1578,194 @@ mod tests {
             Type::unit(),
         );
         assert!(!contains_nested_handle(&body));
+    }
+
+    // =========================================================================
+    // Handler Deduplication Tests (EFF-OPT-007)
+    // =========================================================================
+
+    #[test]
+    fn test_handler_fingerprint_equality() {
+        let fp1 = HandlerFingerprint {
+            handler_id: DefId::new(1),
+            state_kind: HandlerStateKind::Stateless,
+        };
+        let fp2 = HandlerFingerprint {
+            handler_id: DefId::new(1),
+            state_kind: HandlerStateKind::Stateless,
+        };
+        let fp3 = HandlerFingerprint {
+            handler_id: DefId::new(2),
+            state_kind: HandlerStateKind::Stateless,
+        };
+        let fp4 = HandlerFingerprint {
+            handler_id: DefId::new(1),
+            state_kind: HandlerStateKind::Dynamic,
+        };
+
+        assert_eq!(fp1, fp2, "Same handler_id + state_kind should be equal");
+        assert_ne!(fp1, fp3, "Different handler_id should not be equal");
+        assert_ne!(fp1, fp4, "Different state_kind should not be equal");
+    }
+
+    #[test]
+    fn test_handler_dedup_empty_body() {
+        use crate::mir::MirBody;
+        use crate::span::Span;
+
+        let body = MirBody::new(DefId::new(0), Span::dummy());
+        let results = analyze_handler_deduplication(&body);
+
+        assert_eq!(results.total_count, 0);
+        assert_eq!(results.deduplicated_count, 0);
+        assert!(!results.has_duplicates());
+        assert_eq!(results.unique_patterns(), 0);
+        assert_eq!(results.potential_savings(), 0);
+    }
+
+    #[test]
+    fn test_handler_dedup_single_handler() {
+        use crate::mir::{MirBody, Statement, StatementKind, Place};
+        use crate::hir::LocalId;
+        use crate::span::Span;
+
+        let mut body = MirBody::new(DefId::new(0), Span::dummy());
+        let entry = body.new_block();
+        let stmt = Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(10),
+                state_place: Place::local(LocalId::new(0)),
+                state_kind: HandlerStateKind::Stateless,
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        };
+        body.push_statement(entry, stmt);
+
+        let results = analyze_handler_deduplication(&body);
+        assert_eq!(results.total_count, 1);
+        assert_eq!(results.deduplicated_count, 0);
+        assert!(!results.has_duplicates());
+        assert_eq!(results.unique_patterns(), 1);
+    }
+
+    #[test]
+    fn test_handler_dedup_duplicate_handlers() {
+        use crate::mir::{MirBody, Statement, StatementKind, Place};
+        use crate::hir::LocalId;
+        use crate::span::Span;
+
+        let mut body = MirBody::new(DefId::new(0), Span::dummy());
+
+        // Two blocks each installing the same handler
+        let bb1 = body.new_block();
+        body.push_statement(bb1, Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(10),
+                state_place: Place::local(LocalId::new(0)),
+                state_kind: HandlerStateKind::Stateless,
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        });
+
+        let bb2 = body.new_block();
+        body.push_statement(bb2, Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(10), // Same handler
+                state_place: Place::local(LocalId::new(1)),
+                state_kind: HandlerStateKind::Stateless, // Same state kind
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        });
+
+        let results = analyze_handler_deduplication(&body);
+        assert_eq!(results.total_count, 2);
+        assert_eq!(results.deduplicated_count, 1, "One of two identical handlers is a duplicate");
+        assert!(results.has_duplicates());
+        assert_eq!(results.unique_patterns(), 1);
+        assert_eq!(results.potential_savings(), 1);
+    }
+
+    #[test]
+    fn test_handler_dedup_different_handlers_no_dedup() {
+        use crate::mir::{MirBody, Statement, StatementKind, Place};
+        use crate::hir::LocalId;
+        use crate::span::Span;
+
+        let mut body = MirBody::new(DefId::new(0), Span::dummy());
+
+        let bb1 = body.new_block();
+        body.push_statement(bb1, Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(10), // Handler A
+                state_place: Place::local(LocalId::new(0)),
+                state_kind: HandlerStateKind::Stateless,
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        });
+
+        let bb2 = body.new_block();
+        body.push_statement(bb2, Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(20), // Different handler B
+                state_place: Place::local(LocalId::new(1)),
+                state_kind: HandlerStateKind::Stateless,
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        });
+
+        let results = analyze_handler_deduplication(&body);
+        assert_eq!(results.total_count, 2);
+        assert_eq!(results.deduplicated_count, 0);
+        assert!(!results.has_duplicates());
+        assert_eq!(results.unique_patterns(), 2);
+    }
+
+    #[test]
+    fn test_handler_dedup_same_id_different_state_no_dedup() {
+        use crate::mir::{MirBody, Statement, StatementKind, Place};
+        use crate::hir::LocalId;
+        use crate::span::Span;
+
+        let mut body = MirBody::new(DefId::new(0), Span::dummy());
+
+        let bb1 = body.new_block();
+        body.push_statement(bb1, Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(10),
+                state_place: Place::local(LocalId::new(0)),
+                state_kind: HandlerStateKind::Stateless, // Different state kind
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        });
+
+        let bb2 = body.new_block();
+        body.push_statement(bb2, Statement {
+            kind: StatementKind::PushHandler {
+                handler_id: DefId::new(10), // Same handler
+                state_place: Place::local(LocalId::new(1)),
+                state_kind: HandlerStateKind::Dynamic, // Different state kind
+                allocation_tier: MemoryTier::Stack,
+                inline_mode: InlineEvidenceMode::Inline,
+            },
+            span: Span::dummy(),
+        });
+
+        let results = analyze_handler_deduplication(&body);
+        assert_eq!(results.total_count, 2);
+        assert_eq!(results.deduplicated_count, 0, "Same handler but different state kinds should not deduplicate");
+        assert!(!results.has_duplicates());
+        assert_eq!(results.unique_patterns(), 2);
     }
 }

@@ -410,6 +410,17 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         escape_results: Option<&EscapeResults>,
     ) -> bool {
         if let Some(results) = escape_results {
+            // Skip generation check based on memory tier.
+            // Only Region tier needs generation checks; Stack and Persistent
+            // skip them for different reasons:
+            // - Stack: safe by lexical scoping (alloca)
+            // - Persistent: uses reference counting, not generational checks
+            let tier = results.recommended_tier(local);
+            if !tier.needs_generation_check() {
+                return true;
+            }
+            // For Region tier, additionally skip if the local doesn't escape
+            // and isn't effect-captured (redundant with tier check, but explicit)
             let state = results.get(local);
             state == EscapeState::NoEscape && !results.is_effect_captured(local)
         } else {
