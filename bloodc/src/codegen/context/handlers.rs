@@ -821,10 +821,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Generate unique function name for this inline handler operation
         // Include parent_def_id to ensure uniqueness across different functions
         // that handle the same effect operation
+        let parent_path = self.def_paths.get(&handler_body.parent_def_id)
+            .map(|p| p.replace("::", "$"))
+            .unwrap_or_else(|| format!("{}", handler_body.parent_def_id.index()));
+        let effect_path = self.def_paths.get(&handler_body.effect_id)
+            .map(|p| p.replace("::", "$"))
+            .unwrap_or_else(|| format!("{}", handler_body.effect_id.index()));
         let fn_name = format!(
-            "blood_inline_handler_{}_{}_{}_{}",
-            handler_body.parent_def_id.index(),
-            handler_body.effect_id.index(),
+            "blood_inline_handler${}${}${}${}",
+            parent_path,
+            effect_path,
             handler_body.op_name,
             synthetic_def_id.index()
         );

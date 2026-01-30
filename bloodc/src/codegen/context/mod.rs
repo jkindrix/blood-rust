@@ -3,7 +3,7 @@
 //! This module provides the main code generation context which
 //! coordinates LLVM code generation for a Blood program.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -153,6 +153,71 @@ fn normalize_type_recursive(ty: &Type, tyvar_to_idx: &HashMap<TyVarId, u32>) -> 
         }
         _ => ty.clone(),
     }
+}
+
+/// Build a mapping from DefId to module-qualified path for stable linker symbols.
+///
+/// Walks the HIR module tree to determine each item's canonical path. The path
+/// is canonical regardless of which compilation unit computes it, because we
+/// stop at external module boundaries (files loaded via `mod foo;`).
+///
+/// For example:
+/// - Root function `helper` in `mymod.blood` -> `"mymod::helper"`
+/// - Function in external module `mod_a::helper` -> `"mod_a::helper"`
+/// - Nested `mod_a::sub::helper` -> `"mod_a::sub::helper"`
+///
+/// The key invariant: an item's path is the same regardless of which file
+/// imports it, because the walk stops at the first external module ancestor
+/// (the file boundary where the item is defined).
+fn build_def_paths(hir_crate: &hir::Crate) -> HashMap<DefId, String> {
+    // Step 1: Build parent map (child DefId -> parent Module DefId)
+    // and track which modules are external (loaded from separate files).
+    let mut parent_map: HashMap<DefId, DefId> = HashMap::new();
+    let mut external_modules: HashSet<DefId> = HashSet::new();
+    for (mod_def_id, item) in &hir_crate.items {
+        if let hir::ItemKind::Module(mod_def) = &item.kind {
+            if mod_def.is_external {
+                external_modules.insert(*mod_def_id);
+            }
+            for child_def_id in &mod_def.items {
+                parent_map.insert(*child_def_id, *mod_def_id);
+            }
+        }
+    }
+
+    // Step 2: For each item, walk up parent chain to build canonical path.
+    // Stop at (and include) the first external module ancestor, which
+    // represents the file boundary where the item is defined. This ensures
+    // the path is the same regardless of which compilation unit computes it.
+    //
+    // If no external ancestor exists, include the root module (the current
+    // compilation unit's own module), which is the file where the item lives.
+    let mut paths = HashMap::new();
+    for (def_id, item) in &hir_crate.items {
+        let mut segments = Vec::new();
+        segments.push(item.name.clone());
+
+        // Walk up the parent chain collecting module names
+        let mut current = *def_id;
+        while let Some(&parent_id) = parent_map.get(&current) {
+            if let Some(parent_item) = hir_crate.items.get(&parent_id) {
+                segments.push(parent_item.name.clone());
+                // Stop at the first external module — this is the file boundary.
+                // The item's canonical path is relative to its defining file.
+                if external_modules.contains(&parent_id) {
+                    break;
+                }
+            }
+            current = parent_id;
+        }
+
+        // Reverse to get root-first order and join with "::"
+        segments.reverse();
+        let qualified_path = segments.join("::");
+        paths.insert(*def_id, qualified_path);
+    }
+
+    paths
 }
 
 // Submodules
@@ -683,6 +748,10 @@ pub struct CodegenContext<'ctx, 'a> {
     pub(super) option_def_id: Option<DefId>,
     /// DefId for built-in Result<T, E> type.
     pub(super) result_def_id: Option<DefId>,
+    /// Module-qualified paths for each DefId.
+    /// Built at the start of codegen by walking the HIR module tree.
+    /// Used for stable linker symbol names that don't depend on DefId indices.
+    pub(super) def_paths: HashMap<DefId, String>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -737,6 +806,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             vec_def_id: None,
             option_def_id: None,
             result_def_id: None,
+            def_paths: HashMap::new(),
         }
     }
 
@@ -827,6 +897,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     ///
     /// After this, MIR bodies can be compiled using `compile_mir_body`.
     pub fn compile_crate_declarations(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+        // Build module-qualified paths for stable linker symbols
+        self.def_paths = build_def_paths(hir_crate);
+
         // First pass: collect struct, enum, and effect definitions
         // Effects must be processed before handlers
         for (def_id, item) in &hir_crate.items {
@@ -1974,6 +2047,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     /// `compile_definition_to_object()` which calls `compile_mir_body()`.
     #[deprecated(since = "0.3.0", note = "Use compile_mir_body() for generation check emission")]
     pub fn compile_crate(&mut self, hir_crate: &hir::Crate) -> Result<(), Vec<Diagnostic>> {
+        // Build module-qualified paths for stable linker symbols
+        self.def_paths = build_def_paths(hir_crate);
+
         // Copy builtin function mappings for resolving runtime calls
         self.builtin_fns = hir_crate.builtin_fns.clone();
 
@@ -2250,7 +2326,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             ("blood_main".to_string(), fn_type)
         } else {
             // Mangle name with DefId and parameter types to ensure uniqueness
-            let llvm_name = Self::mangle_function_name(def_id, name, &fn_def.sig);
+            let llvm_name = self.mangle_function_name(def_id, name, &fn_def.sig);
             let fn_type = self.fn_type_from_sig(&fn_def.sig);
             (llvm_name, fn_type)
         };
@@ -2281,26 +2357,32 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         }
     }
 
-    /// Mangle a function name with DefId and parameter types to ensure uniqueness.
+    /// Mangle a function name with module-qualified path and parameter types to ensure uniqueness.
     ///
-    /// This generates unique symbol names for all functions, avoiding collisions
-    /// when different modules have private helper functions with the same name
-    /// and signature. The DefId ensures global uniqueness.
+    /// This generates unique, stable symbol names for all functions using
+    /// module-qualified paths instead of DefId indices. Symbols remain stable
+    /// when unrelated definitions are added or removed.
     ///
-    /// For example: `add(i32, i32)` in module with DefId(42) becomes `def42$add$i32$i32`
-    fn mangle_function_name(def_id: DefId, name: &str, sig: &hir::FnSig) -> String {
+    /// For example: `add(i32, i32)` in module `mod_a` becomes `blood$mod_a$add$i32$i32`
+    fn mangle_function_name(&self, def_id: DefId, name: &str, sig: &hir::FnSig) -> String {
+        let qualified_path = self.def_paths.get(&def_id)
+            .map(|p| p.replace("::", "$"))
+            .unwrap_or_else(|| name.to_string());
         if sig.inputs.is_empty() {
-            format!("def{}${}", def_id.index(), name)
+            format!("blood${}", qualified_path)
         } else {
             let param_mangles: Vec<String> = sig.inputs.iter()
-                .map(Self::mangle_type)
+                .map(|ty| self.mangle_type(ty))
                 .collect();
-            format!("def{}${}${}", def_id.index(), name, param_mangles.join("$"))
+            format!("blood${}${}", qualified_path, param_mangles.join("$"))
         }
     }
 
     /// Generate a mangled name for a type.
-    fn mangle_type(ty: &Type) -> String {
+    ///
+    /// Uses module-qualified paths for ADT types instead of raw DefId indices,
+    /// ensuring stable linker symbols across recompilations.
+    fn mangle_type(&self, ty: &Type) -> String {
         match ty.kind() {
             TypeKind::Primitive(prim) => match prim {
                 PrimitiveTy::Bool => "bool".to_string(),
@@ -2332,45 +2414,48 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             },
             TypeKind::Tuple(elems) => {
                 let elem_mangles: Vec<String> = elems.iter()
-                    .map(Self::mangle_type)
+                    .map(|ty| self.mangle_type(ty))
                     .collect();
                 format!("T{}", elem_mangles.join("_"))
             }
             TypeKind::Array { element, size } => {
-                format!("A{}_{}", size, Self::mangle_type(element))
+                format!("A{}_{}", size, self.mangle_type(element))
             }
             TypeKind::Slice { element } => {
-                format!("S{}", Self::mangle_type(element))
+                format!("S{}", self.mangle_type(element))
             }
             TypeKind::Ref { inner, mutable } => {
                 if *mutable {
-                    format!("Rm{}", Self::mangle_type(inner))
+                    format!("Rm{}", self.mangle_type(inner))
                 } else {
-                    format!("R{}", Self::mangle_type(inner))
+                    format!("R{}", self.mangle_type(inner))
                 }
             }
             TypeKind::Ptr { inner, mutable } => {
                 if *mutable {
-                    format!("Pm{}", Self::mangle_type(inner))
+                    format!("Pm{}", self.mangle_type(inner))
                 } else {
-                    format!("P{}", Self::mangle_type(inner))
+                    format!("P{}", self.mangle_type(inner))
                 }
             }
             TypeKind::Adt { def_id, args } => {
+                let qualified_name = self.def_paths.get(def_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("D{}", def_id.index()));
                 if args.is_empty() {
-                    format!("D{}", def_id.index())
+                    format!("D_{}", qualified_name)
                 } else {
                     let arg_mangles: Vec<String> = args.iter()
-                        .map(Self::mangle_type)
+                        .map(|ty| self.mangle_type(ty))
                         .collect();
-                    format!("D{}_{}", def_id.index(), arg_mangles.join("_"))
+                    format!("D_{}_{}", qualified_name, arg_mangles.join("_"))
                 }
             }
             TypeKind::Fn { params, ret, .. } => {
                 let param_mangles: Vec<String> = params.iter()
-                    .map(Self::mangle_type)
+                    .map(|ty| self.mangle_type(ty))
                     .collect();
-                format!("F{}_{}", param_mangles.join("_"), Self::mangle_type(ret))
+                format!("F{}_{}", param_mangles.join("_"), self.mangle_type(ret))
             }
             TypeKind::Never => "never".to_string(),
             TypeKind::Infer(id) => format!("?{}", id.0),
@@ -2387,7 +2472,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     OwnershipQualifier::Linear => "L",
                     OwnershipQualifier::Affine => "A",
                 };
-                format!("{}{}", prefix, Self::mangle_type(inner))
+                format!("{}{}", prefix, self.mangle_type(inner))
             }
         }
     }
@@ -2514,12 +2599,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // is stable across compilation units. Combined with LinkOnceODR linkage,
         // this allows the linker to merge identical instantiations.
         let param_mangles: Vec<String> = concrete_params.iter()
-            .map(Self::mangle_type)
+            .map(|ty| self.mangle_type(ty))
             .collect();
+        let generic_fn_path = self.def_paths.get(&generic_def_id)
+            .map(|p| p.replace("::", "$"))
+            .unwrap_or_else(|| format!("{}", generic_def_id.index()));
         let llvm_name = if param_mangles.is_empty() {
-            format!("blood_mono_{}", generic_def_id.index())
+            format!("blood_mono${}", generic_fn_path)
         } else {
-            format!("blood_mono_{}${}", generic_def_id.index(), param_mangles.join("$"))
+            format!("blood_mono${}${}", generic_fn_path, param_mangles.join("$"))
         };
 
         // Build LLVM function type from concrete types

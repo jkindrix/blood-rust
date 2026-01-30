@@ -398,9 +398,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let vtable_type = ptr_type.array_type(layout.len() as u32);
 
         // Create a unique name for this vtable
+        let trait_path = self.def_paths.get(&trait_id)
+            .cloned()
+            .unwrap_or_else(|| format!("{}", trait_id.index()));
         let vtable_name = format!(
             "__vtable_{}_{}_{}",
-            trait_id.index(),
+            trait_path,
             self.type_to_vtable_name(self_ty),
             self.vtables.len()
         );
@@ -464,7 +467,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     fn type_to_vtable_name(&self, ty: &Type) -> String {
         match ty.kind() {
             TypeKind::Primitive(prim) => format!("{:?}", prim).to_lowercase(),
-            TypeKind::Adt { def_id, .. } => format!("adt{}", def_id.index()),
+            TypeKind::Adt { def_id, .. } => {
+                self.def_paths.get(def_id)
+                    .map(|p| format!("adt_{}", p))
+                    .unwrap_or_else(|| format!("adt{}", def_id.index()))
+            }
             TypeKind::Ref { mutable, inner } => {
                 let m = if *mutable { "mut_" } else { "" };
                 format!("{}ref_{}", m, self.type_to_vtable_name(inner))
@@ -493,7 +500,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let kind = if *inclusive { "rangeinc" } else { "range" };
                 format!("{}_{}", kind, self.type_to_vtable_name(element))
             }
-            TypeKind::DynTrait { trait_id, .. } => format!("dyn{}", trait_id.index()),
+            TypeKind::DynTrait { trait_id, .. } => {
+                self.def_paths.get(trait_id)
+                    .map(|p| format!("dyn_{}", p))
+                    .unwrap_or_else(|| format!("dyn{}", trait_id.index()))
+            }
             TypeKind::Record { fields, .. } => {
                 let parts: Vec<_> = fields.iter()
                     .map(|f| format!("{:?}_{}", f.name, self.type_to_vtable_name(&f.ty)))
