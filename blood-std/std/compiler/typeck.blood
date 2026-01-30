@@ -50,6 +50,17 @@ struct RecordRowVarId {
     id: u32,
 }
 
+/// Unique identifier for an effect row variable (effect polymorphism)
+struct EffectRowVarId {
+    id: u32,
+}
+
+impl EffectRowVarId {
+    fn new(id: u32) -> EffectRowVarId {
+        EffectRowVarId { id }
+    }
+}
+
 /// Unique identifier for a type-checked body
 struct BodyId {
     id: u32,
@@ -141,14 +152,124 @@ enum EffectRowKind {
     /// Closed set of effects: `{IO, Error<E>}`
     Closed { effects: [EffectEntry] },
     /// Open row with rest variable: `{IO | e}`
-    Open { effects: [EffectEntry], rest: TyVarId },
+    Open { effects: [EffectEntry], rest: EffectRowVarId },
     /// Row variable: `e`
-    Var(TyVarId),
+    Var(EffectRowVarId),
 }
 
 struct EffectEntry {
     effect_id: DefId,
     type_args: [Type],
+}
+
+impl EffectEntry {
+    /// Check if two effect entries refer to the same effect (ignoring type args)
+    fn same_effect(&self, other: &EffectEntry) -> bool {
+        self.effect_id.module == other.effect_id.module
+            && self.effect_id.local == other.effect_id.local
+    }
+}
+
+impl EffectRow {
+    fn pure() -> EffectRow {
+        EffectRow { kind: EffectRowKind::Pure }
+    }
+
+    fn closed(effects: [EffectEntry]) -> EffectRow {
+        if effects.is_empty() {
+            EffectRow { kind: EffectRowKind::Pure }
+        } else {
+            EffectRow { kind: EffectRowKind::Closed { effects } }
+        }
+    }
+
+    fn open(effects: [EffectEntry], rest: EffectRowVarId) -> EffectRow {
+        EffectRow { kind: EffectRowKind::Open { effects, rest } }
+    }
+
+    fn var(v: EffectRowVarId) -> EffectRow {
+        EffectRow { kind: EffectRowKind::Var(v) }
+    }
+
+    /// Returns true if the row has no effects and no row variable
+    fn is_pure(&self) -> bool {
+        match self.kind {
+            EffectRowKind::Pure => true,
+            EffectRowKind::Closed { effects } => effects.is_empty(),
+            EffectRowKind::Open { effects, .. } => false,
+            EffectRowKind::Var(_) => false,
+        }
+    }
+
+    /// Returns true if the row has a row variable (is polymorphic)
+    fn is_polymorphic(&self) -> bool {
+        match self.kind {
+            EffectRowKind::Pure => false,
+            EffectRowKind::Closed { .. } => false,
+            EffectRowKind::Open { .. } => true,
+            EffectRowKind::Var(_) => true,
+        }
+    }
+
+    /// Get the concrete effects in this row (empty for Pure and Var)
+    fn effects(&self) -> &[EffectEntry] {
+        match self.kind {
+            EffectRowKind::Pure => &[],
+            EffectRowKind::Closed { effects } => &effects,
+            EffectRowKind::Open { effects, .. } => &effects,
+            EffectRowKind::Var(_) => &[],
+        }
+    }
+
+    /// Get the row variable if present
+    fn row_var(&self) -> Option<EffectRowVarId> {
+        match self.kind {
+            EffectRowKind::Pure => None,
+            EffectRowKind::Closed { .. } => None,
+            EffectRowKind::Open { rest, .. } => Some(rest),
+            EffectRowKind::Var(v) => Some(v),
+        }
+    }
+
+    /// Check if this row contains a specific effect (by DefId)
+    fn contains_effect(&self, def_id: &DefId) -> bool {
+        let effs = self.effects();
+        for e in effs {
+            if e.effect_id.module == def_id.module && e.effect_id.local == def_id.local {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Find an effect entry by DefId
+    fn find_effect(&self, def_id: &DefId) -> Option<&EffectEntry> {
+        let effs = self.effects();
+        for e in effs {
+            if e.effect_id.module == def_id.module && e.effect_id.local == def_id.local {
+                return Some(e);
+            }
+        }
+        None
+    }
+
+    /// Add an effect to this row. Converts Pure to Closed or Open as needed.
+    fn add_effect(&mut self, entry: EffectEntry) {
+        match self.kind {
+            EffectRowKind::Pure => {
+                self.kind = EffectRowKind::Closed { effects: [entry] };
+            }
+            EffectRowKind::Closed { effects } => {
+                effects.push(entry);
+            }
+            EffectRowKind::Open { effects, .. } => {
+                effects.push(entry);
+            }
+            EffectRowKind::Var(v) => {
+                self.kind = EffectRowKind::Open { effects: [entry], rest: v };
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -379,6 +500,8 @@ enum TypeErrorKind {
     LinearUsedMultiple { name: String, ty: Type },
     /// Affine type used more than once
     AffineUsedMultiple { name: String, ty: Type },
+    /// Effect row mismatch (different effect sets)
+    EffectRowMismatch { expected: [String], found: [String] },
     /// Feature not yet supported
     UnsupportedFeature { feature: String },
 }
@@ -400,6 +523,10 @@ struct Unifier {
     row_substitutions: [(RecordRowVarId, [RecordField])],
     /// Next fresh row variable ID
     next_row_var: u32,
+    /// Effect row variable substitutions
+    effect_row_substitutions: [(EffectRowVarId, EffectRow)],
+    /// Next fresh effect row variable ID
+    next_effect_row_var: u32,
 }
 
 impl Unifier {
@@ -409,6 +536,8 @@ impl Unifier {
             next_var: 0,
             row_substitutions: [],
             next_row_var: 0,
+            effect_row_substitutions: [],
+            next_effect_row_var: 0,
         }
     }
 
@@ -435,6 +564,324 @@ impl Unifier {
         let id = TyVarId::new(self.next_var);
         self.next_var = self.next_var + 1;
         id
+    }
+
+    /// Generate a fresh effect row variable
+    fn fresh_effect_row_var(&mut self) -> EffectRowVarId {
+        let id = EffectRowVarId::new(self.next_effect_row_var);
+        self.next_effect_row_var = self.next_effect_row_var + 1;
+        id
+    }
+
+    /// Bind an effect row variable to an effect row
+    fn bind_effect_row_var(&mut self, var: EffectRowVarId, row: EffectRow) {
+        self.effect_row_substitutions.push((var, row));
+    }
+
+    /// Resolve an effect row by following substitution chains
+    fn resolve_row(&self, row: &EffectRow) -> EffectRow {
+        match row.kind {
+            EffectRowKind::Var(v) => {
+                for (bound_var, bound_row) in &self.effect_row_substitutions {
+                    if bound_var.id == v.id {
+                        return self.resolve_row(bound_row);
+                    }
+                }
+                row.clone()
+            }
+            EffectRowKind::Open { effects, rest } => {
+                // Resolve the rest variable
+                for (bound_var, bound_row) in &self.effect_row_substitutions {
+                    if bound_var.id == rest.id {
+                        // Merge: concrete effects from this row + resolved rest
+                        let resolved_rest = self.resolve_row(bound_row);
+                        let mut merged_effects = effects.clone();
+                        let rest_effects = resolved_rest.effects();
+                        for e in rest_effects {
+                            // Only add if not already present
+                            let mut found = false;
+                            for existing in &merged_effects {
+                                if existing.same_effect(e) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                merged_effects.push(e.clone());
+                            }
+                        }
+                        // Propagate the rest's row variable if any
+                        match resolved_rest.row_var() {
+                            Some(new_rest) => {
+                                return EffectRow::open(merged_effects, new_rest);
+                            }
+                            None => {
+                                return EffectRow::closed(merged_effects);
+                            }
+                        }
+                    }
+                }
+                row.clone()
+            }
+            _ => row.clone(),
+        }
+    }
+
+    /// Unify two effect rows.
+    ///
+    /// Effect row unification follows the Koka/row-polymorphism algorithm:
+    /// - Pure rows unify only with other pure rows or row variables bound to pure
+    /// - Closed rows must have exactly matching effects
+    /// - Open rows bind their row variable to the "difference" set from the other row
+    /// - Two open rows create a fresh row variable for the union extension
+    fn unify_rows(&mut self, r1: &EffectRow, r2: &EffectRow, span: Span) -> Result<(), TypeError> {
+        let row1 = self.resolve_row(r1);
+        let row2 = self.resolve_row(r2);
+
+        match (&row1.kind, &row2.kind) {
+            // Pure + Pure: trivially unifies
+            (EffectRowKind::Pure, EffectRowKind::Pure) => Ok(()),
+
+            // Pure + Var: bind var to pure
+            (EffectRowKind::Pure, EffectRowKind::Var(v)) => {
+                self.bind_effect_row_var(*v, EffectRow::pure());
+                Ok(())
+            }
+            (EffectRowKind::Var(v), EffectRowKind::Pure) => {
+                self.bind_effect_row_var(*v, EffectRow::pure());
+                Ok(())
+            }
+
+            // Pure + Closed: error if closed has effects
+            (EffectRowKind::Pure, EffectRowKind::Closed { effects }) => {
+                if effects.is_empty() {
+                    Ok(())
+                } else {
+                    Err(TypeError {
+                        kind: TypeErrorKind::EffectRowMismatch {
+                            expected: [],
+                            found: self.effect_names(effects),
+                        },
+                        span,
+                    })
+                }
+            }
+            (EffectRowKind::Closed { effects }, EffectRowKind::Pure) => {
+                if effects.is_empty() {
+                    Ok(())
+                } else {
+                    Err(TypeError {
+                        kind: TypeErrorKind::EffectRowMismatch {
+                            expected: self.effect_names(effects),
+                            found: [],
+                        },
+                        span,
+                    })
+                }
+            }
+
+            // Pure + Open: bind row var to pure, but only if no concrete effects
+            (EffectRowKind::Pure, EffectRowKind::Open { effects, rest }) => {
+                if effects.is_empty() {
+                    self.bind_effect_row_var(*rest, EffectRow::pure());
+                    Ok(())
+                } else {
+                    Err(TypeError {
+                        kind: TypeErrorKind::EffectRowMismatch {
+                            expected: [],
+                            found: self.effect_names(effects),
+                        },
+                        span,
+                    })
+                }
+            }
+            (EffectRowKind::Open { effects, rest }, EffectRowKind::Pure) => {
+                if effects.is_empty() {
+                    self.bind_effect_row_var(*rest, EffectRow::pure());
+                    Ok(())
+                } else {
+                    Err(TypeError {
+                        kind: TypeErrorKind::EffectRowMismatch {
+                            expected: self.effect_names(effects),
+                            found: [],
+                        },
+                        span,
+                    })
+                }
+            }
+
+            // Var + Var: same var is identity, different vars link them
+            (EffectRowKind::Var(v1), EffectRowKind::Var(v2)) => {
+                if v1.id == v2.id {
+                    Ok(())
+                } else {
+                    // Bind v1 to Var(v2)
+                    self.bind_effect_row_var(*v1, EffectRow::var(*v2));
+                    Ok(())
+                }
+            }
+
+            // Var + Closed: bind var to the closed row
+            (EffectRowKind::Var(v), EffectRowKind::Closed { effects }) => {
+                self.bind_effect_row_var(*v, EffectRow::closed(effects.clone()));
+                Ok(())
+            }
+            (EffectRowKind::Closed { effects }, EffectRowKind::Var(v)) => {
+                self.bind_effect_row_var(*v, EffectRow::closed(effects.clone()));
+                Ok(())
+            }
+
+            // Var + Open: bind var to the open row
+            (EffectRowKind::Var(v), EffectRowKind::Open { effects, rest }) => {
+                self.bind_effect_row_var(*v, EffectRow::open(effects.clone(), *rest));
+                Ok(())
+            }
+            (EffectRowKind::Open { effects, rest }, EffectRowKind::Var(v)) => {
+                self.bind_effect_row_var(*v, EffectRow::open(effects.clone(), *rest));
+                Ok(())
+            }
+
+            // Closed + Closed: effects must match exactly
+            (EffectRowKind::Closed { effects: e1 }, EffectRowKind::Closed { effects: e2 }) => {
+                self.unify_effect_sets(e1, e2, span)
+            }
+
+            // Open + Closed: bind row var to remaining effects (closed)
+            (EffectRowKind::Open { effects: e1, rest: rv1 },
+             EffectRowKind::Closed { effects: e2 }) => {
+                // First unify common effects
+                self.unify_common_effects(e1, e2, span)?;
+                // Find effects in e2 not in e1 — these go into rv1's binding
+                let only_in_2 = self.effects_only_in(e2, e1);
+                self.bind_effect_row_var(*rv1, EffectRow::closed(only_in_2));
+                Ok(())
+            }
+            (EffectRowKind::Closed { effects: e1 },
+             EffectRowKind::Open { effects: e2, rest: rv2 }) => {
+                self.unify_common_effects(e1, e2, span)?;
+                let only_in_1 = self.effects_only_in(e1, e2);
+                self.bind_effect_row_var(*rv2, EffectRow::closed(only_in_1));
+                Ok(())
+            }
+
+            // Open + Open: create fresh row var, bind both to extensions
+            (EffectRowKind::Open { effects: e1, rest: rv1 },
+             EffectRowKind::Open { effects: e2, rest: rv2 }) => {
+                if rv1.id == rv2.id {
+                    // Same row variable — effects must match exactly
+                    self.unify_effect_sets(e1, e2, span)
+                } else {
+                    // Different row variables — create extensions
+                    self.unify_common_effects(e1, e2, span)?;
+                    let fresh = self.fresh_effect_row_var();
+                    let only_in_1 = self.effects_only_in(e1, e2);
+                    let only_in_2 = self.effects_only_in(e2, e1);
+                    // rv1 = {only_in_2... | fresh}
+                    self.bind_effect_row_var(*rv1, EffectRow::open(only_in_2, fresh));
+                    // rv2 = {only_in_1... | fresh}
+                    self.bind_effect_row_var(*rv2, EffectRow::open(only_in_1, fresh));
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Unify the type arguments of common effects between two effect sets.
+    /// For each effect that appears in both sets, unify their type arguments.
+    fn unify_common_effects(
+        &mut self,
+        e1: &[EffectEntry],
+        e2: &[EffectEntry],
+        span: Span,
+    ) -> Result<(), TypeError> {
+        for entry1 in e1 {
+            for entry2 in e2 {
+                if entry1.same_effect(entry2) {
+                    // Same effect — unify type arguments
+                    if entry1.type_args.len() == entry2.type_args.len() {
+                        let mut i: usize = 0;
+                        while i < entry1.type_args.len() {
+                            self.unify(&entry1.type_args[i], &entry2.type_args[i], span)?;
+                            i = i + 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that two closed effect sets match exactly (same effects, same order not required).
+    fn unify_effect_sets(
+        &mut self,
+        e1: &[EffectEntry],
+        e2: &[EffectEntry],
+        span: Span,
+    ) -> Result<(), TypeError> {
+        if e1.len() != e2.len() {
+            return Err(TypeError {
+                kind: TypeErrorKind::EffectRowMismatch {
+                    expected: self.effect_names(e1),
+                    found: self.effect_names(e2),
+                },
+                span,
+            });
+        }
+        // Check each effect in e1 exists in e2
+        for entry1 in e1 {
+            let mut found = false;
+            for entry2 in e2 {
+                if entry1.same_effect(entry2) {
+                    found = true;
+                    // Unify type args
+                    if entry1.type_args.len() == entry2.type_args.len() {
+                        let mut i: usize = 0;
+                        while i < entry1.type_args.len() {
+                            self.unify(&entry1.type_args[i], &entry2.type_args[i], span)?;
+                            i = i + 1;
+                        }
+                    }
+                    break;
+                }
+            }
+            if !found {
+                return Err(TypeError {
+                    kind: TypeErrorKind::UnhandledEffect {
+                        effect: "unknown".to_string(),
+                    },
+                    span,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Convert effect entries to a list of name strings for error reporting.
+    /// Uses DefId as a stand-in since we don't have access to names at this level.
+    fn effect_names(&self, entries: &[EffectEntry]) -> [String] {
+        let mut names = [];
+        for e in entries {
+            names.push(format!("effect({}:{})", e.effect_id.module, e.effect_id.local));
+        }
+        names
+    }
+
+    /// Return effects that are in `source` but not in `exclude`.
+    fn effects_only_in(&self, source: &[EffectEntry], exclude: &[EffectEntry]) -> [EffectEntry] {
+        let mut result = [];
+        for s in source {
+            let mut found = false;
+            for e in exclude {
+                if s.same_effect(e) {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                result.push(s.clone());
+            }
+        }
+        result
     }
 
     /// Resolve a type by following substitution chains
@@ -585,16 +1032,17 @@ impl Unifier {
                 }
             }
 
-            // Function: same arity + unify params + unify return
-            (TypeKind::Fn { params: p1, ret: ret1, .. },
-             TypeKind::Fn { params: p2, ret: ret2, .. }) => {
+            // Function: same arity + unify params + unify return + unify effects
+            (TypeKind::Fn { params: p1, ret: ret1, effects: eff1 },
+             TypeKind::Fn { params: p2, ret: ret2, effects: eff2 }) => {
                 if p1.len() == p2.len() {
                     let mut i: usize = 0;
                     while i < p1.len() {
                         self.unify(&p1[i], &p2[i], span)?;
                         i = i + 1;
                     }
-                    self.unify(&ret1, &ret2, span)
+                    self.unify(&ret1, &ret2, span)?;
+                    self.unify_rows(&eff1, &eff2, span)
                 } else {
                     Err(TypeError {
                         kind: TypeErrorKind::Mismatch { expected: r1.clone(), found: r2.clone() },
@@ -696,7 +1144,7 @@ impl Unifier {
                     kind: TypeKind::Fn {
                         params: zonked_params,
                         ret: Box::new(self.zonk(&ret)),
-                        effects,
+                        effects: self.zonk_row(&effects),
                     },
                 }
             }
@@ -740,6 +1188,196 @@ impl Unifier {
                 Type { kind: TypeKind::Record { fields: zonked_fields, row_var } }
             }
             _ => ty.clone(),
+        }
+    }
+
+    /// Zonk an effect row: resolve all effect row variables and zonk type args
+    fn zonk_row(&self, row: &EffectRow) -> EffectRow {
+        let resolved = self.resolve_row(row);
+        match resolved.kind {
+            EffectRowKind::Pure => EffectRow::pure(),
+            EffectRowKind::Closed { effects } => {
+                let mut zonked = [];
+                for e in &effects {
+                    zonked.push(self.zonk_effect_entry(e));
+                }
+                EffectRow::closed(zonked)
+            }
+            EffectRowKind::Open { effects, rest } => {
+                let mut zonked = [];
+                for e in &effects {
+                    zonked.push(self.zonk_effect_entry(e));
+                }
+                EffectRow::open(zonked, rest)
+            }
+            EffectRowKind::Var(v) => {
+                // Unresolved row variable — leave as-is
+                EffectRow::var(v)
+            }
+        }
+    }
+
+    /// Zonk type arguments inside an effect entry
+    fn zonk_effect_entry(&self, entry: &EffectEntry) -> EffectEntry {
+        let mut zonked_args = [];
+        for a in &entry.type_args {
+            zonked_args.push(self.zonk(a));
+        }
+        EffectEntry {
+            effect_id: entry.effect_id.clone(),
+            type_args: zonked_args,
+        }
+    }
+
+    /// Instantiate a polymorphic type scheme with fresh type variables.
+    /// Replaces all bound type parameters with fresh inference variables.
+    fn instantiate(&mut self, scheme: &TypeScheme) -> Type {
+        if scheme.params.is_empty() {
+            return scheme.body.clone();
+        }
+        // Generate fresh variables for each bound parameter
+        let mut subst = [];
+        for param in &scheme.params {
+            subst.push((*param, self.fresh_var()));
+        }
+        self.apply_subst(&scheme.body, &subst)
+    }
+
+    /// Apply a substitution mapping (TyVarId -> Type) to a type
+    fn apply_subst(&self, ty: &Type, subst: &[(TyVarId, Type)]) -> Type {
+        match ty.kind {
+            TypeKind::Param(v) => {
+                for (from, to) in subst {
+                    if from.id == v.id {
+                        return to.clone();
+                    }
+                }
+                ty.clone()
+            }
+            TypeKind::Infer(_) => ty.clone(),
+            TypeKind::Fn { params, ret, effects } => {
+                let mut new_params = [];
+                for p in &params {
+                    new_params.push(self.apply_subst(p, subst));
+                }
+                Type {
+                    kind: TypeKind::Fn {
+                        params: new_params,
+                        ret: Box::new(self.apply_subst(&ret, subst)),
+                        effects: self.apply_subst_row(&effects, subst),
+                    },
+                }
+            }
+            TypeKind::Adt { def_id, args } => {
+                let mut new_args = [];
+                for a in &args {
+                    new_args.push(self.apply_subst(a, subst));
+                }
+                Type { kind: TypeKind::Adt { def_id, args: new_args } }
+            }
+            TypeKind::Tuple(elems) => {
+                let mut new_elems = [];
+                for e in &elems {
+                    new_elems.push(self.apply_subst(e, subst));
+                }
+                Type { kind: TypeKind::Tuple(new_elems) }
+            }
+            TypeKind::Array { element, size } => {
+                Type { kind: TypeKind::Array {
+                    element: Box::new(self.apply_subst(&element, subst)),
+                    size,
+                }}
+            }
+            TypeKind::Slice { element } => {
+                Type { kind: TypeKind::Slice {
+                    element: Box::new(self.apply_subst(&element, subst)),
+                }}
+            }
+            TypeKind::Ref { inner, mutable } => {
+                Type { kind: TypeKind::Ref {
+                    inner: Box::new(self.apply_subst(&inner, subst)),
+                    mutable,
+                }}
+            }
+            TypeKind::Ptr { inner, mutable } => {
+                Type { kind: TypeKind::Ptr {
+                    inner: Box::new(self.apply_subst(&inner, subst)),
+                    mutable,
+                }}
+            }
+            TypeKind::Forall { params, body } => {
+                // Don't substitute into the body for params that are shadowed
+                let mut filtered = [];
+                for (from, to) in subst {
+                    let mut shadowed = false;
+                    for p in &params {
+                        if p.id == from.id {
+                            shadowed = true;
+                            break;
+                        }
+                    }
+                    if !shadowed {
+                        filtered.push((*from, to.clone()));
+                    }
+                }
+                Type { kind: TypeKind::Forall {
+                    params,
+                    body: Box::new(self.apply_subst(&body, &filtered)),
+                }}
+            }
+            TypeKind::Ownership { qualifier, inner } => {
+                Type { kind: TypeKind::Ownership {
+                    qualifier,
+                    inner: Box::new(self.apply_subst(&inner, subst)),
+                }}
+            }
+            TypeKind::Record { fields, row_var } => {
+                let mut new_fields = [];
+                for f in &fields {
+                    new_fields.push(RecordField {
+                        name: f.name.clone(),
+                        ty: self.apply_subst(&f.ty, subst),
+                    });
+                }
+                Type { kind: TypeKind::Record { fields: new_fields, row_var } }
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    /// Apply a type substitution to an effect row (type args in effect entries)
+    fn apply_subst_row(&self, row: &EffectRow, subst: &[(TyVarId, Type)]) -> EffectRow {
+        match row.kind {
+            EffectRowKind::Pure => EffectRow::pure(),
+            EffectRowKind::Closed { effects } => {
+                let mut new_effects = [];
+                for e in &effects {
+                    let mut new_args = [];
+                    for a in &e.type_args {
+                        new_args.push(self.apply_subst(a, subst));
+                    }
+                    new_effects.push(EffectEntry {
+                        effect_id: e.effect_id.clone(),
+                        type_args: new_args,
+                    });
+                }
+                EffectRow::closed(new_effects)
+            }
+            EffectRowKind::Open { effects, rest } => {
+                let mut new_effects = [];
+                for e in &effects {
+                    let mut new_args = [];
+                    for a in &e.type_args {
+                        new_args.push(self.apply_subst(a, subst));
+                    }
+                    new_effects.push(EffectEntry {
+                        effect_id: e.effect_id.clone(),
+                        type_args: new_args,
+                    });
+                }
+                EffectRow::open(new_effects, rest)
+            }
+            EffectRowKind::Var(v) => EffectRow::var(v),
         }
     }
 }
@@ -970,6 +1608,510 @@ impl TypeContext {
             }
         }
         None
+    }
+
+    /// Look up a trait by DefId
+    fn get_trait(&self, def_id: &DefId) -> Option<&TraitInfo> {
+        for (id, info) in &self.trait_defs {
+            if id.module == def_id.module && id.local == def_id.local {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    /// Look up a handler by DefId
+    fn get_handler(&self, def_id: &DefId) -> Option<&HandlerInfo> {
+        for (id, info) in &self.handler_defs {
+            if id.module == def_id.module && id.local == def_id.local {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    /// Look up a type alias by DefId
+    fn get_type_alias(&self, def_id: &DefId) -> Option<&Type> {
+        for (id, ty) in &self.type_aliases {
+            if id.module == def_id.module && id.local == def_id.local {
+                return Some(ty);
+            }
+        }
+        None
+    }
+
+    /// Create a fresh effect row variable
+    fn fresh_effect_row_var(&mut self) -> EffectRowVarId {
+        self.unifier.fresh_effect_row_var()
+    }
+
+    /// Push a handler onto the effect handling stack.
+    /// This makes the effect available for `perform` expressions.
+    fn push_handler(&mut self, effect_id: DefId, type_args: [Type]) {
+        self.handled_effects.push((effect_id, type_args));
+    }
+
+    /// Pop a handler from the effect handling stack.
+    fn pop_handler(&mut self) {
+        self.handled_effects.pop();
+    }
+
+    /// Check if an effect is currently handled (on the handler stack).
+    fn is_effect_handled(&self, effect_id: &DefId) -> bool {
+        for (id, _) in &self.handled_effects {
+            if id.module == effect_id.module && id.local == effect_id.local {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the type arguments for a handled effect.
+    fn get_handled_type_args(&self, effect_id: &DefId) -> Option<&[Type]> {
+        for (id, args) in &self.handled_effects {
+            if id.module == effect_id.module && id.local == effect_id.local {
+                return Some(args);
+            }
+        }
+        None
+    }
+
+    /// Check that all effects required by a callee are satisfied at a call site.
+    ///
+    /// For each effect in the callee's effect row:
+    /// 1. Check if it's handled by an enclosing handler block
+    /// 2. Check if the current function declares the effect (propagation)
+    /// 3. Check if the current function's effect row is polymorphic (can absorb)
+    /// 4. Otherwise, report an unhandled effect error
+    fn check_effects_at_call(
+        &mut self,
+        callee_effects: &EffectRow,
+        caller_effects: &EffectRow,
+        span: Span,
+    ) {
+        let resolved = self.unifier.resolve_row(callee_effects);
+        let caller_resolved = self.unifier.resolve_row(caller_effects);
+
+        let effects = resolved.effects();
+        for effect_entry in effects {
+            let effect_id = &effect_entry.effect_id;
+
+            // 1. Check if handled by an enclosing handler
+            if self.is_effect_handled(effect_id) {
+                // Unify type arguments with the handler's type arguments
+                match self.get_handled_type_args(effect_id) {
+                    Some(handled_args) => {
+                        if handled_args.len() == effect_entry.type_args.len() {
+                            let mut i: usize = 0;
+                            while i < effect_entry.type_args.len() {
+                                let _ = self.unifier.unify(
+                                    &effect_entry.type_args[i],
+                                    &handled_args[i],
+                                    span,
+                                );
+                                i = i + 1;
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                continue;
+            }
+
+            // 2. Check if caller declares this effect
+            if caller_resolved.contains_effect(effect_id) {
+                continue;
+            }
+
+            // 3. Check if caller has a row variable (effect polymorphic)
+            if caller_resolved.is_polymorphic() {
+                continue;
+            }
+
+            // 4. Unhandled effect — error
+            let effect_name = match self.get_effect(effect_id) {
+                Some(info) => info.name.clone(),
+                None => "unknown".to_string(),
+            };
+            self.error(TypeErrorKind::UnhandledEffect { effect: effect_name }, span);
+        }
+    }
+
+    /// Check that a perform expression is valid:
+    /// The effect must be handled or declared in the current function's effects.
+    fn check_perform(
+        &mut self,
+        effect_id: &DefId,
+        operation_name: &str,
+        arg_types: &[Type],
+        span: Span,
+    ) -> Type {
+        // Look up the effect definition
+        match self.get_effect(effect_id) {
+            Some(effect_info) => {
+                // Find the operation in the effect definition
+                let mut found_op: Option<&OperationInfo> = None;
+                for op in &effect_info.operations {
+                    if op.name == operation_name {
+                        found_op = Some(op);
+                        break;
+                    }
+                }
+                match found_op {
+                    Some(op) => {
+                        // Check argument count
+                        if op.params.len() != arg_types.len() {
+                            self.error(TypeErrorKind::ArgCountMismatch {
+                                expected: op.params.len() as u32,
+                                found: arg_types.len() as u32,
+                            }, span);
+                            return self.error_type();
+                        }
+                        // Unify argument types with parameter types
+                        let mut i: usize = 0;
+                        while i < arg_types.len() {
+                            let _ = self.unifier.unify(&arg_types[i], &op.params[i].ty, span);
+                            i = i + 1;
+                        }
+                        // Check the effect is handled or declared
+                        if !self.is_effect_handled(effect_id) {
+                            // Check if current function declares this effect
+                            match self.current_fn {
+                                Some(fn_id) => {
+                                    match self.get_fn_sig(&fn_id) {
+                                        Some(sig) => {
+                                            if !sig.effects.contains_effect(effect_id)
+                                                && !sig.effects.is_polymorphic()
+                                            {
+                                                self.error(TypeErrorKind::UnhandledEffect {
+                                                    effect: effect_info.name.clone(),
+                                                }, span);
+                                            }
+                                        }
+                                        None => {
+                                            self.error(TypeErrorKind::UnhandledEffect {
+                                                effect: effect_info.name.clone(),
+                                            }, span);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.error(TypeErrorKind::UnhandledEffect {
+                                        effect: effect_info.name.clone(),
+                                    }, span);
+                                }
+                            }
+                        }
+                        // Return the operation's return type
+                        op.return_type.clone()
+                    }
+                    None => {
+                        self.error(TypeErrorKind::NoMatchingMethod {
+                            ty_name: effect_info.name.clone(),
+                            method: operation_name.to_string(),
+                        }, span);
+                        self.error_type()
+                    }
+                }
+            }
+            None => {
+                self.error(TypeErrorKind::NotAnEffect {
+                    name: "unknown".to_string(),
+                }, span);
+                self.error_type()
+            }
+        }
+    }
+
+    /// Infer the effect row for a function body.
+    /// Collects all effects performed directly or transitively within the body.
+    fn infer_fn_effect_row(&self, fn_def_id: &DefId) -> EffectRow {
+        // For now, use the declared effect row from the function signature.
+        // Full inference would require analyzing the function body and collecting
+        // all perform operations and transitive callee effects.
+        match self.get_fn_sig(fn_def_id) {
+            Some(sig) => sig.effects.clone(),
+            None => EffectRow::pure(),
+        }
+    }
+
+    /// Check that a handler block correctly handles all declared operations.
+    fn check_handler_completeness(
+        &mut self,
+        handler_info: &HandlerInfo,
+        span: Span,
+    ) {
+        let effect_id = &handler_info.effect_ref.trait_id;
+        match self.get_effect(effect_id) {
+            Some(effect_info) => {
+                // Check that every operation in the effect has a handler arm
+                for op in &effect_info.operations {
+                    let mut found = false;
+                    for handler_op in &handler_info.operations {
+                        if handler_op.name == op.name {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        self.error(TypeErrorKind::UnhandledEffect {
+                            effect: format!("{}.{}", effect_info.name, op.name),
+                        }, span);
+                    }
+                }
+            }
+            None => {
+                self.error(TypeErrorKind::NotAnEffect {
+                    name: "unknown".to_string(),
+                }, span);
+            }
+        }
+    }
+
+    /// Convert an AST type to an internal Type.
+    /// Resolves type names to DefIds via the resolver.
+    fn lower_ast_type(&mut self, ast_ty: &AstType) -> Type {
+        match ast_ty.kind {
+            AstTypeKind::Path(path) => {
+                // Single-segment path might be a primitive
+                if path.segments.len() == 1 && path.type_args.is_none() {
+                    let name = &path.segments[0];
+                    match resolve_primitive(name) {
+                        Some(prim) => return Type { kind: TypeKind::Primitive(prim) },
+                        None => {}
+                    }
+                    // Check for "()" unit type
+                    if name == "()" {
+                        return self.unit_type();
+                    }
+                    // Check for "!" never type
+                    if name == "!" {
+                        return Type { kind: TypeKind::Never };
+                    }
+                }
+                // Look up in resolver
+                let full_name = path.segments.join("::");
+                match self.resolver.lookup_type(&full_name) {
+                    Some(def_id) => {
+                        // Resolve type arguments
+                        let mut args = [];
+                        match path.type_args {
+                            Some(type_args) => {
+                                for arg in &type_args.args {
+                                    args.push(self.lower_ast_type(arg));
+                                }
+                            }
+                            None => {}
+                        }
+                        Type { kind: TypeKind::Adt { def_id, args } }
+                    }
+                    None => {
+                        // Also try single-segment lookup (common for local types)
+                        if path.segments.len() == 1 {
+                            match self.resolver.lookup_type(&path.segments[0]) {
+                                Some(def_id) => {
+                                    let mut args = [];
+                                    match path.type_args {
+                                        Some(type_args) => {
+                                            for arg in &type_args.args {
+                                                args.push(self.lower_ast_type(arg));
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                    Type { kind: TypeKind::Adt { def_id, args } }
+                                }
+                                None => {
+                                    self.error(TypeErrorKind::UnknownName {
+                                        name: full_name,
+                                    }, ast_ty.span);
+                                    self.error_type()
+                                }
+                            }
+                        } else {
+                            self.error(TypeErrorKind::UnknownName {
+                                name: full_name,
+                            }, ast_ty.span);
+                            self.error_type()
+                        }
+                    }
+                }
+            }
+            AstTypeKind::Tuple(elems) => {
+                let mut types = [];
+                for e in &elems {
+                    types.push(self.lower_ast_type(e));
+                }
+                Type { kind: TypeKind::Tuple(types) }
+            }
+            AstTypeKind::Array { element, size } => {
+                let elem_ty = self.lower_ast_type(&element);
+                Type { kind: TypeKind::Array { element: Box::new(elem_ty), size } }
+            }
+            AstTypeKind::Slice { element } => {
+                let elem_ty = self.lower_ast_type(&element);
+                Type { kind: TypeKind::Slice { element: Box::new(elem_ty) } }
+            }
+            AstTypeKind::Reference { inner, mutable } => {
+                let inner_ty = self.lower_ast_type(&inner);
+                Type { kind: TypeKind::Ref { inner: Box::new(inner_ty), mutable } }
+            }
+            AstTypeKind::Pointer { inner, mutable } => {
+                let inner_ty = self.lower_ast_type(&inner);
+                Type { kind: TypeKind::Ptr { inner: Box::new(inner_ty), mutable } }
+            }
+            AstTypeKind::Function { params, ret, effects } => {
+                let mut param_types = [];
+                for p in &params {
+                    param_types.push(self.lower_ast_type(p));
+                }
+                let ret_type = match ret {
+                    Some(r) => self.lower_ast_type(&r),
+                    None => self.unit_type(),
+                };
+                let effect_row = match effects {
+                    Some(eff) => self.lower_ast_effect_row(&eff),
+                    None => EffectRow::pure(),
+                };
+                Type { kind: TypeKind::Fn {
+                    params: param_types,
+                    ret: Box::new(ret_type),
+                    effects: effect_row,
+                }}
+            }
+            AstTypeKind::Never => Type { kind: TypeKind::Never },
+            AstTypeKind::Infer => self.fresh_var(),
+            _ => {
+                self.error(TypeErrorKind::UnsupportedFeature {
+                    feature: "complex type".to_string(),
+                }, ast_ty.span);
+                self.error_type()
+            }
+        }
+    }
+
+    /// Convert an AST effect row to an internal EffectRow.
+    fn lower_ast_effect_row(&mut self, effects: &[AstType]) -> EffectRow {
+        if effects.is_empty() {
+            return EffectRow::pure();
+        }
+        let mut entries = [];
+        let mut row_var: Option<EffectRowVarId> = None;
+        for eff in effects {
+            match eff.kind {
+                AstTypeKind::Path(path) => {
+                    // Check if this is a row variable (single lowercase identifier)
+                    if path.segments.len() == 1 {
+                        let name = &path.segments[0];
+                        let first_char = name.chars().next();
+                        match first_char {
+                            Some(c) => {
+                                if c.is_lowercase() && path.type_args.is_none() {
+                                    // This is a row variable (e.g., `e` in `{IO | e}`)
+                                    row_var = Some(self.fresh_effect_row_var());
+                                    continue;
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    // Otherwise it's an effect reference
+                    let full_name = path.segments.join("::");
+                    match self.resolver.lookup_type(&full_name) {
+                        Some(def_id) => {
+                            let mut type_args = [];
+                            match path.type_args {
+                                Some(args) => {
+                                    for arg in &args.args {
+                                        type_args.push(self.lower_ast_type(arg));
+                                    }
+                                }
+                                None => {}
+                            }
+                            entries.push(EffectEntry { effect_id: def_id, type_args });
+                        }
+                        None => {
+                            // Try single-segment lookup
+                            if path.segments.len() == 1 {
+                                match self.resolver.lookup_type(&path.segments[0]) {
+                                    Some(def_id) => {
+                                        let mut type_args = [];
+                                        match path.type_args {
+                                            Some(args) => {
+                                                for arg in &args.args {
+                                                    type_args.push(self.lower_ast_type(arg));
+                                                }
+                                            }
+                                            None => {}
+                                        }
+                                        entries.push(EffectEntry { effect_id: def_id, type_args });
+                                    }
+                                    None => {
+                                        self.error(TypeErrorKind::NotAnEffect {
+                                            name: full_name,
+                                        }, eff.span);
+                                    }
+                                }
+                            } else {
+                                self.error(TypeErrorKind::NotAnEffect {
+                                    name: full_name,
+                                }, eff.span);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    self.error(TypeErrorKind::UnsupportedFeature {
+                        feature: "complex effect type".to_string(),
+                    }, eff.span);
+                }
+            }
+        }
+        match row_var {
+            Some(rv) => EffectRow::open(entries, rv),
+            None => EffectRow::closed(entries),
+        }
+    }
+
+    /// Check effect row subsumption: callee_row must be a subset of caller_row.
+    /// This is used when checking that a function call's effects are permitted.
+    fn check_effect_subsumption(
+        &mut self,
+        callee_row: &EffectRow,
+        caller_row: &EffectRow,
+        span: Span,
+    ) -> Result<(), TypeError> {
+        let callee = self.unifier.resolve_row(callee_row);
+        let caller = self.unifier.resolve_row(caller_row);
+
+        // Pure callee has no effects — always OK
+        if callee.is_pure() {
+            return Ok(());
+        }
+
+        // If caller is polymorphic, it can absorb any effects
+        if caller.is_polymorphic() {
+            // Unify the callee effects into the caller's row variable
+            return self.unifier.unify_rows(&callee, &caller, span);
+        }
+
+        // Otherwise, each callee effect must appear in the caller or be handled
+        let callee_effects = callee.effects();
+        for entry in callee_effects {
+            if !caller.contains_effect(&entry.effect_id)
+                && !self.is_effect_handled(&entry.effect_id)
+            {
+                let effect_name = match self.get_effect(&entry.effect_id) {
+                    Some(info) => info.name.clone(),
+                    None => "unknown".to_string(),
+                };
+                return Err(TypeError {
+                    kind: TypeErrorKind::UnhandledEffect { effect: effect_name },
+                    span,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
