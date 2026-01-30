@@ -208,10 +208,44 @@ SELF-001-003 complete. Continue toward full self-hosting.
 
 ### 4.1 Blood Parser Verification [P2]
 
-- [ ] **SELF-VERIFY-001**: Verify `blood-std/std/compiler/parser.blood` manually
-  - Review 2992-line parser implementation for correctness
-  - Cannot run until self-hosting progresses
-  - Document any identified issues for fixing
+- [x] **SELF-VERIFY-001**: Verify `blood-std/std/compiler/parser.blood` manually ✅ COMPLETE
+  - Reviewed all 2992 lines of parser implementation for correctness
+  - Identified 51 issues across Critical/High/Medium severity levels
+  - **Bugs fixed**:
+    - Or-pattern nesting: `A | B | C` produced nested `Or(Or(A,B),C)` — fixed to flat `Or([A,B,C])`
+    - Multi-segment struct literals: `Foo::Bar { x: 1 }` was rejected (only single-segment worked)
+    - Missing struct update syntax: `Point { x: 1, ..base }` now parsed
+    - Module declaration at file top was a TODO stub — now implemented
+    - Break/continue/loop/while/for did not parse labels — now support `'label:` syntax
+    - Negative number patterns (`-42`) not parsed — now supported
+    - Float literal patterns not parsed — now supported
+    - Assignment operators (`=`, `+=`, `-=`, etc.) missing from Pratt parser — added at correct precedence
+    - Range operators (`..`, `..=`) missing from Pratt parser — added
+    - Assignments produce dedicated `Assign`/`AssignOp` AST nodes (not `Binary`)
+  - **Features added**:
+    - `Attribute` AST types with full `#[name(args)]` parsing
+    - `WhereClause`/`WherePredicate` types with `where T: Bound` parsing
+    - `BridgeDecl` for `extern "C" { ... }` FFI declarations
+    - `Visibility::PublicCrate`/`PublicSuper` variants with `pub(crate)`/`pub(super)` parsing
+    - `FnDecl` extended with `attributes`, `is_unsafe`, `where_clause` fields
+    - `ExprKind::Unsafe(Block)` for unsafe blocks
+    - `ExprKind::Region { name, body }` for region blocks
+    - `ExprKind::Default` for default value expressions
+    - `Declaration::Bridge`/`Declaration::Use` variants
+    - `BinOp::Assign`, `AddAssign`, etc. and `Range`/`RangeInclusive`
+    - Pipe operator `|>` reserved in precedence table
+    - Label-aware loop expressions: `'outer: loop { break 'outer; }`
+  - **Known remaining limitations** (to be addressed when self-hosting progresses):
+    - No lifetime parameters in references (`&'a T`) or generics
+    - No macro declaration/invocation parsing
+    - No `try-with` inline handler expression parsing
+    - No named function call arguments
+    - No turbofish syntax on method calls (`x.foo::<T>()`)
+    - No `forall<T>. Type` higher-rank types
+    - No `linear`/`affine` parameter qualifiers
+    - No record types with row polymorphism
+    - Character/string escape handling simplified
+    - Parser grew from 2992 → 3508 lines (516 lines of fixes and new features)
 - [ ] **SELF-VERIFY-002**: Create test suite in Blood for parser
   - Will execute once Blood can run Blood code
 
@@ -338,14 +372,14 @@ Identified in PERF-007 hot path profiling.
 
 | Category | P0 | P1 | P2 | P3 | Total | Done |
 |----------|----|----|----|----|-------|------|
-| Pointer Optimization | 0 | 0 | 3 | 1 | **4** | 7 |
-| Effect Optimizations | 0 | 0 | 6 | 1 | **7** | 6 |
+| Pointer Optimization | 0 | 3 | 3 | 1 | **7** | 7 |
+| Effect Optimizations | 0 | 0 | 6 | 1 | **7** | 7 |
 | Closure Optimization | 0 | 4 | 0 | 0 | **4** | 4 |
-| Self-Hosting | 0 | 7 | 2 | 0 | **9** | 0 |
+| Self-Hosting | 0 | 7 | 2 | 0 | **9** | 1 |
 | Formal Verification | 0 | 0 | 0 | 4 | **4** | 0 |
 | MIR Deduplication | 0 | 0 | 3 | 0 | **3** | 3 |
 | Performance Optimization | 0 | 0 | 1 | 0 | **1** | 1 |
-| **Total** | **0** | **11** | **15** | **6** | **32** | **21** |
+| **Total** | **0** | **14** | **15** | **6** | **35** | **23** |
 
 **Recently Completed (Section 1.2 - Persistent Tier Thin Pointers):**
 - PTR-IMPL-004: Verified persistent tier already uses 64-bit thin pointers
