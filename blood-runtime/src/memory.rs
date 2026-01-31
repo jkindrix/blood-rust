@@ -31,6 +31,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use parking_lot::RwLock;
 
+#[cfg(unix)]
+use nix::libc;
+
 /// Generation counter for detecting stale references.
 pub type Generation = u32;
 
@@ -627,12 +630,33 @@ impl RegionStatus {
 }
 
 /// A memory region for scoped allocation.
+///
+/// On Unix, uses `mmap` to reserve a contiguous virtual address range upfront
+/// (`PROT_NONE`), then commits pages on demand via `mprotect`. This ensures the
+/// base address never moves, so pointers into the region remain valid even as
+/// the region grows.
+///
+/// On non-Unix platforms, falls back to `Vec<u8>` with a documented pointer
+/// invalidation risk when the region grows beyond its current capacity.
 pub struct Region {
     /// Region ID.
     id: RegionId,
-    /// Memory buffer.
+    /// Base pointer — stable for the region's lifetime on Unix (mmap-backed).
+    #[cfg(unix)]
+    base: *mut u8,
+    /// Total reserved address space (bytes).
+    #[cfg(unix)]
+    reserved: usize,
+    /// Currently committed (usable) bytes.
+    #[cfg(unix)]
+    committed: AtomicUsize,
+
+    /// Fallback: Vec-backed buffer for non-Unix platforms.
+    /// WARNING: `Vec::resize` may reallocate, invalidating pointers.
+    #[cfg(not(unix))]
     buffer: Vec<u8>,
-    /// Current allocation offset.
+
+    /// Current allocation offset (bump pointer).
     offset: AtomicUsize,
     /// Maximum size.
     max_size: usize,
@@ -650,8 +674,81 @@ pub struct Region {
     status: AtomicU32,
 }
 
+/// Round `value` up to the nearest multiple of `align` (must be a power of 2).
+fn round_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
+}
+
+#[cfg(unix)]
+fn page_size() -> usize {
+    // SAFETY: sysconf(_SC_PAGESIZE) is always safe and returns a positive value.
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+}
+
 impl Region {
     /// Create a new region with the given initial and maximum sizes.
+    ///
+    /// On Unix, reserves `max_size` bytes of virtual address space and commits
+    /// `initial_size` bytes. On other platforms, allocates `initial_size` via `Vec`.
+    #[cfg(unix)]
+    pub fn new(initial_size: usize, max_size: usize) -> Self {
+        use std::ptr;
+
+        let ps = page_size();
+        let reserved = round_up(max_size.max(ps), ps);
+        let initial_commit = round_up(initial_size.max(1), ps);
+
+        // Reserve address space with PROT_NONE (no access, no physical pages).
+        let base = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                reserved,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            panic!(
+                "Region::new: mmap reserve failed for {} bytes: {}",
+                reserved,
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Commit initial pages (make readable/writable).
+        let commit_len = initial_commit.min(reserved);
+        if commit_len > 0 {
+            let ret = unsafe {
+                libc::mprotect(base, commit_len, libc::PROT_READ | libc::PROT_WRITE)
+            };
+            if ret != 0 {
+                // Clean up reservation before panicking.
+                unsafe { libc::munmap(base, reserved); }
+                panic!(
+                    "Region::new: mprotect commit failed for {} bytes: {}",
+                    commit_len,
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        Self {
+            id: next_region_id(),
+            base: base as *mut u8,
+            reserved,
+            committed: AtomicUsize::new(commit_len),
+            offset: AtomicUsize::new(0),
+            max_size,
+            closed: AtomicU32::new(0),
+            suspend_count: AtomicU32::new(0),
+            status: AtomicU32::new(RegionStatus::Active as u32),
+        }
+    }
+
+    /// Create a new region (non-Unix fallback).
+    #[cfg(not(unix))]
     pub fn new(initial_size: usize, max_size: usize) -> Self {
         Self {
             id: next_region_id(),
@@ -674,7 +771,14 @@ impl Region {
         self.offset.load(Ordering::Acquire)
     }
 
-    /// Get the current capacity.
+    /// Get the current capacity (committed bytes).
+    #[cfg(unix)]
+    pub fn capacity(&self) -> usize {
+        self.committed.load(Ordering::Acquire)
+    }
+
+    /// Get the current capacity (Vec length).
+    #[cfg(not(unix))]
     pub fn capacity(&self) -> usize {
         self.buffer.len()
     }
@@ -694,18 +798,67 @@ impl Region {
         self.closed.store(1, Ordering::Release);
     }
 
-    /// Allocate memory from the region.
+    /// Allocate memory from the region (Unix mmap-backed).
+    ///
+    /// Uses a bump allocator over a stable mmap range. Commits additional pages
+    /// on demand via `mprotect` — the base address never changes, so previously
+    /// returned pointers remain valid.
+    #[cfg(unix)]
+    pub fn allocate(&self, size: usize, align: usize) -> Option<*mut u8> {
+        if self.is_closed() {
+            return None;
+        }
+
+        let offset = self.offset.load(Ordering::Acquire);
+        let aligned_offset = round_up(offset, align);
+        let new_offset = aligned_offset + size;
+
+        if new_offset > self.reserved {
+            // Exceeds the total reserved address space.
+            return None;
+        }
+
+        let committed = self.committed.load(Ordering::Acquire);
+        if new_offset > committed {
+            // Need to commit more pages.
+            let ps = page_size();
+            // Double the committed size or fit the request, whichever is larger.
+            let desired = round_up((committed * 2).max(new_offset), ps).min(self.reserved);
+            let additional = desired - committed;
+            if additional > 0 {
+                let ret = unsafe {
+                    libc::mprotect(
+                        self.base.add(committed) as *mut libc::c_void,
+                        additional,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                    )
+                };
+                if ret != 0 {
+                    return None;
+                }
+                self.committed.store(desired, Ordering::Release);
+            }
+        }
+
+        self.offset.store(new_offset, Ordering::Release);
+        Some(unsafe { self.base.add(aligned_offset) })
+    }
+
+    /// Allocate memory from the region (non-Unix fallback).
+    ///
+    /// WARNING: `Vec::resize` may reallocate, invalidating previously returned
+    /// pointers. This is a known limitation on non-Unix platforms.
+    #[cfg(not(unix))]
     pub fn allocate(&mut self, size: usize, align: usize) -> Option<*mut u8> {
         if self.is_closed() {
             return None;
         }
 
         let offset = self.offset.load(Ordering::Acquire);
-        let aligned_offset = (offset + align - 1) & !(align - 1);
+        let aligned_offset = round_up(offset, align);
         let new_offset = aligned_offset + size;
 
         if new_offset > self.buffer.len() {
-            // Try to grow
             if new_offset > self.max_size {
                 return None;
             }
@@ -825,6 +978,22 @@ impl fmt::Debug for Region {
             .finish()
     }
 }
+
+#[cfg(unix)]
+impl Drop for Region {
+    fn drop(&mut self) {
+        if !self.base.is_null() {
+            unsafe {
+                libc::munmap(self.base as *mut libc::c_void, self.reserved);
+            }
+        }
+    }
+}
+
+// Safety: Region uses atomic operations for all mutable state. The mmap-backed
+// buffer is only freed on drop. Raw pointer access is bounded by the bump offset.
+unsafe impl Send for Region {}
+unsafe impl Sync for Region {}
 
 /// Generation snapshot for continuation capture.
 #[derive(Debug, Clone)]
@@ -2675,6 +2844,100 @@ mod tests {
         region.close();
         assert!(region.is_closed());
         assert!(region.allocate(100, 8).is_none());
+    }
+
+    /// Test that pointers remain valid after region growth.
+    ///
+    /// Creates a region with a small initial size (4 KB), allocates to fill it,
+    /// then allocates beyond the initial capacity to trigger growth. Verifies
+    /// that pointers from before the growth are still valid (readable/writable).
+    #[test]
+    fn test_region_pointer_stability_across_growth() {
+        // Small initial size to force growth; large max to allow it.
+        let initial_size = 4096;
+        let max_size = 1024 * 1024; // 1 MB
+        let region = Region::new(initial_size, max_size);
+
+        // Phase 1: fill the initial capacity with known data.
+        let mut pre_growth_ptrs: Vec<(*mut u8, u8)> = Vec::new();
+        let alloc_size = 256;
+        let mut tag: u8 = 1;
+
+        // Allocate enough to fill initial capacity.
+        let num_initial_allocs = initial_size / alloc_size;
+        for _ in 0..num_initial_allocs {
+            let ptr = region.allocate(alloc_size, 8)
+                .expect("allocation within initial capacity should succeed");
+            // Write a tag pattern to verify later.
+            unsafe {
+                std::ptr::write_bytes(ptr, tag, alloc_size);
+            }
+            pre_growth_ptrs.push((ptr, tag));
+            tag = tag.wrapping_add(1);
+            if tag == 0 { tag = 1; }
+        }
+
+        // Phase 2: allocate beyond initial capacity to trigger growth.
+        let post_growth_ptr = region.allocate(alloc_size, 8)
+            .expect("allocation triggering growth should succeed");
+        assert!(!post_growth_ptr.is_null());
+
+        // Allocate more to exercise larger growth.
+        for _ in 0..50 {
+            let ptr = region.allocate(alloc_size, 8)
+                .expect("post-growth allocation should succeed");
+            assert!(!ptr.is_null());
+        }
+
+        // Phase 3: verify all pre-growth pointers are still valid.
+        for (ptr, expected_tag) in &pre_growth_ptrs {
+            unsafe {
+                let slice = std::slice::from_raw_parts(*ptr, alloc_size);
+                for (i, byte) in slice.iter().enumerate() {
+                    assert_eq!(
+                        *byte, *expected_tag,
+                        "pre-growth pointer {:#?} byte {} was corrupted: expected {:#x}, got {:#x}",
+                        *ptr, i, *expected_tag, *byte
+                    );
+                }
+            }
+        }
+
+        // Verify total allocation reaches well past initial size.
+        assert!(
+            region.used() > initial_size,
+            "region should have grown past initial size: used={}, initial={}",
+            region.used(),
+            initial_size
+        );
+    }
+
+    /// Test that a region can allocate up to near its max size.
+    #[test]
+    fn test_region_grows_to_max_size() {
+        let max_size = 64 * 1024; // 64 KB
+        let region = Region::new(4096, max_size);
+
+        // Fill the region to near capacity.
+        let chunk = 1024;
+        let mut total = 0;
+        while total + chunk <= max_size {
+            match region.allocate(chunk, 8) {
+                Some(ptr) => {
+                    assert!(!ptr.is_null());
+                    // Use the actual bump offset which accounts for alignment padding.
+                    total = region.used();
+                }
+                None => break,
+            }
+        }
+
+        // Should have allocated a substantial portion of max_size.
+        assert!(
+            region.used() > max_size / 2,
+            "expected to fill at least half of max_size, got {}",
+            region.used()
+        );
     }
 
     #[test]

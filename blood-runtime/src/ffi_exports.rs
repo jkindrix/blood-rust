@@ -2057,7 +2057,21 @@ pub unsafe extern "C" fn blood_alloc_or_abort(
         blood_panic(c"blood_alloc_or_abort: null out_generation pointer".as_ptr());
     }
 
-    // Use 16-byte alignment for BloodPtr compatibility
+    // Check if a region is active — if so, allocate from it.
+    let region_id = current_active_region();
+    if region_id != 0 {
+        let align = 16.max(std::mem::align_of::<usize>());
+        let addr = blood_region_alloc(region_id, size, align);
+        if addr == 0 {
+            blood_panic(c"blood_alloc_or_abort: region allocation failed (out of region memory)".as_ptr());
+        }
+        // Region allocations use generation 0 — their lifetime is scoped to the
+        // region, so generational tracking is unnecessary.
+        *out_generation = 0;
+        return addr;
+    }
+
+    // No active region — use global allocator with generation tracking.
     let align = 16.max(std::mem::align_of::<usize>());
     let layout = match std::alloc::Layout::from_size_align(size, align) {
         Ok(l) => l,

@@ -31,7 +31,7 @@ pin-project-lite = "0.2"
 io-uring = { version = "0.6", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["event", "fs", "net"] }
+nix = { version = "0.28", features = ["event", "fs", "mman", "net"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.54", features = [
