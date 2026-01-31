@@ -3601,13 +3601,25 @@ pub extern "C" fn blood_continuation_resume(continuation: ContinuationHandle, va
         match k.try_resume::<i64, i64>(value) {
             Some(result) => result,
             None => {
-                eprintln!("BLOOD RUNTIME ERROR: Failed to resume continuation {}", continuation);
-                0
+                eprintln!(
+                    "BLOOD RUNTIME PANIC: Failed to resume continuation {} \
+                     (continuation callback returned None)",
+                    continuation
+                );
+                std::process::abort();
             }
         }
     } else {
-        eprintln!("BLOOD RUNTIME ERROR: Continuation {} not found or already consumed", continuation);
-        0
+        // Continuation not found: either the handle is invalid (never created)
+        // or the continuation was already consumed (single-shot used twice).
+        // Both are programmer errors that must not be silently ignored.
+        eprintln!(
+            "BLOOD RUNTIME PANIC: Continuation {} not found or already consumed. \
+             A continuation can only be resumed once (single-shot). \
+             For multi-shot semantics, use blood_continuation_clone before resuming.",
+            continuation
+        );
+        std::process::abort();
     }
 }
 

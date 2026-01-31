@@ -25,9 +25,10 @@ use super::CodegenContext;
 /// simple return-based implementation, while non-tail-resumptive handlers
 /// require continuation capture.
 ///
-/// Note: This function is preserved for future handler optimization work.
-/// Currently all handlers use a uniform compilation strategy.
-#[allow(dead_code)] // Infrastructure for tail-resumptive handler optimization
+/// This provides a more thorough analysis than `effects::handler::analyze_tail_resumptive`
+/// by tracking tail position through the entire expression tree, including nested
+/// blocks, if/match branches, and loops. Used during codegen to cross-check
+/// the lowering-computed `all_tail_resumptive` flag.
 pub fn is_handler_tail_resumptive(body: &hir::Body) -> bool {
     // Check if all resumes in the body are in tail position
     check_expr_tail_resumptive(&body.expr, true)
@@ -36,7 +37,6 @@ pub fn is_handler_tail_resumptive(body: &hir::Body) -> bool {
 /// Check if all resumes in an expression are in tail position.
 ///
 /// `in_tail_position` indicates whether the current expression is in tail position.
-#[allow(dead_code)] // Called by is_handler_tail_resumptive (infrastructure)
 fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool {
     use hir::ExprKind::*;
 
@@ -822,8 +822,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         handler_instance: &hir::Expr,
         result_ty: &Type,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
+        // Check if this handler is fully tail-resumptive (all operations resume in tail position).
+        // Tail-resumptive handlers can use a more efficient compilation strategy
+        // that avoids continuation capture overhead.
+        let handler_info = self.handler_defs.get(&handler_id);
+        let all_tail_resumptive = handler_info.map_or(false, |info| info.all_tail_resumptive);
+
         if std::env::var("BLOOD_DEBUG_EFFECTS").is_ok() {
-            eprintln!("DEBUG compile_handle CALLED: handler_id={:?}", handler_id);
+            eprintln!(
+                "DEBUG compile_handle CALLED: handler_id={:?}, all_tail_resumptive={}",
+                handler_id, all_tail_resumptive
+            );
         }
         // Phase 2.4: Evidence vector setup
         //

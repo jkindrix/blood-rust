@@ -342,9 +342,20 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     ) -> Result<(), Vec<Diagnostic>> {
         let span = body.span;
 
+        // Analyze tail-resumptive status using the thorough codegen-level analysis.
+        // This tracks tail position through the full expression tree.
+        let is_tail_resumptive = super::effects::is_handler_tail_resumptive(body);
+
         // Detect if this is a multi-shot handler (has multiple resume calls)
         let resume_count = crate::effects::handler::count_resumes_in_expr(&body.expr);
         let is_multishot = resume_count > 1;
+
+        if std::env::var("BLOOD_DEBUG_EFFECTS").is_ok() {
+            eprintln!(
+                "DEBUG compile_handler_op_body: tail_resumptive={}, resume_count={}, multishot={}",
+                is_tail_resumptive, resume_count, is_multishot
+            );
+        }
 
         // Create entry block
         let entry_block = self.context.append_basic_block(fn_value, "entry");
