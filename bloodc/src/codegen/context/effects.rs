@@ -822,7 +822,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         handler_instance: &hir::Expr,
         result_ty: &Type,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
-        eprintln!("DEBUG compile_handle CALLED: handler_id={:?}", handler_id);
+        if std::env::var("BLOOD_DEBUG_EFFECTS").is_ok() {
+            eprintln!("DEBUG compile_handle CALLED: handler_id={:?}", handler_id);
+        }
         // Phase 2.4: Evidence vector setup
         //
         // 1. Save current evidence vector
@@ -948,7 +950,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             .map(|info| info.name.as_str())
             .unwrap_or("unknown_handler");
         let return_fn_name = format!("{}_return", handler_name);
-        eprintln!("DEBUG compile_handle: handler_id={:?}, return_fn_name={}", handler_id, return_fn_name);
+        if std::env::var("BLOOD_DEBUG_EFFECTS").is_ok() {
+            eprintln!("DEBUG compile_handle: handler_id={:?}, return_fn_name={}", handler_id, return_fn_name);
+        }
         let return_fn = self.module.get_function(&return_fn_name).unwrap_or_else(|| {
             // Declare the return clause function as external
             // Signature: fn(result: i64, state_ptr: *void) -> i64
