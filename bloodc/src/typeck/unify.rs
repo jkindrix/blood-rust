@@ -217,7 +217,9 @@ impl Unifier {
             // Never type unifies with anything
             (TypeKind::Never, _) | (_, TypeKind::Never) => Ok(()),
 
-            // Error type unifies with anything (for error recovery)
+            // Error type unifies with anything to prevent cascading errors.
+            // INVARIANT: Type::error() must only be produced after a diagnostic has been
+            // emitted. Violation of this invariant causes silent error absorption.
             (TypeKind::Error, _) | (_, TypeKind::Error) => Ok(()),
 
             // Unit type equivalence: Primitive(Unit) == Tuple([])
