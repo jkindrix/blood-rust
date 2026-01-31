@@ -115,12 +115,33 @@ impl<'ctx, 'a> MirRvalueCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
             }
 
             Rvalue::Discriminant(place) => {
-                let ptr = self.compile_mir_place(place, body, escape_results)?;
+                let mut ptr = self.compile_mir_place(place, body, escape_results)?;
 
                 // Get the Blood type of the enum to determine its LLVM representation
                 // Must compute the type AFTER applying projections (e.g., Deref for &Option<T>)
                 let base_ty = &body.locals[place.local_unchecked().index() as usize].ty;
-                let place_ty = self.compute_place_type(base_ty, &place.projection);
+                let mut place_ty = self.compute_place_type(base_ty, &place.projection);
+
+                // If the place type is a reference/pointer, we need to load through it
+                // to get at the actual enum value. This happens when MIR emits
+                // Discriminant(_1) where _1: &Enum without a Deref projection.
+                while matches!(place_ty.kind(), TypeKind::Ref { .. } | TypeKind::Ptr { .. }) {
+                    let inner = match place_ty.kind() {
+                        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => inner.clone(),
+                        _ => unreachable!(),
+                    };
+                    // Load the pointer from the current location
+                    let loaded = self.builder.build_load(ptr, "deref_discr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), Span::dummy()
+                        )])?;
+                    if let Some(inst) = loaded.as_instruction_value() {
+                        let _ = inst.set_alignment(8); // pointer alignment
+                    }
+                    ptr = loaded.into_pointer_value();
+                    place_ty = inner;
+                }
+
                 let llvm_ty = self.lower_type(&place_ty);
 
                 // Check if the enum is represented as a struct (has payload) or bare i32 (tag-only)

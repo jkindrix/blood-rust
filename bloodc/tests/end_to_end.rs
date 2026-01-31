@@ -1119,3 +1119,11 @@ fn test_enum_nested_multi_field() {
     // wrapped in another enum. Verifies both fields are accessible (7 + 42 = 49).
     run_fixture_test_exit_code("enum_nested_multi_field", 49);
 }
+
+#[test]
+fn test_enum_ref_match() {
+    // Regression test for BUG-006: match on enum references was reading the
+    // pointer address as the discriminant instead of dereferencing first.
+    // Tests tag-only enums, payload enums, and &self method dispatch.
+    run_fixture_test("enum_ref_match");
+}
