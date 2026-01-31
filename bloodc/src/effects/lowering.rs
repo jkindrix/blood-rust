@@ -60,8 +60,9 @@
 
 use super::evidence::EvidenceVector;
 use super::handler::HandlerKind;
+use super::infer::InferenceResult;
 use super::row::EffectRow;
-use crate::hir::{DefId, Expr, ExprKind, Item, ItemKind, Type, Generics, EffectOp, HandlerOp};
+use crate::hir::{DefId, Expr, ExprKind, Item, ItemKind, Type, Generics, EffectOp, HandlerOp, Body};
 use crate::ice;
 use std::collections::HashMap;
 
@@ -424,156 +425,43 @@ impl EffectLowering {
     // Function Analysis
     // ========================================================================
 
-    /// Analyze a function's effect requirements.
-    pub fn analyze_function(&mut self, def_id: DefId, body: &Expr) -> EvidenceRequirement {
-        let effects = self.collect_effects(body);
-        // Detect row polymorphism: if the function calls parameters that might be closures,
-        // it could be propagating their effects. This is a heuristic - full detection
-        // would require tracking effect variables during type checking.
-        let polymorphic = self.detect_row_polymorphism(body);
+    /// Analyze a function's effect requirements by traversing its body.
+    ///
+    /// Delegates to `effects::infer::infer_effects` for a single-pass traversal
+    /// that collects both performed effects and detects row polymorphism, avoiding
+    /// the previous two-pass approach (separate effect collection + polymorphism
+    /// detection).
+    pub fn analyze_function(&mut self, def_id: DefId, body: &Body) -> EvidenceRequirement {
+        let row = super::infer::infer_effects(body);
+        let effects: Vec<DefId> = row.effects().map(|e| e.def_id).collect();
+        let polymorphic = row.is_polymorphic();
         let req = EvidenceRequirement {
             effects,
             polymorphic,
-            effect_row: None,
+            effect_row: Some(row),
         };
         self.evidence_reqs.insert(def_id, req.clone());
         req
     }
 
-    /// Detect if a function body might be row-polymorphic.
+    /// Analyze a function from pre-computed inference results.
     ///
-    /// A function is considered potentially row-polymorphic if it:
-    /// 1. Calls a local variable (which might be a closure parameter)
-    /// 2. Uses handle expressions (which capture and transform effects)
-    ///
-    /// This is a conservative heuristic - it may over-approximate polymorphism
-    /// but won't miss actual polymorphic functions.
-    fn detect_row_polymorphism(&self, expr: &Expr) -> bool {
-        self.detect_row_poly_recursive(expr)
-    }
-
-    fn detect_row_poly_recursive(&self, expr: &Expr) -> bool {
-        use crate::hir::Stmt;
-
-        match &expr.kind {
-            // Handle expressions are inherently effect-polymorphic
-            ExprKind::Handle { .. } => true,
-
-            // InlineHandle expressions are also inherently effect-polymorphic
-            ExprKind::InlineHandle { .. } => true,
-
-            // Check if callee is a local variable (could be a closure parameter)
-            ExprKind::Call { callee, args } => {
-                // If calling a local variable, it might be a closure with effects
-                let callee_is_local = matches!(&callee.kind, ExprKind::Local(_));
-                if callee_is_local {
-                    return true;
-                }
-                // Otherwise, recurse into subexpressions
-                self.detect_row_poly_recursive(callee)
-                    || args.iter().any(|a| self.detect_row_poly_recursive(a))
-            }
-
-            // Recurse into compound expressions
-            ExprKind::Block { stmts, expr: tail }
-            | ExprKind::Region { stmts, expr: tail, .. } => {
-                stmts.iter().any(|stmt| match stmt {
-                    Stmt::Expr(e) => self.detect_row_poly_recursive(e),
-                    Stmt::Let { init: Some(e), .. } => self.detect_row_poly_recursive(e),
-                    // Let without init and Item statements don't contain row-polymorphic calls
-                    Stmt::Let { init: None, .. } => false,
-                    Stmt::Item(_) => false,
-                }) || tail.as_ref().is_some_and(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::If { condition, then_branch, else_branch } => {
-                self.detect_row_poly_recursive(condition)
-                    || self.detect_row_poly_recursive(then_branch)
-                    || else_branch.as_ref().is_some_and(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::Match { scrutinee, arms } => {
-                self.detect_row_poly_recursive(scrutinee)
-                    || arms.iter().any(|a| self.detect_row_poly_recursive(&a.body))
-            }
-            ExprKind::Loop { body, .. } | ExprKind::While { body, .. } => {
-                self.detect_row_poly_recursive(body)
-            }
-            ExprKind::Binary { left, right, .. } => {
-                self.detect_row_poly_recursive(left) || self.detect_row_poly_recursive(right)
-            }
-            ExprKind::Unary { operand, .. } => self.detect_row_poly_recursive(operand),
-            ExprKind::Tuple(exprs) => exprs.iter().any(|e| self.detect_row_poly_recursive(e)),
-            ExprKind::Return(Some(e)) | ExprKind::Assign { value: e, .. } => {
-                self.detect_row_poly_recursive(e)
-            }
-            ExprKind::Perform { args, .. } => {
-                args.iter().any(|a| self.detect_row_poly_recursive(a))
-            }
-            ExprKind::Resume { value: Some(e) } => self.detect_row_poly_recursive(e),
-            ExprKind::Resume { value: None } => false,
-            ExprKind::Return(None) => false,
-            // Handle is already matched above (line 439) as inherently polymorphic
-            ExprKind::Break { value, .. } => {
-                value.as_ref().is_some_and(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::Field { base, .. } => self.detect_row_poly_recursive(base),
-            ExprKind::Index { base, index } => {
-                self.detect_row_poly_recursive(base) || self.detect_row_poly_recursive(index)
-            }
-            ExprKind::Array(exprs) => exprs.iter().any(|e| self.detect_row_poly_recursive(e)),
-            ExprKind::Repeat { value, .. } => self.detect_row_poly_recursive(value),
-            ExprKind::Struct { fields, base, .. } => {
-                fields.iter().any(|f| self.detect_row_poly_recursive(&f.value))
-                    || base.as_ref().is_some_and(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::Variant { fields, .. } => {
-                fields.iter().any(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::Record { fields } => {
-                fields.iter().any(|f| self.detect_row_poly_recursive(&f.value))
-            }
-            ExprKind::Cast { expr, .. } => self.detect_row_poly_recursive(expr),
-            ExprKind::Borrow { expr, .. } => self.detect_row_poly_recursive(expr),
-            ExprKind::Deref(expr) => self.detect_row_poly_recursive(expr),
-            ExprKind::AddrOf { expr, .. } => self.detect_row_poly_recursive(expr),
-            ExprKind::Let { init, .. } => self.detect_row_poly_recursive(init),
-            ExprKind::Unsafe(expr) => self.detect_row_poly_recursive(expr),
-            ExprKind::Range { start, end, .. } => {
-                start.as_ref().is_some_and(|e| self.detect_row_poly_recursive(e))
-                    || end.as_ref().is_some_and(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::MethodCall { receiver, args, .. } => {
-                self.detect_row_poly_recursive(receiver)
-                    || args.iter().any(|a| self.detect_row_poly_recursive(a))
-            }
-            ExprKind::Closure { .. } => {
-                // Closures have their own effect analysis
-                false
-            }
-            // Macro expansion expressions - check subexpressions
-            ExprKind::MacroExpansion { args, named_args, .. } => {
-                args.iter().any(|a| self.detect_row_poly_recursive(a))
-                    || named_args.iter().any(|(_, a)| self.detect_row_poly_recursive(a))
-            }
-            ExprKind::VecLiteral(exprs) => {
-                exprs.iter().any(|e| self.detect_row_poly_recursive(e))
-            }
-            ExprKind::VecRepeat { value, count } => {
-                self.detect_row_poly_recursive(value) || self.detect_row_poly_recursive(count)
-            }
-            ExprKind::Assert { condition, message } => {
-                self.detect_row_poly_recursive(condition)
-                    || message.as_ref().is_some_and(|m| self.detect_row_poly_recursive(m))
-            }
-            ExprKind::Dbg(inner) => self.detect_row_poly_recursive(inner),
-            ExprKind::SliceLen(inner) => self.detect_row_poly_recursive(inner),
-            ExprKind::VecLen(inner) => self.detect_row_poly_recursive(inner),
-            ExprKind::ArrayToSlice { expr, .. } => self.detect_row_poly_recursive(expr),
-
-            // Leaf expressions are not polymorphic
-            ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Def(_)
-            | ExprKind::MethodFamily { .. } | ExprKind::Continue { .. }
-            | ExprKind::Default | ExprKind::Error => false,
-        }
+    /// Use this when the caller has already run effect inference (e.g., from
+    /// `EffectInferencer::infer_effects` or `DetailedEffectInferencer`), to
+    /// avoid re-traversing the HIR.
+    pub fn analyze_function_from_inference(
+        &mut self,
+        def_id: DefId,
+        result: &InferenceResult,
+    ) -> EvidenceRequirement {
+        let effects: Vec<DefId> = result.effect_row.effects().map(|e| e.def_id).collect();
+        let req = EvidenceRequirement {
+            effects,
+            polymorphic: result.is_polymorphic,
+            effect_row: Some(result.effect_row.clone()),
+        };
+        self.evidence_reqs.insert(def_id, req.clone());
+        req
     }
 
     /// Analyze a function with its declared effect row.
@@ -594,214 +482,6 @@ impl EffectLowering {
         };
         self.evidence_reqs.insert(def_id, req.clone());
         req
-    }
-
-    /// Collect all effects used in an expression.
-    fn collect_effects(&self, expr: &Expr) -> Vec<DefId> {
-        let mut effects = Vec::new();
-        self.collect_effects_recursive(expr, &mut effects);
-        effects
-    }
-
-    /// Recursively collect effects from an expression.
-    ///
-    /// Note: Effect expression kinds (Perform, WithHandle) will be added
-    /// as part of the Phase 2 HIR extensions. For now, we traverse
-    /// known expression kinds.
-    fn collect_effects_recursive(&self, expr: &Expr, effects: &mut Vec<DefId>) {
-        use crate::hir::Stmt;
-
-        match &expr.kind {
-            ExprKind::Block { stmts, expr: tail }
-            | ExprKind::Region { stmts, expr: tail, .. } => {
-                for stmt in stmts {
-                    match stmt {
-                        Stmt::Expr(e) => self.collect_effects_recursive(e, effects),
-                        Stmt::Let { init: Some(e), .. } => {
-                            self.collect_effects_recursive(e, effects);
-                        }
-                        // Let without init and Item statements don't contain effect operations
-                        Stmt::Let { init: None, .. } => {}
-                        Stmt::Item(_) => {}
-                    }
-                }
-                if let Some(e) = tail {
-                    self.collect_effects_recursive(e, effects);
-                }
-            }
-            ExprKind::If { condition, then_branch, else_branch } => {
-                self.collect_effects_recursive(condition, effects);
-                self.collect_effects_recursive(then_branch, effects);
-                if let Some(else_br) = else_branch {
-                    self.collect_effects_recursive(else_br, effects);
-                }
-            }
-            ExprKind::Match { scrutinee, arms } => {
-                self.collect_effects_recursive(scrutinee, effects);
-                for arm in arms {
-                    self.collect_effects_recursive(&arm.body, effects);
-                }
-            }
-            ExprKind::Call { callee, args } => {
-                self.collect_effects_recursive(callee, effects);
-                for arg in args {
-                    self.collect_effects_recursive(arg, effects);
-                }
-            }
-            ExprKind::Binary { left, right, .. } => {
-                self.collect_effects_recursive(left, effects);
-                self.collect_effects_recursive(right, effects);
-            }
-            ExprKind::Unary { operand, .. } => {
-                self.collect_effects_recursive(operand, effects);
-            }
-            ExprKind::Tuple(exprs) => {
-                for e in exprs {
-                    self.collect_effects_recursive(e, effects);
-                }
-            }
-            ExprKind::Loop { body, .. } | ExprKind::While { body, .. } => {
-                self.collect_effects_recursive(body, effects);
-            }
-            ExprKind::Return(Some(e)) | ExprKind::Assign { value: e, .. } => {
-                self.collect_effects_recursive(e, effects);
-            }
-            // Effect operations - this is where we actually collect effects
-            ExprKind::Perform { effect_id, args, .. } => {
-                effects.push(*effect_id);
-                for arg in args {
-                    self.collect_effects_recursive(arg, effects);
-                }
-            }
-            ExprKind::Handle { body, handler_instance, .. } => {
-                self.collect_effects_recursive(body, effects);
-                self.collect_effects_recursive(handler_instance, effects);
-            }
-            ExprKind::InlineHandle { body, handlers } => {
-                self.collect_effects_recursive(body, effects);
-                for handler in handlers {
-                    self.collect_effects_recursive(&handler.body, effects);
-                }
-            }
-            ExprKind::Resume { value: Some(e) } => {
-                self.collect_effects_recursive(e, effects);
-            }
-            ExprKind::Resume { value: None } => {}
-            ExprKind::Return(None) => {}
-            ExprKind::Break { value, .. } => {
-                if let Some(e) = value {
-                    self.collect_effects_recursive(e, effects);
-                }
-            }
-            ExprKind::Field { base, .. } => {
-                self.collect_effects_recursive(base, effects);
-            }
-            ExprKind::Index { base, index } => {
-                self.collect_effects_recursive(base, effects);
-                self.collect_effects_recursive(index, effects);
-            }
-            ExprKind::Array(exprs) => {
-                for e in exprs {
-                    self.collect_effects_recursive(e, effects);
-                }
-            }
-            ExprKind::Repeat { value, .. } => {
-                self.collect_effects_recursive(value, effects);
-            }
-            ExprKind::Struct { fields, base, .. } => {
-                for field in fields {
-                    self.collect_effects_recursive(&field.value, effects);
-                }
-                if let Some(b) = base {
-                    self.collect_effects_recursive(b, effects);
-                }
-            }
-            ExprKind::Variant { fields, .. } => {
-                for field in fields {
-                    self.collect_effects_recursive(field, effects);
-                }
-            }
-            ExprKind::Record { fields } => {
-                for field in fields {
-                    self.collect_effects_recursive(&field.value, effects);
-                }
-            }
-            ExprKind::Cast { expr, .. } => {
-                self.collect_effects_recursive(expr, effects);
-            }
-            ExprKind::Borrow { expr, .. } => {
-                self.collect_effects_recursive(expr, effects);
-            }
-            ExprKind::Deref(expr) => {
-                self.collect_effects_recursive(expr, effects);
-            }
-            ExprKind::AddrOf { expr, .. } => {
-                self.collect_effects_recursive(expr, effects);
-            }
-            ExprKind::Let { init, .. } => {
-                self.collect_effects_recursive(init, effects);
-            }
-            ExprKind::Unsafe(expr) => {
-                self.collect_effects_recursive(expr, effects);
-            }
-            ExprKind::Range { start, end, .. } => {
-                if let Some(s) = start {
-                    self.collect_effects_recursive(s, effects);
-                }
-                if let Some(e) = end {
-                    self.collect_effects_recursive(e, effects);
-                }
-            }
-            ExprKind::MethodCall { receiver, args, .. } => {
-                self.collect_effects_recursive(receiver, effects);
-                for arg in args {
-                    self.collect_effects_recursive(arg, effects);
-                }
-            }
-            ExprKind::Closure { .. } => {
-                // Closures have their own effect analysis
-            }
-            // Macro expansion expressions - collect effects from subexpressions
-            ExprKind::MacroExpansion { args, named_args, .. } => {
-                for arg in args {
-                    self.collect_effects_recursive(arg, effects);
-                }
-                for (_, arg) in named_args {
-                    self.collect_effects_recursive(arg, effects);
-                }
-            }
-            ExprKind::VecLiteral(exprs) => {
-                for e in exprs {
-                    self.collect_effects_recursive(e, effects);
-                }
-            }
-            ExprKind::VecRepeat { value, count } => {
-                self.collect_effects_recursive(value, effects);
-                self.collect_effects_recursive(count, effects);
-            }
-            ExprKind::Assert { condition, message } => {
-                self.collect_effects_recursive(condition, effects);
-                if let Some(msg) = message {
-                    self.collect_effects_recursive(msg, effects);
-                }
-            }
-            ExprKind::Dbg(inner) => {
-                self.collect_effects_recursive(inner, effects);
-            }
-            ExprKind::SliceLen(inner) => {
-                self.collect_effects_recursive(inner, effects);
-            }
-            ExprKind::VecLen(inner) => {
-                self.collect_effects_recursive(inner, effects);
-            }
-            ExprKind::ArrayToSlice { expr, .. } => {
-                self.collect_effects_recursive(expr, effects);
-            }
-            // Leaf expressions don't contain effect operations
-            ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Def(_)
-            | ExprKind::MethodFamily { .. } | ExprKind::Continue { .. }
-            | ExprKind::Default | ExprKind::Error => {}
-        }
     }
 
     /// Lower a function item by adding evidence parameters.

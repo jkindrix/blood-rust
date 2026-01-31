@@ -41,15 +41,10 @@ use super::error::{TypeError, TypeErrorKind};
 use super::unify::Unifier;
 
 /// Row variable identifier for effect polymorphism.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RowVarId(pub u32);
-
-impl RowVarId {
-    /// Create a new row variable ID.
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-}
+///
+/// This is a type alias for `RowVar` from the effects module, consolidating
+/// the two identical representations into one canonical type.
+pub type RowVarId = RowVar;
 
 /// Effect row unifier extends the type unifier with row polymorphism.
 #[derive(Debug)]
@@ -173,14 +168,14 @@ impl EffectUnifier {
                     for e in &only_in_2 {
                         ext1.add_effect(e.clone());
                     }
-                    self.bind_row_var(RowVarId(rv1.0), ext1);
+                    self.bind_row_var(RowVar(rv1.0), ext1);
 
                     // rv2 = {only_in_1... | fresh}
                     let mut ext2 = EffectRow::polymorphic(fresh);
                     for e in &only_in_1 {
                         ext2.add_effect(e.clone());
                     }
-                    self.bind_row_var(RowVarId(rv2.0), ext2);
+                    self.bind_row_var(RowVar(rv2.0), ext2);
 
                     Ok(())
                 }
@@ -192,7 +187,7 @@ impl EffectUnifier {
                     // row1's extra effects must come from rv1
                     // rv1 must be empty (pure)
                     if only_in_1.is_empty() {
-                        self.bind_row_var(RowVarId(rv1.0), EffectRow::pure());
+                        self.bind_row_var(RowVar(rv1.0), EffectRow::pure());
                         Ok(())
                     } else {
                         // row2 is closed but doesn't have all of row1's effects
@@ -213,7 +208,7 @@ impl EffectUnifier {
                     }
 
                     if only_in_1.is_empty() {
-                        self.bind_row_var(RowVarId(rv1.0), ext);
+                        self.bind_row_var(RowVar(rv1.0), ext);
                         Ok(())
                     } else {
                         // Mismatch - row1 has effects not in closed row2
@@ -233,7 +228,7 @@ impl EffectUnifier {
                 // Symmetric case
                 if only_in_1.is_empty() {
                     if only_in_2.is_empty() {
-                        self.bind_row_var(RowVarId(rv2.0), EffectRow::pure());
+                        self.bind_row_var(RowVar(rv2.0), EffectRow::pure());
                         Ok(())
                     } else {
                         Err(Box::new(TypeError::new(
@@ -251,7 +246,7 @@ impl EffectUnifier {
                     }
 
                     if only_in_2.is_empty() {
-                        self.bind_row_var(RowVarId(rv2.0), ext);
+                        self.bind_row_var(RowVar(rv2.0), ext);
                         Ok(())
                     } else {
                         Err(Box::new(TypeError::new(
@@ -293,7 +288,7 @@ impl EffectUnifier {
         if let Some(rv) = row.row_var() {
             if row.effects().next().is_none() {
                 // Row is just a row variable - bind to pure
-                self.bind_row_var(RowVarId(rv.0), EffectRow::pure());
+                self.bind_row_var(RowVar(rv.0), EffectRow::pure());
                 return Ok(());
             }
         }
@@ -340,7 +335,7 @@ impl EffectUnifier {
     /// Resolve a row by following substitutions.
     pub fn resolve_row(&self, row: &EffectRow) -> EffectRow {
         if let Some(rv) = row.row_var() {
-            if let Some(substituted) = self.row_substitutions.get(&RowVarId(rv.0)) {
+            if let Some(substituted) = self.row_substitutions.get(&RowVar(rv.0)) {
                 // Merge concrete effects with substituted row
                 let mut result = self.resolve_row(substituted);
                 for effect in row.effects() {
