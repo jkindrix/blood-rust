@@ -18,7 +18,7 @@
 //!
 //! Then link compiled Blood programs with `-lblood_runtime`.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::{self, Write};
@@ -43,62 +43,68 @@ pub type ContinuationHandle = u64;
 // ============================================================================
 
 thread_local! {
-    static ACTIVE_REGION: Cell<u64> = Cell::new(0);
+    /// Stack of active region IDs for the current thread.
+    /// Supports nested region activation: inner regions push onto the stack,
+    /// deactivation pops and restores the previous region.
+    static ACTIVE_REGION_STACK: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+}
+
+/// Get the currently active region ID (top of stack), or 0 if none.
+fn current_active_region() -> u64 {
+    ACTIVE_REGION_STACK.with(|stack| {
+        stack.borrow().last().copied().unwrap_or(0)
+    })
 }
 
 /// Region-aware allocation. When a region is active, allocates from it.
 /// Otherwise falls back to the global allocator.
 unsafe fn runtime_alloc(layout: std::alloc::Layout) -> *mut u8 {
-    ACTIVE_REGION.with(|r| {
-        let region_id = r.get();
-        if region_id != 0 {
-            blood_region_alloc(region_id, layout.size(), layout.align()) as *mut u8
-        } else {
-            std::alloc::alloc(layout)
-        }
-    })
+    let region_id = current_active_region();
+    if region_id != 0 {
+        blood_region_alloc(region_id, layout.size(), layout.align()) as *mut u8
+    } else {
+        std::alloc::alloc(layout)
+    }
 }
 
 /// Region-aware deallocation. When a region is active, this is a no-op
 /// (the region will free everything on destroy). Otherwise uses global dealloc.
 unsafe fn runtime_dealloc(ptr: *mut u8, layout: std::alloc::Layout) {
-    ACTIVE_REGION.with(|r| {
-        if r.get() == 0 {
-            std::alloc::dealloc(ptr, layout);
-        }
-        // In a region: no-op. Memory freed when region is destroyed.
-    })
+    let region_id = current_active_region();
+    if region_id == 0 {
+        std::alloc::dealloc(ptr, layout);
+    }
+    // In a region: no-op. Memory freed when region is destroyed.
 }
 
 /// Region-aware reallocation. When a region is active, allocates new space
 /// from the region, copies data, returns new pointer (old space reclaimed
 /// when region is destroyed). Otherwise uses global realloc.
 unsafe fn runtime_realloc(ptr: *mut u8, old_layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
-    ACTIVE_REGION.with(|r| {
-        let region_id = r.get();
-        if region_id != 0 {
-            let new_ptr = blood_region_alloc(region_id, new_size, old_layout.align()) as *mut u8;
-            if !new_ptr.is_null() && !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(ptr, new_ptr, old_layout.size().min(new_size));
-            }
-            new_ptr
-        } else {
-            std::alloc::realloc(ptr, old_layout, new_size)
+    let region_id = current_active_region();
+    if region_id != 0 {
+        let new_ptr = blood_region_alloc(region_id, new_size, old_layout.align()) as *mut u8;
+        if !new_ptr.is_null() && !ptr.is_null() {
+            std::ptr::copy_nonoverlapping(ptr, new_ptr, old_layout.size().min(new_size));
         }
-    })
+        new_ptr
+    } else {
+        std::alloc::realloc(ptr, old_layout, new_size)
+    }
 }
 
-/// Activate a region for the current thread. All subsequent String/Vec/Box
-/// allocations will route to this region until deactivated.
+/// Activate a region for the current thread. Pushes onto the region stack,
+/// supporting nested regions.
 #[no_mangle]
 pub extern "C" fn blood_region_activate(region_id: u64) {
-    ACTIVE_REGION.with(|r| r.set(region_id));
+    ACTIVE_REGION_STACK.with(|stack| stack.borrow_mut().push(region_id));
 }
 
-/// Deactivate the current region, reverting to global allocation.
+/// Deactivate the current region, popping the stack to restore the previous
+/// region (or global allocation if the stack is empty).
 #[no_mangle]
 pub extern "C" fn blood_region_deactivate() {
-    ACTIVE_REGION.with(|r| r.set(0));
+    ACTIVE_REGION_STACK.with(|stack| { stack.borrow_mut().pop(); });
 }
 
 // ============================================================================
