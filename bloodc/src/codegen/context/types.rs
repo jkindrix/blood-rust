@@ -191,24 +191,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         self.context.struct_type(&[tag_type.into(), payload_type], false).into()
                     }
                 } else {
-                    // Unknown ADT - use pointer placeholder
-                    // DEBUG: This is likely a bug if we hit this for a known type
-                    if std::env::var("BLOOD_DEBUG_TYPE").is_ok() {
-                        eprintln!("[lower_type] ERROR: Unknown ADT!");
-                        eprintln!("  Full type: {:?}", ty);
-                        eprintln!("  def_id: {:?}", def_id);
-                        eprintln!("  type_args: {:?}", args);
-                        eprintln!("  Known struct_defs ({}):", self.struct_defs.len());
-                        for (id, fields) in &self.struct_defs {
-                            eprintln!("    {:?} -> {} fields", id, fields.len());
-                        }
-                        eprintln!("  Known enum_defs ({}):", self.enum_defs.len());
-                        for (id, variants) in &self.enum_defs {
-                            eprintln!("    {:?} -> {} variants", id, variants.len());
-                        }
-                        eprintln!("  RETURNING i8* (8 bytes) - THIS WILL CAUSE SIZE MISMATCH!");
-                    }
-                    self.context.i8_type().ptr_type(AddressSpace::default()).into()
+                    // Unknown ADT at codegen time is a compiler bug — panic with diagnostic info
+                    panic!(
+                        "ICE: Unknown ADT in codegen: def_id={:?}, type_args={:?}. \
+                         Known structs: {}, known enums: {}",
+                        def_id, args, self.struct_defs.len(), self.enum_defs.len()
+                    );
                 }
             }
             TypeKind::Fn { .. } => {
