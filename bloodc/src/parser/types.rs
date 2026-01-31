@@ -76,7 +76,7 @@ impl<'src> Parser<'src> {
                 // Parse optional lifetime
                 let lifetime = if self.check(TokenKind::Lifetime) {
                     self.advance();
-                    Some(self.spanned_symbol())
+                    Some(self.spanned_lifetime_symbol())
                 } else {
                     None
                 };
@@ -362,7 +362,7 @@ impl<'src> Parser<'src> {
             // Could be a type, lifetime, or const
             let arg = if self.check(TokenKind::Lifetime) {
                 self.advance();
-                TypeArg::Lifetime(self.spanned_symbol())
+                TypeArg::Lifetime(self.spanned_lifetime_symbol())
             } else {
                 TypeArg::Type(self.parse_type())
             };

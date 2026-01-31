@@ -459,19 +459,19 @@ impl<'src> Parser<'src> {
         // Check for lifetime parameter: 'a
         if self.check(TokenKind::Lifetime) {
             self.advance();
-            let name = self.spanned_symbol();
+            let name = self.spanned_lifetime_symbol();
 
             // Parse optional lifetime bounds: 'a: 'b + 'c
             let bounds = if self.try_consume(TokenKind::Colon) {
                 let mut bounds = Vec::new();
                 if self.check(TokenKind::Lifetime) {
                     self.advance();
-                    bounds.push(self.spanned_symbol());
+                    bounds.push(self.spanned_lifetime_symbol());
 
                     while self.try_consume(TokenKind::Plus) {
                         if self.check(TokenKind::Lifetime) {
                             self.advance();
-                            bounds.push(self.spanned_symbol());
+                            bounds.push(self.spanned_lifetime_symbol());
                         } else {
                             self.error_expected("lifetime");
                             break;
@@ -577,10 +577,10 @@ impl<'src> Parser<'src> {
         // Could be a lifetime bound or type bound
         if self.check(TokenKind::Lifetime) {
             self.advance();
-            let lifetime = self.spanned_symbol();
+            let lifetime = self.spanned_lifetime_symbol();
             self.expect(TokenKind::Colon);
             self.expect(TokenKind::Lifetime);
-            let bounds = self.spanned_symbol();
+            let bounds = self.spanned_lifetime_symbol();
 
             WherePredicate::Lifetime {
                 lifetime,

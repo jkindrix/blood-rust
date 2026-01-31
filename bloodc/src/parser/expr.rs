@@ -408,7 +408,7 @@ impl<'src> Parser<'src> {
                 self.advance();
                 let label = if self.check(TokenKind::Lifetime) {
                     self.advance();
-                    Some(self.spanned_symbol())
+                    Some(self.spanned_lifetime_symbol())
                 } else {
                     None
                 };
@@ -429,7 +429,7 @@ impl<'src> Parser<'src> {
                 self.advance();
                 let label = if self.check(TokenKind::Lifetime) {
                     self.advance();
-                    Some(self.spanned_symbol())
+                    Some(self.spanned_lifetime_symbol())
                 } else {
                     None
                 };
@@ -812,7 +812,7 @@ impl<'src> Parser<'src> {
             // Labeled loop expressions ('label: loop/while/for)
             TokenKind::Lifetime => {
                 self.advance();
-                let label = self.spanned_symbol();
+                let label = self.spanned_lifetime_symbol();
                 self.expect(TokenKind::Colon);
                 match self.current.kind {
                     TokenKind::Loop => self.parse_loop_expr_with_label(Some(label)),
@@ -867,7 +867,7 @@ impl<'src> Parser<'src> {
                 self.advance();
                 let name = if self.check(TokenKind::Lifetime) {
                     self.advance();
-                    Some(self.spanned_symbol())
+                    Some(self.spanned_lifetime_symbol())
                 } else {
                     None
                 };

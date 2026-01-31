@@ -337,6 +337,14 @@ impl<'src> Parser<'src> {
         Spanned::new(symbol, self.previous.span)
     }
 
+    /// Create a spanned symbol from a lifetime token, stripping the leading `'`.
+    fn spanned_lifetime_symbol(&mut self) -> Spanned<Symbol> {
+        let text = self.text(&self.previous.span);
+        let text = text.strip_prefix('\'').unwrap_or(text);
+        let symbol = self.intern(text);
+        Spanned::new(symbol, self.previous.span)
+    }
+
     // ============================================================
     // Type argument `>` handling (for `>>` disambiguation)
     // ============================================================
