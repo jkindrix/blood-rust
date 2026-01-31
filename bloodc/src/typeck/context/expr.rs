@@ -1005,6 +1005,7 @@ impl<'a> TypeContext<'a> {
                 effect_id,
                 op_index,
                 args: hir_args,
+                type_args,
             },
             return_ty,
             span,

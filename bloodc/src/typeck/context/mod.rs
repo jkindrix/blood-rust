@@ -1101,11 +1101,12 @@ impl<'a> TypeContext<'a> {
             hir::ExprKind::Closure { body_id, captures } => {
                 hir::ExprKind::Closure { body_id, captures }
             }
-            hir::ExprKind::Perform { effect_id, op_index, args } => {
+            hir::ExprKind::Perform { effect_id, op_index, args, type_args } => {
                 hir::ExprKind::Perform {
                     effect_id,
                     op_index,
                     args: args.into_iter().map(|a| Self::zonk_expr_with_unifier(unifier, a)).collect(),
+                    type_args,
                 }
             }
             hir::ExprKind::Resume { value } => {

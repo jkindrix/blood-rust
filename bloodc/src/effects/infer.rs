@@ -659,6 +659,7 @@ mod tests {
             effect_id,
             op_index: 0,
             args: vec![],
+            type_args: vec![],
         });
         let body = make_body(expr);
 
@@ -680,12 +681,14 @@ mod tests {
                     effect_id: effect1,
                     op_index: 0,
                     args: vec![],
+                    type_args: vec![],
                 })),
             ],
             expr: Some(Box::new(make_expr(ExprKind::Perform {
                 effect_id: effect2,
                 op_index: 0,
                 args: vec![],
+                type_args: vec![],
             }))),
         });
         let body = make_body(block);
@@ -707,6 +710,7 @@ mod tests {
             effect_id,
             op_index: 0,
             args: vec![],
+            type_args: vec![],
         });
 
         let handler_instance = make_expr(ExprKind::Struct {
@@ -760,6 +764,7 @@ mod tests {
                 effect_id,
                 op_index: 0,
                 args: vec![],
+                type_args: vec![],
             })),
             else_branch: Some(Box::new(make_expr(ExprKind::Literal(LiteralValue::Int(0))))),
         });

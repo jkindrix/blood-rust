@@ -1126,6 +1126,7 @@ mod tests {
                 effect_id: DefId::new(0),
                 op_index: 0,
                 args: vec![],
+                type_args: vec![],
             },
             Type::unit(),
         );
@@ -1153,6 +1154,7 @@ mod tests {
                 effect_id: DefId::new(0),
                 op_index: 0,
                 args: vec![],
+                type_args: vec![],
             },
             Type::unit(),
         );
@@ -1198,6 +1200,7 @@ mod tests {
                 effect_id: DefId::new(0),
                 op_index: 0,
                 args: vec![],
+                type_args: vec![],
             },
             Type::unit(),
         );
@@ -1576,6 +1579,7 @@ mod tests {
                 effect_id: DefId::new(0),
                 op_index: 0,
                 args: vec![],
+                type_args: vec![],
             },
             Type::unit(),
         );

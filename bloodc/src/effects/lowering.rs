@@ -948,6 +948,7 @@ impl EffectLowering {
                     effect_id,
                     op_index,
                     args,
+                    type_args: vec![],
                 },
                 ty: return_ty,
                 span: crate::span::Span::dummy(),

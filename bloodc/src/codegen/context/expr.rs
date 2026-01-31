@@ -140,7 +140,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Compile type cast
                 self.compile_cast(inner, target_ty)
             }
-            Perform { effect_id, op_index, args } => {
+            Perform { effect_id, op_index, args, type_args: _ } => {
                 // Effect operation: perform Effect.op(args)
                 // After evidence translation, this calls through the evidence vector.
                 // For now, we emit a placeholder that will be filled in during

@@ -292,6 +292,8 @@ pub enum ExprKind {
         op_index: u32,
         /// Arguments to the operation.
         args: Vec<Expr>,
+        /// Type arguments for generic effects.
+        type_args: Vec<Type>,
     },
 
     /// Resume continuation in a handler: `resume(value)`

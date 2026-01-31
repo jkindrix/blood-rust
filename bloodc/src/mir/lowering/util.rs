@@ -482,7 +482,7 @@ pub trait ExprLowering {
                 self.lower_expr(inner)
             }
 
-            ExprKind::Perform { effect_id, op_index, args } => {
+            ExprKind::Perform { effect_id, op_index, args, type_args: _ } => {
                 self.lower_perform(*effect_id, *op_index, args, &expr.ty, expr.span)
             }
 

@@ -315,11 +315,12 @@ impl<'a> MacroExpander<'a> {
                 }
             }
 
-            ExprKind::Perform { effect_id, op_index, args } => {
+            ExprKind::Perform { effect_id, op_index, args, type_args } => {
                 ExprKind::Perform {
                     effect_id,
                     op_index,
                     args: args.into_iter().map(|a| self.expand_expr(a)).collect(),
+                    type_args,
                 }
             }
 

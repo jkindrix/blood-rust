@@ -1149,7 +1149,7 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
             hasher.update_u8(0x1E);
             hash_expr(inner, items, hasher);
         }
-        hir::ExprKind::Perform { effect_id, op_index, args } => {
+        hir::ExprKind::Perform { effect_id, op_index, args, type_args: _ } => {
             hasher.update_u8(0x1F);
             // Hash effect name instead of index
             if let Some(item) = items.get(effect_id) {
