@@ -160,6 +160,16 @@ impl<'a> MacroExpander<'a> {
                 }
             }
 
+            ExprKind::Region { name, stmts, expr: tail } => {
+                let expanded_stmts = stmts.into_iter().map(|s| self.expand_stmt(s)).collect();
+                let expanded_tail = tail.map(|e| Box::new(self.expand_expr(*e)));
+                ExprKind::Region {
+                    name,
+                    stmts: expanded_stmts,
+                    expr: expanded_tail,
+                }
+            }
+
             ExprKind::If { condition, then_branch, else_branch } => {
                 ExprKind::If {
                     condition: Box::new(self.expand_expr(*condition)),

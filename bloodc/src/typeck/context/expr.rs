@@ -183,9 +183,24 @@ impl<'a> TypeContext<'a> {
             ast::ExprKind::Unsafe(block) => {
                 self.infer_unsafe(block, expr.span)
             }
-            ast::ExprKind::Region { body, .. } => {
+            ast::ExprKind::Region { name, body } => {
                 let expected = self.unifier.fresh_var();
-                self.check_block(body, &expected)
+                let block_expr = self.check_block(body, &expected)?;
+                // Unwrap the Block produced by check_block and re-wrap as Region
+                let (stmts, tail) = match block_expr.kind {
+                    hir::ExprKind::Block { stmts, expr: tail } => (stmts, tail),
+                    _ => unreachable!("check_block always produces ExprKind::Block"),
+                };
+                let name_sym = name.as_ref().map(|n| n.node);
+                Ok(hir::Expr {
+                    kind: hir::ExprKind::Region {
+                        name: name_sym,
+                        stmts,
+                        expr: tail,
+                    },
+                    ty: block_expr.ty,
+                    span: expr.span,
+                })
             }
             ast::ExprKind::Range { start, end, inclusive } => {
                 self.infer_range(start.as_deref(), end.as_deref(), *inclusive, expr.span)

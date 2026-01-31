@@ -44,8 +44,9 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
         // Resume in tail position is fine; resume not in tail position means non-tail-resumptive
         Resume { .. } => in_tail_position,
 
-        // Block: only the final expression is in tail position
-        Block { stmts, expr: final_expr } => {
+        // Block/Region: only the final expression is in tail position
+        Block { stmts, expr: final_expr }
+        | Region { stmts, expr: final_expr, .. } => {
             // Check statements - they are NOT in tail position
             for stmt in stmts {
                 match stmt {

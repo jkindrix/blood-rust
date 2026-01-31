@@ -475,7 +475,8 @@ impl EffectLowering {
             }
 
             // Recurse into compound expressions
-            ExprKind::Block { stmts, expr: tail } => {
+            ExprKind::Block { stmts, expr: tail }
+            | ExprKind::Region { stmts, expr: tail, .. } => {
                 stmts.iter().any(|stmt| match stmt {
                     Stmt::Expr(e) => self.detect_row_poly_recursive(e),
                     Stmt::Let { init: Some(e), .. } => self.detect_row_poly_recursive(e),
@@ -611,7 +612,8 @@ impl EffectLowering {
         use crate::hir::Stmt;
 
         match &expr.kind {
-            ExprKind::Block { stmts, expr: tail } => {
+            ExprKind::Block { stmts, expr: tail }
+            | ExprKind::Region { stmts, expr: tail, .. } => {
                 for stmt in stmts {
                     match stmt {
                         Stmt::Expr(e) => self.collect_effects_recursive(e, effects),

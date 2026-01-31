@@ -229,7 +229,8 @@ impl HandlerLintContext {
                 self.check_handler_nesting(condition, depth);
                 self.check_handler_nesting(body, depth);
             }
-            ExprKind::Block { stmts, expr } => {
+            ExprKind::Block { stmts, expr }
+            | ExprKind::Region { stmts, expr, .. } => {
                 for stmt in stmts {
                     self.check_statement_handler_nesting(stmt, depth);
                 }

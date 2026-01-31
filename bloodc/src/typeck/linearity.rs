@@ -150,8 +150,9 @@ impl LinearityChecker {
                 self.record_use(*local_id, expr.span);
             }
 
-            // Block - check all statements and final expression
-            hir::ExprKind::Block { stmts, expr: tail } => {
+            // Block/Region - check all statements and final expression
+            hir::ExprKind::Block { stmts, expr: tail }
+            | hir::ExprKind::Region { stmts, expr: tail, .. } => {
                 for stmt in stmts {
                     self.check_stmt(stmt);
                 }

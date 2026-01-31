@@ -215,7 +215,8 @@ fn contains_nested_handle(expr: &Expr) -> bool {
         ExprKind::Closure { .. } => true,
 
         // Recursively check sub-expressions
-        ExprKind::Block { stmts, expr } => {
+        ExprKind::Block { stmts, expr }
+        | ExprKind::Region { stmts, expr, .. } => {
             for stmt in stmts {
                 if contains_nested_handle_stmt(stmt) {
                     return true;
@@ -640,7 +641,8 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
         }
 
         // Recursively check all sub-expressions
-        ExprKind::Block { stmts, expr } => {
+        ExprKind::Block { stmts, expr }
+        | ExprKind::Region { stmts, expr, .. } => {
             for stmt in stmts {
                 if contains_escaping_control_flow_stmt(stmt) {
                     return true;

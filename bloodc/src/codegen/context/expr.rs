@@ -189,6 +189,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // FFI calls).
                 self.compile_expr(inner)
             }
+            Region { stmts, expr: tail_expr, .. } => {
+                // Region blocks are handled by the MIR path. If reached here
+                // (non-MIR codegen), compile as a plain block.
+                self.compile_block(stmts, tail_expr.as_deref())
+            }
             _ => {
                 self.errors.push(Diagnostic::error(
                     format!("Unsupported expression kind: {:?}", std::mem::discriminant(&expr.kind)),

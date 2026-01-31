@@ -235,7 +235,8 @@ impl<'hir, 'ctx> ClosureLowering<'hir, 'ctx> {
                 self.lower_call(callee, args, &expr.ty, expr.span)
             }
 
-            ExprKind::Block { stmts, expr: tail } => {
+            ExprKind::Block { stmts, expr: tail }
+            | ExprKind::Region { stmts, expr: tail, .. } => {
                 self.lower_block(stmts, tail.as_deref(), &expr.ty, expr.span)
             }
 

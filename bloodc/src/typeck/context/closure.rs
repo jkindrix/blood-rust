@@ -295,7 +295,8 @@ impl<'a> TypeContext<'a> {
                     self.collect_captures(else_expr, is_move, captures, seen);
                 }
             }
-            hir::ExprKind::Block { stmts, expr: tail } => {
+            hir::ExprKind::Block { stmts, expr: tail }
+            | hir::ExprKind::Region { stmts, expr: tail, .. } => {
                 for stmt in stmts {
                     match stmt {
                         hir::Stmt::Let { init: Some(init), .. } => {

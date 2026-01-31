@@ -15,7 +15,7 @@ pub fn has_side_effects(expr: &Expr) -> bool {
         ExprKind::Unary { operand, .. } => has_side_effects(operand),
         ExprKind::Call { .. } => true,
         ExprKind::Assign { .. } => true,
-        ExprKind::Block { stmts, expr } => {
+        ExprKind::Block { stmts, expr } | ExprKind::Region { stmts, expr, .. } => {
             !stmts.is_empty() || expr.as_ref().map(|e| has_side_effects(e)).unwrap_or(false)
         }
         _ => true,

@@ -411,6 +411,19 @@ pub enum ExprKind {
         array_len: u64,
     },
 
+    /// Region block: `region { body }` or `region 'name { body }`
+    ///
+    /// Creates a memory region, activates it for the body, then destroys it.
+    /// All String/Vec/Box allocations within the body route to the region.
+    Region {
+        /// Optional region label (for future named-region support).
+        name: Option<crate::ast::Symbol>,
+        /// The block body executed within the region scope.
+        stmts: Vec<Stmt>,
+        /// Optional tail expression (the block's value).
+        expr: Option<Box<Expr>>,
+    },
+
     /// Error placeholder (for error recovery).
     Error,
 }

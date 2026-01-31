@@ -233,7 +233,8 @@ fn count_resumes(expr: &Expr) -> usize {
         ExprKind::Resume { value } => {
             1 + value.as_ref().map(|v| count_resumes(v)).unwrap_or(0)
         }
-        ExprKind::Block { stmts, expr: tail } => {
+        ExprKind::Block { stmts, expr: tail }
+        | ExprKind::Region { stmts, expr: tail, .. } => {
             let stmt_count: usize = stmts.iter().map(|s| match s {
                 crate::hir::Stmt::Expr(e) => count_resumes(e),
                 crate::hir::Stmt::Let { init: Some(e), .. } => count_resumes(e),

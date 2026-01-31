@@ -994,6 +994,11 @@ impl<'a> TypeContext<'a> {
                 let zonked_expr = expr.map(|e| Box::new(Self::zonk_expr_with_unifier(unifier, *e)));
                 hir::ExprKind::Block { stmts: zonked_stmts, expr: zonked_expr }
             }
+            hir::ExprKind::Region { name, stmts, expr } => {
+                let zonked_stmts = stmts.into_iter().map(|s| Self::zonk_stmt_with_unifier(unifier, s)).collect();
+                let zonked_expr = expr.map(|e| Box::new(Self::zonk_expr_with_unifier(unifier, *e)));
+                hir::ExprKind::Region { name, stmts: zonked_stmts, expr: zonked_expr }
+            }
             hir::ExprKind::If { condition, then_branch, else_branch } => {
                 hir::ExprKind::If {
                     condition: Box::new(Self::zonk_expr_with_unifier(unifier, *condition)),

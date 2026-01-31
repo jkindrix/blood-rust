@@ -185,8 +185,9 @@ impl EffectInferencer {
                 }
             }
 
-            // Block expressions
-            ExprKind::Block { stmts, expr: tail } => {
+            // Block/Region expressions
+            ExprKind::Block { stmts, expr: tail }
+            | ExprKind::Region { stmts, expr: tail, .. } => {
                 for stmt in stmts {
                     self.infer_stmt(stmt, ctx);
                 }

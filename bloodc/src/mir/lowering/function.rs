@@ -83,7 +83,8 @@ pub fn collect_local_refs(expr: &Expr, refs: &mut Vec<CaptureCandidate>, in_muta
             }
         }
 
-        ExprKind::Block { stmts, expr: tail } => {
+        ExprKind::Block { stmts, expr: tail }
+        | ExprKind::Region { stmts, expr: tail, .. } => {
             for stmt in stmts {
                 match stmt {
                     hir::Stmt::Let { init, .. } => {
@@ -407,6 +408,10 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
 
             ExprKind::Block { stmts, expr: tail } => {
                 self.lower_block(stmts, tail.as_deref(), &expr.ty, expr.span)
+            }
+
+            ExprKind::Region { stmts, expr: tail, .. } => {
+                self.lower_region(stmts, tail.as_deref(), &expr.ty, expr.span)
             }
 
             ExprKind::If { condition, then_branch, else_branch } => {
@@ -1363,6 +1368,158 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
     // NOTE: Pattern testing and binding methods (test_pattern_cf, bind_pattern_cf, etc.)
     // are now provided by the ExprLowering trait in util.rs. FunctionLowering implements
     // that trait and uses its default implementations for pattern matching.
+
+    /// Look up a builtin function DefId by its runtime name.
+    fn lookup_builtin(&self, runtime_name: &str) -> Option<DefId> {
+        self.hir.builtin_fns.iter()
+            .find(|(_, name)| name.as_str() == runtime_name)
+            .map(|(def_id, _)| *def_id)
+    }
+
+    /// Create an Operand referencing a builtin function.
+    fn builtin_fn_operand(&self, runtime_name: &str, ty: Type) -> Result<Operand, Vec<Diagnostic>> {
+        let def_id = self.lookup_builtin(runtime_name)
+            .ok_or_else(|| vec![Diagnostic::error(
+                format!("builtin function '{}' not found", runtime_name),
+                Span::dummy(),
+            )])?;
+        Ok(Operand::Constant(Constant::new(ty, ConstantKind::FnDef(def_id))))
+    }
+
+    /// Emit a call to a builtin function and return the result operand.
+    ///
+    /// Creates a Call terminator targeting the named builtin function, stores
+    /// the result in a new temporary, and switches to a fresh continuation block.
+    fn emit_builtin_call(
+        &mut self,
+        runtime_name: &str,
+        args: Vec<Operand>,
+        result_ty: Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let func = self.builtin_fn_operand(runtime_name, Type::unit())?;
+        let dest = self.new_temp(result_ty, span);
+        let dest_place = Place::local(dest);
+        let next_block = self.builder.new_block();
+
+        self.terminate(TerminatorKind::Call {
+            func,
+            args,
+            destination: dest_place.clone(),
+            target: Some(next_block),
+            unwind: None,
+        });
+
+        self.builder.switch_to(next_block);
+        self.current_block = next_block;
+
+        Ok(Operand::Copy(dest_place))
+    }
+
+    /// Lower a region block expression.
+    ///
+    /// Generates the MIR call sequence:
+    ///   1. region_id = blood_region_create(initial_size, max_size)
+    ///   2. blood_region_activate(region_id)
+    ///   3. [body statements + tail expression]
+    ///   4. blood_region_deactivate()
+    ///   5. should_destroy = blood_region_exit_scope(region_id)
+    ///   6. if should_destroy == 1 { blood_region_destroy(region_id) }
+    ///   7. return body result
+    fn lower_region(
+        &mut self,
+        stmts: &[Stmt],
+        tail: Option<&Expr>,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let u64_ty = Type::u64();
+        let i32_ty = Type::i32();
+
+        // Default sizes: 1 MB initial, 1 GB max
+        let initial_size = Operand::Constant(Constant::new(
+            u64_ty.clone(),
+            ConstantKind::Int(1_048_576),  // 1 MB
+        ));
+        let max_size = Operand::Constant(Constant::new(
+            u64_ty.clone(),
+            ConstantKind::Int(1_073_741_824),  // 1 GB
+        ));
+
+        // 1. region_id = blood_region_create(1048576, 1073741824)
+        let region_id = self.emit_builtin_call(
+            "blood_region_create",
+            vec![initial_size, max_size],
+            u64_ty.clone(),
+            span,
+        )?;
+
+        // 2. blood_region_activate(region_id)
+        let _activate_result = self.emit_builtin_call(
+            "blood_region_activate",
+            vec![region_id.clone()],
+            Type::unit(),
+            span,
+        )?;
+
+        // 3. Lower the body (statements + tail expression)
+        let body_result = self.lower_block(stmts, tail, ty, span)?;
+
+        // Save the body result in a temp before deactivation so it survives
+        // the cleanup sequence
+        let result_temp = self.new_temp(ty.clone(), span);
+        self.push_assign(Place::local(result_temp), Rvalue::Use(body_result));
+
+        // 4. blood_region_deactivate()
+        let _deactivate_result = self.emit_builtin_call(
+            "blood_region_deactivate",
+            vec![],
+            Type::unit(),
+            span,
+        )?;
+
+        // 5. should_destroy = blood_region_exit_scope(region_id)
+        let should_destroy = self.emit_builtin_call(
+            "blood_region_exit_scope",
+            vec![region_id.clone()],
+            i32_ty,
+            span,
+        )?;
+
+        // 6. SwitchInt: if should_destroy == 1 goto bb_destroy else bb_continue
+        let bb_destroy = self.builder.new_block();
+        let bb_continue = self.builder.new_block();
+
+        self.terminate(TerminatorKind::SwitchInt {
+            discr: should_destroy,
+            targets: SwitchTargets::new(
+                vec![(1, bb_destroy)],
+                bb_continue,  // default: don't destroy (suspended continuations)
+            ),
+        });
+
+        // bb_destroy: blood_region_destroy(region_id) -> bb_continue
+        self.builder.switch_to(bb_destroy);
+        self.current_block = bb_destroy;
+
+        let destroy_func = self.builtin_fn_operand("blood_region_destroy", Type::unit())?;
+        let destroy_dest = self.new_temp(Type::unit(), span);
+        let destroy_dest_place = Place::local(destroy_dest);
+
+        self.terminate(TerminatorKind::Call {
+            func: destroy_func,
+            args: vec![region_id],
+            destination: destroy_dest_place,
+            target: Some(bb_continue),
+            unwind: None,
+        });
+
+        // bb_continue: return the saved body result
+        self.builder.switch_to(bb_continue);
+        self.current_block = bb_continue;
+
+        Ok(Operand::Copy(Place::local(result_temp)))
+    }
 
     /// Lower a block expression.
     fn lower_block(

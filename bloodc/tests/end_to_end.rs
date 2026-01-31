@@ -1127,3 +1127,11 @@ fn test_enum_ref_match() {
     // Tests tag-only enums, payload enums, and &self method dispatch.
     run_fixture_test("enum_ref_match");
 }
+
+#[test]
+fn test_region_block() {
+    // Tests region { } block codegen: creates/activates/deactivates/destroys
+    // regions around the block body. Verifies scalar return values pass through
+    // correctly and multiple region blocks can be used sequentially.
+    run_fixture_test("region_block");
+}

@@ -978,7 +978,8 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
             hasher.update_u8(*op as u8);
             hash_expr(operand, items, hasher);
         }
-        hir::ExprKind::Block { stmts, expr } => {
+        hir::ExprKind::Block { stmts, expr }
+        | hir::ExprKind::Region { stmts, expr, .. } => {
             hasher.update_u8(0x08);
             hasher.update_u32(stmts.len() as u32);
             for stmt in stmts {
@@ -1751,7 +1752,8 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
         hir::ExprKind::Unary { operand, .. } => {
             extract_expr_deps(operand, deps);
         }
-        hir::ExprKind::Block { stmts, expr } => {
+        hir::ExprKind::Block { stmts, expr }
+        | hir::ExprKind::Region { stmts, expr, .. } => {
             for stmt in stmts {
                 extract_stmt_deps(stmt, deps);
             }
