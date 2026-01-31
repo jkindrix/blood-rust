@@ -63,7 +63,7 @@ pub fn convert_binop(op: BinOp) -> MirBinOp {
         BinOp::Ge => MirBinOp::Ge,
         BinOp::And => MirBinOp::BitAnd, // Logical and
         BinOp::Or => MirBinOp::BitOr,   // Logical or
-        BinOp::Pipe => MirBinOp::BitOr, // Pipe operator (placeholder)
+        BinOp::Pipe => panic!("ICE: Pipe operator should be lowered before convert_binop"),
     }
 }
 
@@ -253,16 +253,32 @@ pub trait ExprLowering {
     // Binary Expression Special Handling (optional)
     // ========================================================================
 
-    /// Handle pipe operator specifically. Returns None if not supported.
-    /// FunctionLowering handles this, ClosureLowering returns None.
+    /// Handle pipe operator: `a |> f` becomes `f(a)`.
     fn lower_pipe(
         &mut self,
-        _arg: &Expr,
-        _func: &Expr,
-        _ty: &Type,
-        _span: Span,
+        arg: &Expr,
+        func: &Expr,
+        ty: &Type,
+        span: Span,
     ) -> Option<Result<Operand, Vec<Diagnostic>>> {
-        None
+        let result = (|| {
+            let arg_op = self.lower_expr(arg)?;
+            let func_op = self.lower_expr(func)?;
+            let dest = self.new_temp(ty.clone(), span);
+            let dest_place = Place::local(dest);
+            let next_block = self.builder_mut().new_block();
+            self.terminate(TerminatorKind::Call {
+                func: func_op,
+                args: vec![arg_op],
+                destination: dest_place.clone(),
+                target: Some(next_block),
+                unwind: None,
+            });
+            self.builder_mut().switch_to(next_block);
+            *self.current_block_mut() = next_block;
+            Ok(Operand::Copy(dest_place))
+        })();
+        Some(result)
     }
 
     // ========================================================================
@@ -3312,13 +3328,14 @@ mod tests {
     // ------------------------------------------------------------------------
 
     /// Generate all AST binary operators.
+    /// All AST binary operators that go through convert_binop.
+    /// Pipe is excluded — it is lowered as function application before reaching convert_binop.
     fn all_ast_binops() -> Vec<BinOp> {
         vec![
             BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Rem,
             BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
             BinOp::And, BinOp::Or,
             BinOp::BitAnd, BinOp::BitOr, BinOp::BitXor, BinOp::Shl, BinOp::Shr,
-            BinOp::Pipe,
         ]
     }
 

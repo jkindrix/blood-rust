@@ -659,47 +659,7 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         }
     }
 
-    // lower_literal and lower_binary are now provided by ExprLowering trait
-
-    /// Lower a pipe expression: `a |> f` becomes `f(a)`.
-    ///
-    /// The pipe operator passes the left operand as the first argument
-    /// to the function on the right-hand side.
-    fn lower_pipe_impl(
-        &mut self,
-        arg: &Expr,
-        func: &Expr,
-        ty: &Type,
-        span: Span,
-    ) -> Result<Operand, Vec<Diagnostic>> {
-        // Lower the argument (left side of |>)
-        let arg_op = self.lower_expr(arg)?;
-
-        // Lower the function (right side of |>)
-        let func_op = self.lower_expr(func)?;
-
-        // Create destination for call result
-        let dest = self.new_temp(ty.clone(), span);
-        let dest_place = Place::local(dest);
-
-        // Create continuation block
-        let next_block = self.builder.new_block();
-
-        // Generate call: f(a)
-        self.terminate(TerminatorKind::Call {
-            func: func_op,
-            args: vec![arg_op],
-            destination: dest_place.clone(),
-            target: Some(next_block),
-            unwind: None,
-        });
-
-        // Continue in the new block
-        self.builder.switch_to(next_block);
-        self.current_block = next_block;
-
-        Ok(Operand::Copy(dest_place))
-    }
+    // lower_literal, lower_binary, and lower_pipe are now provided by ExprLowering trait
 
     /// Lower a unary operation.
     fn lower_unary(
@@ -2565,14 +2525,4 @@ impl<'hir, 'ctx> ExprLowering for FunctionLowering<'hir, 'ctx> {
         })
     }
 
-    fn lower_pipe(
-        &mut self,
-        arg: &Expr,
-        func: &Expr,
-        ty: &Type,
-        span: Span,
-    ) -> Option<Result<Operand, Vec<Diagnostic>>> {
-        // FunctionLowering supports the pipe operator: `a |> f` becomes `f(a)`
-        Some(self.lower_pipe_impl(arg, func, ty, span))
-    }
 }
