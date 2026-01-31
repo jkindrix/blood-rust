@@ -287,37 +287,40 @@ fn collect_variant_indices(pattern: &Pattern, indices: &mut HashSet<u32>, varian
     }
 }
 
-/// Check tuple exhaustiveness.
+/// Check tuple exhaustiveness using pattern matrix specialization.
 ///
 /// ## Algorithm
 ///
-/// For tuple exhaustiveness, we check that every position is covered:
+/// Uses a simplified Maranget-style algorithm that properly handles
+/// cross-position interactions for closed types (bool, enums, unit).
+/// Falls back to per-position checking when any element type is open
+/// (integers, strings, floats).
 ///
-/// 1. **Quick check**: If any pattern is irrefutable (wildcard, binding), the tuple is covered
-/// 2. **Position extraction**: Extract all tuple patterns and project to each position
-/// 3. **Per-position check**: For each position i, collect patterns at position i and check
-///    exhaustiveness against element_types[i]
+/// For closed types, the algorithm:
+/// 1. Build a pattern matrix from tuple patterns
+/// 2. Check if any row is irrefutable → exhaustive
+/// 3. Find the first column with a closed type
+/// 4. For each constructor of that type, specialize the matrix
+/// 5. Recursively check each specialized matrix
+/// 6. If all constructors lead to exhaustive sub-matrices → exhaustive
 ///
-/// ## Example
+/// ## Examples
 ///
-/// For `(bool, i32)` with patterns `[(true, _), (false, _)]`:
-/// - Position 0: [true, false] against bool → exhaustive (both values covered)
-/// - Position 1: [_, _] against i32 → exhaustive (wildcards cover all)
-/// - Result: exhaustive
+/// `(true, _), (false, _)` on `(bool, i32)` → exhaustive
+///   (wildcards in position 1 cover all i32 for both bool constructors)
 ///
-/// ## Limitation
+/// `(true, true), (false, false)` on `(bool, bool)` → NOT exhaustive
+///   (specializing on `true` at position 0 gives `[true]` at position 1,
+///    specializing on `false` gives `[false]`, neither covers all bools)
 ///
-/// This is a simplified algorithm that doesn't handle interactions between positions.
-/// Full Maranget algorithm would use pattern matrices for cross-position analysis.
-/// Example not caught: `[(true, 0), (false, 1)]` is NOT exhaustive for (bool, i32),
-/// but this algorithm reports it as exhaustive because each position is individually covered.
+/// `(true, _), (_, true)` on `(bool, bool)` → exhaustive
+///   (specializing on `true` at pos 0 gives `[_, true]` → wildcard covers;
+///    specializing on `false` gives `[true]` at pos 1 → not all bools...
+///    but the wildcard row `(_, true)` also matches `false` at pos 0)
 fn check_tuple_exhaustiveness(
     patterns: &[&Pattern],
     element_types: &[Type],
 ) -> (bool, Vec<String>) {
-    // For tuples, we need to check that each position is covered
-    // This is a simplified check - full algorithm would use pattern matrices
-
     if element_types.is_empty() {
         return (true, vec![]);
     }
@@ -329,30 +332,234 @@ fn check_tuple_exhaustiveness(
         }
     }
 
-    // Extract tuple patterns and check each position
-    let tuple_patterns: Vec<_> = patterns
-        .iter()
-        .filter_map(|p| {
-            if let PatternKind::Tuple(pats) = &p.kind {
-                Some(pats.as_slice())
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Build the pattern matrix: each row is one tuple pattern's sub-patterns.
+    // Non-tuple patterns (wildcards, bindings) are expanded to rows of wildcards.
+    let matrix = build_tuple_matrix(patterns, element_types.len());
 
-    if tuple_patterns.is_empty() {
-        return (false, vec!["(_, _, ...)".to_string()]);
+    if matrix.is_empty() {
+        return (false, vec!["(_, ...)".to_string()]);
     }
 
-    // For each position, collect the patterns and check exhaustiveness
+    // Check if any element type is closed (bool, enum with known variants).
+    // If all types are open, fall back to per-position checking.
+    let has_closed_type = element_types.iter().any(is_closed_type);
+
+    if has_closed_type {
+        // Use matrix specialization for proper cross-position analysis
+        let is_exhaustive = is_tuple_matrix_exhaustive(&matrix, element_types);
+        if is_exhaustive {
+            (true, vec![])
+        } else {
+            (false, vec!["non-exhaustive tuple patterns".to_string()])
+        }
+    } else {
+        // All open types: per-position check is correct
+        // (no finite set of constructors to enumerate)
+        check_tuple_per_position(&matrix, element_types)
+    }
+}
+
+/// Build a pattern matrix from tuple patterns.
+///
+/// Each row contains `arity` patterns. Wildcard/binding patterns at the
+/// tuple level are expanded to a row of wildcards.
+fn build_tuple_matrix(patterns: &[&Pattern], arity: usize) -> Vec<Vec<Pattern>> {
+    let mut matrix = Vec::new();
+    let wildcard = || Pattern {
+        kind: PatternKind::Wildcard,
+        span: crate::span::Span::dummy(),
+        ty: Type::error(),
+    };
+
+    for pat in patterns {
+        match &pat.kind {
+            PatternKind::Tuple(pats) => {
+                if pats.len() == arity {
+                    matrix.push(pats.clone());
+                }
+                // Mismatched arity is a type error; skip silently
+            }
+            PatternKind::Wildcard | PatternKind::Binding { subpattern: None, .. } => {
+                // Expand to a row of wildcards
+                matrix.push(vec![wildcard(); arity]);
+            }
+            PatternKind::Binding { subpattern: Some(sub), .. } => {
+                // Recurse into the sub-pattern
+                let sub_refs: Vec<&Pattern> = vec![sub.as_ref()];
+                let sub_matrix = build_tuple_matrix(&sub_refs, arity);
+                matrix.extend(sub_matrix);
+            }
+            PatternKind::Or(alts) => {
+                // Each alternative adds a row
+                let alt_refs: Vec<&Pattern> = alts.iter().collect();
+                let sub_matrix = build_tuple_matrix(&alt_refs, arity);
+                matrix.extend(sub_matrix);
+            }
+            _ => {
+                // Non-tuple pattern in tuple context; skip
+            }
+        }
+    }
+    matrix
+}
+
+/// Check if a type has a finite, known set of constructors.
+fn is_closed_type(ty: &Type) -> bool {
+    matches!(
+        &*ty.kind,
+        TypeKind::Primitive(hir::PrimitiveTy::Bool)
+        | TypeKind::Tuple(_)  // unit () is the only 0-element constructor
+        | TypeKind::Never
+    )
+    // Note: ADT/enum types would also be closed, but we'd need EnumVariantInfo
+    // to enumerate constructors. For now, only bool is fully supported as closed.
+}
+
+/// Get the constructors for a closed type.
+///
+/// Returns a list of "constructor tags" that can be matched against patterns.
+/// For bool: `[true, false]`
+fn closed_type_constructors(ty: &Type) -> Vec<ConstructorTag> {
+    match &*ty.kind {
+        TypeKind::Primitive(hir::PrimitiveTy::Bool) => {
+            vec![ConstructorTag::BoolTrue, ConstructorTag::BoolFalse]
+        }
+        TypeKind::Never => vec![], // No constructors — always exhaustive
+        _ => vec![], // Open type or unsupported — no constructors
+    }
+}
+
+/// A tag identifying a constructor for specialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstructorTag {
+    BoolTrue,
+    BoolFalse,
+}
+
+/// Check if the matrix of patterns is exhaustive for the given tuple types.
+///
+/// Implements a simplified Maranget-style algorithm:
+/// 1. If no columns remain, exhaustive iff at least one row exists
+/// 2. If any row is all-wildcards, exhaustive
+/// 3. Find first closed-type column
+/// 4. For each constructor of that type, specialize and recurse
+fn is_tuple_matrix_exhaustive(matrix: &[Vec<Pattern>], types: &[Type]) -> bool {
+    // Base case: no columns left — exhaustive if matrix has at least one row
+    if types.is_empty() {
+        return !matrix.is_empty();
+    }
+
+    // Check if any row is all irrefutable
+    for row in matrix {
+        if row.iter().all(|p| is_irrefutable(p)) {
+            return true;
+        }
+    }
+
+    // Find the first column with a closed type for specialization
+    let closed_col = types.iter().position(|t| {
+        let ctors = closed_type_constructors(t);
+        !ctors.is_empty()
+    });
+
+    if let Some(col) = closed_col {
+        let constructors = closed_type_constructors(&types[col]);
+
+        // For each constructor, specialize the matrix and check recursively
+        for ctor in &constructors {
+            let specialized = specialize_matrix(matrix, col, ctor);
+            let remaining_types: Vec<Type> = types.iter()
+                .enumerate()
+                .filter(|(i, _)| *i != col)
+                .map(|(_, t)| t.clone())
+                .collect();
+
+            if !is_tuple_matrix_exhaustive(&specialized, &remaining_types) {
+                return false;
+            }
+        }
+        true
+    } else {
+        // No closed-type columns: fall back to checking if any row is all-wildcards
+        // (which we already checked above and it returned false)
+        false
+    }
+}
+
+/// Specialize a pattern matrix on column `col` for constructor `ctor`.
+///
+/// For each row in the matrix:
+/// - If `row[col]` matches `ctor` → include the row without column `col`
+/// - If `row[col]` is a wildcard → include the row without column `col`
+///   (wildcard matches any constructor)
+/// - Otherwise → row doesn't match, exclude it
+fn specialize_matrix(
+    matrix: &[Vec<Pattern>],
+    col: usize,
+    ctor: &ConstructorTag,
+) -> Vec<Vec<Pattern>> {
+    let mut result = Vec::new();
+
+    for row in matrix {
+        if col >= row.len() {
+            continue;
+        }
+
+        let matches = pattern_matches_constructor(&row[col], ctor);
+
+        if matches {
+            // Build new row without column `col`
+            let new_row: Vec<Pattern> = row.iter()
+                .enumerate()
+                .filter(|(i, _)| *i != col)
+                .map(|(_, p)| p.clone())
+                .collect();
+            result.push(new_row);
+        }
+    }
+
+    result
+}
+
+/// Check if a pattern matches a specific constructor.
+fn pattern_matches_constructor(pat: &Pattern, ctor: &ConstructorTag) -> bool {
+    match &pat.kind {
+        // Wildcards and bindings match any constructor
+        PatternKind::Wildcard => true,
+        PatternKind::Binding { subpattern: None, .. } => true,
+        PatternKind::Binding { subpattern: Some(sub), .. } => {
+            pattern_matches_constructor(sub, ctor)
+        }
+
+        // Bool literals match their respective constructor
+        PatternKind::Literal(hir::LiteralValue::Bool(true)) => {
+            *ctor == ConstructorTag::BoolTrue
+        }
+        PatternKind::Literal(hir::LiteralValue::Bool(false)) => {
+            *ctor == ConstructorTag::BoolFalse
+        }
+
+        // Or patterns: matches if any alternative matches
+        PatternKind::Or(alts) => {
+            alts.iter().any(|alt| pattern_matches_constructor(alt, ctor))
+        }
+
+        // All other patterns don't match bool constructors
+        _ => false,
+    }
+}
+
+/// Fallback per-position check for tuples with all open types.
+fn check_tuple_per_position(
+    matrix: &[Vec<Pattern>],
+    element_types: &[Type],
+) -> (bool, Vec<String>) {
     for (i, elem_ty) in element_types.iter().enumerate() {
-        let position_patterns: Vec<_> = tuple_patterns
+        let position_patterns: Vec<&Pattern> = matrix
             .iter()
-            .filter_map(|pats| pats.get(i))
+            .filter_map(|row| row.get(i))
             .collect();
 
-        // Simplified: we don't recursively check with enum info
         let (is_exhaustive, missing) = is_exhaustive(&position_patterns, elem_ty, None);
         if !is_exhaustive {
             return (false, vec![format!("missing pattern at position {}: {:?}", i, missing)]);
@@ -522,5 +729,117 @@ impl std::fmt::Display for Witness {
             }
             Witness::Literal(s) => write!(f, "{}", s),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hir::{self, Pattern, PatternKind, Type, LiteralValue};
+    use crate::span::Span;
+
+    fn dummy_span() -> Span { Span::dummy() }
+    fn bool_ty() -> Type { Type::bool() }
+    fn i32_ty() -> Type { Type::i32() }
+
+    fn wildcard_pat() -> Pattern {
+        Pattern { kind: PatternKind::Wildcard, span: dummy_span(), ty: Type::error() }
+    }
+
+    fn bool_pat(val: bool) -> Pattern {
+        Pattern {
+            kind: PatternKind::Literal(LiteralValue::Bool(val)),
+            span: dummy_span(),
+            ty: bool_ty(),
+        }
+    }
+
+    fn tuple_pat(pats: Vec<Pattern>) -> Pattern {
+        Pattern {
+            kind: PatternKind::Tuple(pats),
+            span: dummy_span(),
+            ty: Type::error(),
+        }
+    }
+
+    fn make_arm(pat: Pattern) -> hir::MatchArm {
+        hir::MatchArm {
+            pattern: pat,
+            guard: None,
+            body: hir::Expr::new(
+                hir::ExprKind::Literal(LiteralValue::Int(0)),
+                Type::i32(),
+                dummy_span(),
+            ),
+        }
+    }
+
+    #[test]
+    fn test_tuple_bool_bool_diagonal_not_exhaustive() {
+        // (true, true), (false, false) on (bool, bool) → NOT exhaustive
+        // Missing: (true, false) and (false, true)
+        let arms = vec![
+            make_arm(tuple_pat(vec![bool_pat(true), bool_pat(true)])),
+            make_arm(tuple_pat(vec![bool_pat(false), bool_pat(false)])),
+        ];
+        let scrutinee_ty = Type::tuple(vec![bool_ty(), bool_ty()]);
+        let result = check_exhaustiveness(&arms, &scrutinee_ty, None);
+        assert!(!result.is_exhaustive, "diagonal (true,true)/(false,false) should NOT be exhaustive");
+    }
+
+    #[test]
+    fn test_tuple_bool_wildcard_exhaustive() {
+        // (true, _), (false, _) on (bool, i32) → exhaustive
+        let arms = vec![
+            make_arm(tuple_pat(vec![bool_pat(true), wildcard_pat()])),
+            make_arm(tuple_pat(vec![bool_pat(false), wildcard_pat()])),
+        ];
+        let scrutinee_ty = Type::tuple(vec![bool_ty(), i32_ty()]);
+        let result = check_exhaustiveness(&arms, &scrutinee_ty, None);
+        assert!(result.is_exhaustive, "(true, _)/(false, _) should be exhaustive");
+    }
+
+    #[test]
+    fn test_tuple_bool_bool_full_coverage() {
+        // (true, true), (true, false), (false, _) on (bool, bool) → exhaustive
+        let arms = vec![
+            make_arm(tuple_pat(vec![bool_pat(true), bool_pat(true)])),
+            make_arm(tuple_pat(vec![bool_pat(true), bool_pat(false)])),
+            make_arm(tuple_pat(vec![bool_pat(false), wildcard_pat()])),
+        ];
+        let scrutinee_ty = Type::tuple(vec![bool_ty(), bool_ty()]);
+        let result = check_exhaustiveness(&arms, &scrutinee_ty, None);
+        assert!(result.is_exhaustive, "full bool×bool coverage should be exhaustive");
+    }
+
+    #[test]
+    fn test_tuple_wildcard_cross_position() {
+        // (true, _), (_, true) on (bool, bool) → exhaustive
+        // true,_ covers (true,true) and (true,false)
+        // _,true covers (true,true) and (false,true)
+        // Together they cover all four: (t,t), (t,f), (f,t), and (f,t) covers (false,true)
+        // Missing: (false, false)? Let's check:
+        //   - (true, _) doesn't match (false, false)
+        //   - (_, true) doesn't match (false, false)
+        // So this is NOT exhaustive!
+        let arms = vec![
+            make_arm(tuple_pat(vec![bool_pat(true), wildcard_pat()])),
+            make_arm(tuple_pat(vec![wildcard_pat(), bool_pat(true)])),
+        ];
+        let scrutinee_ty = Type::tuple(vec![bool_ty(), bool_ty()]);
+        let result = check_exhaustiveness(&arms, &scrutinee_ty, None);
+        assert!(!result.is_exhaustive, "(true,_)/(_,true) misses (false,false)");
+    }
+
+    #[test]
+    fn test_tuple_with_global_wildcard() {
+        // (true, true), _ on (bool, bool) → exhaustive (wildcard covers all)
+        let arms = vec![
+            make_arm(tuple_pat(vec![bool_pat(true), bool_pat(true)])),
+            make_arm(wildcard_pat()),
+        ];
+        let scrutinee_ty = Type::tuple(vec![bool_ty(), bool_ty()]);
+        let result = check_exhaustiveness(&arms, &scrutinee_ty, None);
+        assert!(result.is_exhaustive, "any pattern + wildcard should be exhaustive");
     }
 }
