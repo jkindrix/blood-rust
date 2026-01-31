@@ -228,6 +228,19 @@ impl SlotRegistry {
         }
     }
 
+    /// Increment the generation for the given address.
+    ///
+    /// This invalidates all existing references to the slot. If the address
+    /// is not registered, this is a no-op.
+    pub fn increment_generation(&self, address: u64) {
+        let mut slots = self.slots.write();
+        if let Some(entry) = slots.get_mut(&address) {
+            if entry.generation < generation::OVERFLOW_GUARD {
+                entry.generation += 1;
+            }
+        }
+    }
+
     /// Get the number of tracked slots.
     pub fn len(&self) -> usize {
         self.slots.read().len()
@@ -295,6 +308,13 @@ pub fn get_slot_generation(address: u64) -> Option<Generation> {
 /// Validate an address against an expected generation using the global registry.
 pub fn validate_generation(address: u64, expected_gen: Generation) -> Result<(), StaleReferenceError> {
     slot_registry().validate(address, expected_gen)
+}
+
+/// Increment the generation for an address in the global slot registry.
+///
+/// This invalidates all existing references to the slot.
+pub fn increment_generation(address: u64) {
+    slot_registry().increment_generation(address)
 }
 
 // ============================================================================

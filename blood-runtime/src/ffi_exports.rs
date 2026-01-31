@@ -7924,3 +7924,348 @@ pub unsafe extern "C" fn debug_local_enum(ptr: *const u8, name: *const u8, name_
     let payload = std::ptr::read(ptr.add(8) as *const i64);
     eprintln!("[debug_local_enum] {} at {:p}: tag={} payload={}", name_str, ptr, tag, payload);
 }
+
+// ============================================================================
+// Simple I/O Functions
+// ============================================================================
+
+/// Print a boolean value without newline.
+///
+/// The boolean is represented as an i32 where 0 = false, non-zero = true.
+#[no_mangle]
+pub extern "C" fn print_bool(val: i32) {
+    print!("{}", val != 0);
+    let _ = io::stdout().flush();
+}
+
+/// Print a boolean value with newline.
+///
+/// The boolean is represented as an i32 where 0 = false, non-zero = true.
+#[no_mangle]
+pub extern "C" fn println_bool(val: i32) {
+    println!("{}", val != 0);
+}
+
+/// Print a character without newline.
+///
+/// The character is represented as an i32 (Unicode code point).
+#[no_mangle]
+pub extern "C" fn print_char(c: i32) {
+    if let Some(ch) = char::from_u32(c as u32) {
+        print!("{}", ch);
+        let _ = io::stdout().flush();
+    }
+}
+
+/// Print a character with newline.
+///
+/// The character is represented as an i32 (Unicode code point).
+#[no_mangle]
+pub extern "C" fn println_char(c: i32) {
+    if let Some(ch) = char::from_u32(c as u32) {
+        println!("{}", ch);
+    }
+}
+
+/// Print a 32-bit float without newline.
+#[no_mangle]
+pub extern "C" fn print_f32(val: f32) {
+    print!("{}", val);
+    let _ = io::stdout().flush();
+}
+
+/// Print a 32-bit float with newline.
+#[no_mangle]
+pub extern "C" fn println_f32(val: f32) {
+    println!("{}", val);
+}
+
+/// Print a 64-bit float without newline.
+#[no_mangle]
+pub extern "C" fn print_f64(val: f64) {
+    print!("{}", val);
+    let _ = io::stdout().flush();
+}
+
+/// Print a 64-bit float with newline.
+#[no_mangle]
+pub extern "C" fn println_f64(val: f64) {
+    println!("{}", val);
+}
+
+/// Print a 32-bit float with specified decimal precision, without newline.
+#[no_mangle]
+pub extern "C" fn print_f32_prec(val: f32, prec: i32) {
+    print!("{:.1$}", val, prec as usize);
+    let _ = io::stdout().flush();
+}
+
+/// Print a 32-bit float with specified decimal precision, with newline.
+#[no_mangle]
+pub extern "C" fn println_f32_prec(val: f32, prec: i32) {
+    println!("{:.1$}", val, prec as usize);
+}
+
+/// Print a 64-bit float with specified decimal precision, without newline.
+#[no_mangle]
+pub extern "C" fn print_f64_prec(val: f64, prec: i32) {
+    print!("{:.1$}", val, prec as usize);
+    let _ = io::stdout().flush();
+}
+
+/// Print a 64-bit float with specified decimal precision, with newline.
+#[no_mangle]
+pub extern "C" fn println_f64_prec(val: f64, prec: i32) {
+    println!("{:.1$}", val, prec as usize);
+}
+
+/// Print an unsigned 64-bit integer without newline.
+///
+/// In the Blood ABI, u64 is passed as i64. We reinterpret the bits.
+#[no_mangle]
+pub extern "C" fn print_u64(val: i64) {
+    print!("{}", val as u64);
+    let _ = io::stdout().flush();
+}
+
+/// Print an unsigned 64-bit integer with newline.
+///
+/// In the Blood ABI, u64 is passed as i64. We reinterpret the bits.
+#[no_mangle]
+pub extern "C" fn println_u64(val: i64) {
+    println!("{}", val as u64);
+}
+
+/// Print a 64-bit integer without newline.
+#[no_mangle]
+pub extern "C" fn print_i64(val: i64) {
+    print!("{}", val);
+    let _ = io::stdout().flush();
+}
+
+// ============================================================================
+// Simple Memory Allocation (for Vec/collections)
+// ============================================================================
+
+/// Allocate memory of the given size with default alignment (8).
+///
+/// Returns the address as i64, or 0 on failure.
+#[no_mangle]
+pub extern "C" fn blood_alloc_simple(size: i64) -> i64 {
+    if size <= 0 {
+        return 0;
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align(size as usize, 8)
+            .expect("blood_alloc_simple: invalid layout");
+        let ptr = runtime_alloc(layout);
+        if ptr.is_null() { 0 } else { ptr as i64 }
+    }
+}
+
+/// Reallocate memory at the given address to a new size.
+///
+/// Returns the new address as i64, or 0 on failure.
+/// If ptr is 0, behaves like blood_alloc_simple.
+#[no_mangle]
+pub extern "C" fn blood_realloc(ptr: i64, new_size: i64) -> i64 {
+    if new_size <= 0 {
+        return 0;
+    }
+    unsafe {
+        if ptr == 0 {
+            let layout = std::alloc::Layout::from_size_align(new_size as usize, 8)
+                .expect("blood_realloc: invalid layout");
+            let new_ptr = runtime_alloc(layout);
+            return if new_ptr.is_null() { 0 } else { new_ptr as i64 };
+        }
+        // For realloc we need an old layout. We use alignment 8 and size 1
+        // as a minimal valid layout for the realloc call since we do not track
+        // the original allocation size in this simplified interface.
+        let old_layout = std::alloc::Layout::from_size_align(1, 8)
+            .expect("blood_realloc: invalid old layout");
+        let new_ptr = runtime_realloc(ptr as *mut u8, old_layout, new_size as usize);
+        if new_ptr.is_null() { 0 } else { new_ptr as i64 }
+    }
+}
+
+/// Free memory allocated by blood_alloc_simple.
+///
+/// If ptr is 0, this is a no-op.
+#[no_mangle]
+pub extern "C" fn blood_free_simple(ptr: i64) {
+    if ptr == 0 {
+        return;
+    }
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align(1, 8)
+            .expect("blood_free_simple: invalid layout");
+        runtime_dealloc(ptr as *mut u8, layout);
+    }
+}
+
+/// Copy memory from src to dst (non-overlapping).
+///
+/// Returns dst. If size <= 0 or either pointer is 0, returns dst unchanged.
+#[no_mangle]
+pub extern "C" fn blood_memcpy(dst: i64, src: i64, size: i64) -> i64 {
+    if size <= 0 || dst == 0 || src == 0 {
+        return dst;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, size as usize);
+    }
+    dst
+}
+
+// ============================================================================
+// Pointer Read/Write Intrinsics
+// ============================================================================
+
+/// Read an i32 value from the given memory address.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for i32.
+#[no_mangle]
+pub extern "C" fn ptr_read_i32(ptr: i64) -> i32 {
+    unsafe { *(ptr as *const i32) }
+}
+
+/// Write an i32 value to the given memory address.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for i32.
+#[no_mangle]
+pub extern "C" fn ptr_write_i32(ptr: i64, val: i32) {
+    unsafe { *(ptr as *mut i32) = val; }
+}
+
+/// Read an i64 value from the given memory address.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for i64.
+#[no_mangle]
+pub extern "C" fn ptr_read_i64(ptr: i64) -> i64 {
+    unsafe { *(ptr as *const i64) }
+}
+
+/// Write an i64 value to the given memory address.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for i64.
+#[no_mangle]
+pub extern "C" fn ptr_write_i64(ptr: i64, val: i64) {
+    unsafe { *(ptr as *mut i64) = val; }
+}
+
+/// Read a u64 value from the given memory address.
+///
+/// In the Blood ABI, u64 is represented as i64. The bits are reinterpreted.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for u64/i64.
+#[no_mangle]
+pub extern "C" fn ptr_read_u64(ptr: i64) -> i64 {
+    unsafe { *(ptr as *const i64) }
+}
+
+/// Write a u64 value to the given memory address.
+///
+/// In the Blood ABI, u64 is represented as i64. The bits are reinterpreted.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for u64/i64.
+#[no_mangle]
+pub extern "C" fn ptr_write_u64(ptr: i64, val: i64) {
+    unsafe { *(ptr as *mut i64) = val; }
+}
+
+/// Read a u8 value from the given memory address, returned as i8.
+///
+/// # Safety
+/// The pointer must be valid.
+#[no_mangle]
+pub extern "C" fn ptr_read_u8(ptr: i64) -> i8 {
+    unsafe { *(ptr as *const i8) }
+}
+
+/// Write a u8 value (as i8) to the given memory address.
+///
+/// # Safety
+/// The pointer must be valid.
+#[no_mangle]
+pub extern "C" fn ptr_write_u8(ptr: i64, val: i8) {
+    unsafe { *(ptr as *mut i8) = val; }
+}
+
+/// Read an f64 value from the given memory address.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for f64.
+#[no_mangle]
+pub extern "C" fn ptr_read_f64(ptr: i64) -> f64 {
+    unsafe { *(ptr as *const f64) }
+}
+
+/// Write an f64 value to the given memory address.
+///
+/// # Safety
+/// The pointer must be valid and properly aligned for f64.
+#[no_mangle]
+pub extern "C" fn ptr_write_f64(ptr: i64, val: f64) {
+    unsafe { *(ptr as *mut f64) = val; }
+}
+
+// ============================================================================
+// Assertions
+// ============================================================================
+
+/// Assert that a condition is true (non-zero). Aborts if false.
+#[no_mangle]
+pub extern "C" fn blood_assert(cond: i32) {
+    if cond == 0 {
+        eprintln!("BLOOD RUNTIME PANIC: assertion failed");
+        std::process::abort();
+    }
+}
+
+/// Assert that two boolean values (represented as i32) are equal. Aborts if not.
+#[no_mangle]
+pub extern "C" fn blood_assert_eq_bool(a: i32, b: i32) {
+    if (a != 0) != (b != 0) {
+        eprintln!("BLOOD RUNTIME PANIC: assertion failed: bool values not equal ({} != {})", a != 0, b != 0);
+        std::process::abort();
+    }
+}
+
+/// Assert that two integer values (i32) are equal. Aborts if not.
+#[no_mangle]
+pub extern "C" fn blood_assert_eq_int(a: i32, b: i32) {
+    if a != b {
+        eprintln!("BLOOD RUNTIME PANIC: assertion failed: {} != {}", a, b);
+        std::process::abort();
+    }
+}
+
+// ============================================================================
+// Generation Management
+// ============================================================================
+
+/// Increment the generation counter at the given slot address.
+///
+/// This invalidates all existing references to the slot, causing stale
+/// reference checks to fail.
+///
+/// # Safety
+/// `slot_ptr` must be a valid pointer or null. If non-null, it must point
+/// to a registered allocation whose generation can be incremented.
+#[no_mangle]
+pub extern "C" fn blood_increment_generation(slot_ptr: *mut u8) {
+    if slot_ptr.is_null() {
+        return;
+    }
+    // The address is the slot identifier in the allocation registry.
+    // We look up the address and bump its generation.
+    let addr = slot_ptr as u64;
+    crate::memory::increment_generation(addr);
+}
