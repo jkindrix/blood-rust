@@ -15,7 +15,8 @@
 
 use std::collections::HashMap;
 
-use crate::hir::{self, LocalId, Type};
+use crate::hir::{self, DefId, LocalId, Type};
+use crate::hir::item::{ItemKind, StructKind};
 use crate::hir::ty::{TypeKind, OwnershipQualifier};
 use crate::span::Span;
 use crate::typeck::error::{TypeError, TypeErrorKind};
@@ -40,22 +41,25 @@ struct VariableUsage {
 }
 
 /// Linearity checker context.
-pub struct LinearityChecker {
+pub struct LinearityChecker<'hir> {
     /// Map from local ID to usage tracking.
     locals: HashMap<LocalId, VariableUsage>,
     /// Current loop depth (0 = not in loop).
     loop_depth: usize,
     /// Errors accumulated during checking.
     errors: Vec<TypeError>,
+    /// HIR crate for looking up ADT field types.
+    hir_crate: &'hir hir::Crate,
 }
 
-impl LinearityChecker {
-    /// Create a new linearity checker.
-    pub fn new() -> Self {
+impl<'hir> LinearityChecker<'hir> {
+    /// Create a new linearity checker with access to the HIR crate.
+    pub fn new(hir_crate: &'hir hir::Crate) -> Self {
         Self {
             locals: HashMap::new(),
             loop_depth: 0,
             errors: Vec::new(),
+            hir_crate,
         }
     }
 
@@ -129,16 +133,53 @@ impl LinearityChecker {
                 (is_linear, is_affine)
             }
             TypeKind::Forall { body, .. } => self.check_linearity(body),
+            // ADTs may contain linear/affine fields — recurse into them.
+            TypeKind::Adt { def_id, .. } => {
+                self.check_adt_field_linearity(*def_id)
+            }
             // These types cannot contain linear/affine values
             TypeKind::Fn { .. }
             | TypeKind::Closure { .. }
-            | TypeKind::Adt { .. }
             | TypeKind::DynTrait { .. }
             | TypeKind::Primitive(_)
             | TypeKind::Never
             | TypeKind::Error
             | TypeKind::Infer(_)
             | TypeKind::Param(_) => (false, false),
+        }
+    }
+
+    /// Look up an ADT's field types and check if any are linear/affine.
+    fn check_adt_field_linearity(&self, def_id: DefId) -> (bool, bool) {
+        if let Some(item) = self.hir_crate.items.get(&def_id) {
+            let field_types: Vec<&Type> = match &item.kind {
+                ItemKind::Struct(s) => match &s.kind {
+                    StructKind::Record(fields) | StructKind::Tuple(fields) => {
+                        fields.iter().map(|f| &f.ty).collect()
+                    }
+                    StructKind::Unit => Vec::new(),
+                },
+                ItemKind::Enum(e) => {
+                    e.variants.iter().flat_map(|v| match &v.fields {
+                        StructKind::Record(fields) | StructKind::Tuple(fields) => {
+                            fields.iter().map(|f| &f.ty).collect::<Vec<_>>()
+                        }
+                        StructKind::Unit => Vec::new(),
+                    }).collect()
+                }
+                _ => return (false, false),
+            };
+            let mut is_linear = false;
+            let mut is_affine = false;
+            for field_ty in field_types {
+                let (l, a) = self.check_linearity(field_ty);
+                is_linear |= l;
+                is_affine |= a;
+            }
+            (is_linear, is_affine)
+        } else {
+            // Unknown ADT — conservatively non-linear
+            (false, false)
         }
     }
 
@@ -620,18 +661,12 @@ impl LinearityChecker {
     }
 }
 
-impl Default for LinearityChecker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Check linearity for all bodies in a crate.
 pub fn check_crate_linearity(krate: &hir::Crate) -> Vec<TypeError> {
     let mut errors = Vec::new();
 
     for body in krate.bodies.values() {
-        let mut checker = LinearityChecker::new();
+        let mut checker = LinearityChecker::new(krate);
         errors.extend(checker.check_body(body));
     }
 
@@ -646,7 +681,8 @@ mod tests {
     fn test_linearity_check_basic() {
         // Test will be implemented with actual HIR construction
         // For now, just verify the module compiles
-        let checker = LinearityChecker::new();
+        let krate = hir::Crate::new();
+        let checker = LinearityChecker::new(&krate);
         assert!(checker.errors.is_empty());
     }
 }
