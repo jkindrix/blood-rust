@@ -2921,12 +2921,15 @@ impl<'a> TypeContext<'a> {
             return Ok((def_id, ret_ty, first_param, impl_generics, method_generics, needs_auto_ref));
         }
 
-        // Try auto-deref: if receiver is &T or &mut T, try finding method on T
-        if let TypeKind::Ref { inner, .. } = receiver_ty.kind() {
-            if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(inner, method_name) {
+        // Try iterative auto-deref: peel references (&T, &&T, etc.) to find method
+        let mut deref_ty = receiver_ty.clone();
+        while let TypeKind::Ref { inner, .. } = deref_ty.kind() {
+            let inner_resolved = self.unifier.resolve(inner);
+            if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(&inner_resolved, method_name) {
                 // When auto-deref is used, we don't need auto-ref
                 return Ok((def_id, ret_ty, first_param, impl_generics, method_generics, false));
             }
+            deref_ty = inner_resolved;
         }
 
         // No method found
@@ -7840,18 +7843,21 @@ impl<'a> TypeContext<'a> {
         let base_expr = self.infer_expr(base)?;
         let base_ty = self.unifier.resolve(&base_expr.ty);
 
-        // Auto-deref references for field access
-        let (deref_expr, inner_ty) = if let TypeKind::Ref { inner, .. } = base_ty.kind() {
-            // Dereference the reference
-            let deref_ty = self.unifier.resolve(inner);
-            let deref_hir = hir::Expr::new(
-                hir::ExprKind::Deref(Box::new(base_expr)),
-                deref_ty.clone(),
-                span,
-            );
-            (deref_hir, deref_ty)
-        } else {
-            (base_expr, base_ty.clone())
+        // Auto-deref references for field access (iterative, like Rust).
+        // Handles arbitrarily nested references: &&T, &&&T, etc.
+        let (deref_expr, inner_ty) = {
+            let mut current_expr = base_expr;
+            let mut current_ty = base_ty.clone();
+            while let TypeKind::Ref { inner, .. } = current_ty.kind() {
+                let deref_ty = self.unifier.resolve(inner);
+                current_expr = hir::Expr::new(
+                    hir::ExprKind::Deref(Box::new(current_expr)),
+                    deref_ty.clone(),
+                    span,
+                );
+                current_ty = deref_ty;
+            }
+            (current_expr, current_ty)
         };
 
         // Unwrap ownership types for field access (linear/affine are compile-time only)
