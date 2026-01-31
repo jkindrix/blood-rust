@@ -159,6 +159,44 @@ impl<'a> TypeContext<'a> {
         // memcpy(dest: u64, src: u64, n: u64) -> u64 - copy n bytes, returns dest
         self.register_builtin_fn_aliased("memcpy", "blood_memcpy", vec![u64_ty.clone(), u64_ty.clone(), u64_ty.clone()], u64_ty.clone());
 
+        // === Region Memory Management ===
+
+        // region_create(initial_size: u64, max_size: u64) -> u64 - create a region, returns region_id
+        self.register_builtin_fn_aliased(
+            "region_create", "blood_region_create",
+            vec![u64_ty.clone(), u64_ty.clone()], u64_ty.clone(),
+        );
+
+        // region_destroy(region_id: u64) -> () - destroy a region and free all its memory
+        self.register_builtin_fn_aliased(
+            "region_destroy", "blood_region_destroy",
+            vec![u64_ty.clone()], unit_ty.clone(),
+        );
+
+        // region_activate(region_id: u64) -> () - route String/Vec/Box allocations to this region
+        self.register_builtin_fn_aliased(
+            "region_activate", "blood_region_activate",
+            vec![u64_ty.clone()], unit_ty.clone(),
+        );
+
+        // region_deactivate() -> () - revert to global allocation
+        self.register_builtin_fn_aliased(
+            "region_deactivate", "blood_region_deactivate",
+            vec![], unit_ty.clone(),
+        );
+
+        // region_alloc(region_id: u64, size: u64, align: u64) -> u64 - allocate from a region
+        self.register_builtin_fn_aliased(
+            "region_alloc", "blood_region_alloc",
+            vec![u64_ty.clone(), u64_ty.clone(), u64_ty.clone()], u64_ty.clone(),
+        );
+
+        // region_exit_scope(region_id: u64) -> i32 - exit a region's lexical scope
+        self.register_builtin_fn_aliased(
+            "region_exit_scope", "blood_region_exit_scope",
+            vec![u64_ty.clone()], i32_ty.clone(),
+        );
+
         // ptr_read_i32(ptr: u64) -> i32 - read i32 from memory address
         self.register_builtin_fn("ptr_read_i32", vec![u64_ty.clone()], i32_ty.clone());
 
@@ -330,6 +368,9 @@ impl<'a> TypeContext<'a> {
 
         // file_size(&str) -> i64 - get file size in bytes, returns -1 on error
         self.register_builtin_fn("file_size", vec![ref_str_ty.clone()], i64_ty.clone());
+
+        // system(&str) -> i32 - execute a shell command and return exit code
+        self.register_builtin_fn("system", vec![ref_str_ty.clone()], i32_ty.clone());
 
         // === Command-Line Argument Functions ===
 

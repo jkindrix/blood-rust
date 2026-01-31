@@ -3504,6 +3504,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // blood_region_is_pending_deallocation(region_id: i64) -> i32 (bool)
         self.module.add_function("blood_region_is_pending_deallocation", region_is_suspended_type, None);
 
+        // blood_region_activate(region_id: i64) -> void
+        // Activates a region for the current thread so String/Vec/Box allocations route to it
+        let region_activate_type = void_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_activate", region_activate_type, None);
+
+        // blood_region_deactivate() -> void
+        // Deactivates the current region, reverting to global allocation
+        let region_deactivate_type = void_type.fn_type(&[], false);
+        self.module.add_function("blood_region_deactivate", region_deactivate_type, None);
+
         // blood_continuation_add_suspended_region(continuation_id: i64, region_id: i64) -> void
         // Associates a suspended region with a continuation
         let cont_add_region_type = void_type.fn_type(&[i64_type.into(), i64_type.into()], false);
@@ -3899,6 +3909,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Read file contents as String
         let file_read_to_string_type = str_slice_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("file_read_to_string", file_read_to_string_type, None);
+
+        // file_append_string(path: {*i8, i64}, content: {*i8, i64}) -> i32 (0 = success, non-zero = error)
+        // Append string content to a file (creates if needed)
+        let file_append_string_type = i32_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
+        self.module.add_function("file_append_string", file_append_string_type, None);
+
+        // system(cmd: {*i8, i64}) -> i32 (exit code)
+        // Execute a shell command and return its exit code
+        let system_type = i32_type.fn_type(&[str_slice_type.into()], false);
+        self.module.add_function("system", system_type, None);
 
         // === Command-Line Arguments ===
 

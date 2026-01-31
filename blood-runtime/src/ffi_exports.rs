@@ -18,6 +18,7 @@
 //!
 //! Then link compiled Blood programs with `-lblood_runtime`.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::{self, Write};
@@ -36,6 +37,69 @@ pub type FiberHandle = u64;
 
 /// Continuation handle for FFI.
 pub type ContinuationHandle = u64;
+
+// ============================================================================
+// Region-Aware Allocation
+// ============================================================================
+
+thread_local! {
+    static ACTIVE_REGION: Cell<u64> = Cell::new(0);
+}
+
+/// Region-aware allocation. When a region is active, allocates from it.
+/// Otherwise falls back to the global allocator.
+unsafe fn runtime_alloc(layout: std::alloc::Layout) -> *mut u8 {
+    ACTIVE_REGION.with(|r| {
+        let region_id = r.get();
+        if region_id != 0 {
+            blood_region_alloc(region_id, layout.size(), layout.align()) as *mut u8
+        } else {
+            std::alloc::alloc(layout)
+        }
+    })
+}
+
+/// Region-aware deallocation. When a region is active, this is a no-op
+/// (the region will free everything on destroy). Otherwise uses global dealloc.
+unsafe fn runtime_dealloc(ptr: *mut u8, layout: std::alloc::Layout) {
+    ACTIVE_REGION.with(|r| {
+        if r.get() == 0 {
+            std::alloc::dealloc(ptr, layout);
+        }
+        // In a region: no-op. Memory freed when region is destroyed.
+    })
+}
+
+/// Region-aware reallocation. When a region is active, allocates new space
+/// from the region, copies data, returns new pointer (old space reclaimed
+/// when region is destroyed). Otherwise uses global realloc.
+unsafe fn runtime_realloc(ptr: *mut u8, old_layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+    ACTIVE_REGION.with(|r| {
+        let region_id = r.get();
+        if region_id != 0 {
+            let new_ptr = blood_region_alloc(region_id, new_size, old_layout.align()) as *mut u8;
+            if !new_ptr.is_null() && !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(ptr, new_ptr, old_layout.size().min(new_size));
+            }
+            new_ptr
+        } else {
+            std::alloc::realloc(ptr, old_layout, new_size)
+        }
+    })
+}
+
+/// Activate a region for the current thread. All subsequent String/Vec/Box
+/// allocations will route to this region until deactivated.
+#[no_mangle]
+pub extern "C" fn blood_region_activate(region_id: u64) {
+    ACTIVE_REGION.with(|r| r.set(region_id));
+}
+
+/// Deactivate the current region, reverting to global allocation.
+#[no_mangle]
+pub extern "C" fn blood_region_deactivate() {
+    ACTIVE_REGION.with(|r| r.set(0));
+}
 
 // ============================================================================
 // I/O Functions
@@ -153,10 +217,10 @@ pub unsafe extern "C" fn string_push(s: *mut BloodString, ch: i32) {
         let new_cap = std::cmp::max(new_len, (*s).capacity * 2).max(8);
         let new_ptr = if (*s).ptr.is_null() {
             let layout = std::alloc::Layout::from_size_align(new_cap as usize, 1).unwrap();
-            std::alloc::alloc(layout)
+            runtime_alloc(layout)
         } else {
             let old_layout = std::alloc::Layout::from_size_align((*s).capacity as usize, 1).unwrap();
-            std::alloc::realloc((*s).ptr, old_layout, new_cap as usize)
+            runtime_realloc((*s).ptr, old_layout, new_cap as usize)
         };
         (*s).ptr = new_ptr;
         (*s).capacity = new_cap;
@@ -186,10 +250,10 @@ pub unsafe extern "C" fn string_push_str(s: *mut BloodString, other: *const Bloo
         let new_cap = std::cmp::max(new_len, (*s).capacity * 2).max(8);
         let new_ptr = if (*s).ptr.is_null() {
             let layout = std::alloc::Layout::from_size_align(new_cap as usize, 1).unwrap();
-            std::alloc::alloc(layout)
+            runtime_alloc(layout)
         } else {
             let old_layout = std::alloc::Layout::from_size_align((*s).capacity as usize, 1).unwrap();
-            std::alloc::realloc((*s).ptr, old_layout, new_cap as usize)
+            runtime_realloc((*s).ptr, old_layout, new_cap as usize)
         };
         (*s).ptr = new_ptr;
         (*s).capacity = new_cap;
@@ -244,7 +308,7 @@ pub unsafe extern "C" fn str_to_string(s: *const BloodStr, out: *mut BloodString
     // Allocate memory for the new string
     let capacity = len;
     let layout = std::alloc::Layout::from_size_align(capacity as usize, 1).unwrap();
-    let new_ptr = std::alloc::alloc(layout);
+    let new_ptr = runtime_alloc(layout);
 
     if new_ptr.is_null() {
         // Allocation failed
@@ -310,7 +374,7 @@ pub unsafe extern "C" fn string_substring(
 
     // Allocate memory for the new string
     let layout = std::alloc::Layout::from_size_align(substr_len as usize, 1).unwrap();
-    let new_ptr = std::alloc::alloc(layout);
+    let new_ptr = runtime_alloc(layout);
 
     if new_ptr.is_null() {
         (*out).ptr = std::ptr::null_mut();
@@ -459,7 +523,7 @@ pub unsafe extern "C" fn blood_str_concat(a: BloodStr, b: BloodStr) -> BloodStr 
 
     // Allocate buffer for concatenated string
     let layout = std::alloc::Layout::from_size_align(total_len, 1).unwrap();
-    let ptr = std::alloc::alloc(layout);
+    let ptr = runtime_alloc(layout);
     if ptr.is_null() {
         eprintln!("blood: out of memory in str_concat");
         std::process::exit(1);
@@ -1005,7 +1069,7 @@ pub unsafe extern "C" fn string_to_uppercase(s: *const BloodStr) -> BloodVec {
     let capacity = len;
     let ptr = if len > 0 {
         let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
-        let ptr = std::alloc::alloc(layout);
+        let ptr = runtime_alloc(layout);
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
         ptr
     } else {
@@ -1044,7 +1108,7 @@ pub unsafe extern "C" fn string_to_lowercase(s: *const BloodStr) -> BloodVec {
     let capacity = len;
     let ptr = if len > 0 {
         let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
-        let ptr = std::alloc::alloc(layout);
+        let ptr = runtime_alloc(layout);
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
         ptr
     } else {
@@ -1117,7 +1181,7 @@ pub unsafe extern "C" fn string_replace(
         let capacity = len;
         let ptr = if len > 0 {
             let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
-            let ptr = std::alloc::alloc(layout);
+            let ptr = runtime_alloc(layout);
             std::ptr::copy_nonoverlapping(s_ref.ptr, ptr, len as usize);
             ptr
         } else {
@@ -1133,7 +1197,7 @@ pub unsafe extern "C" fn string_replace(
     let capacity = len;
     let ptr = if len > 0 {
         let layout = std::alloc::Layout::from_size_align(len as usize, 1).unwrap();
-        let ptr = std::alloc::alloc(layout);
+        let ptr = runtime_alloc(layout);
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len as usize);
         ptr
     } else {
@@ -1602,6 +1666,38 @@ pub unsafe extern "C" fn file_size(path: BloodStr) -> i64 {
 }
 
 // ============================================================================
+// Shell Command Execution
+// ============================================================================
+
+/// Execute a shell command and return its exit code.
+///
+/// Runs the command via `sh -c "<cmd>"` and returns:
+/// - The process exit code on success
+/// - -1 on invalid input or execution failure
+///
+/// # Safety
+/// The command string must be valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn system(cmd: BloodStr) -> i32 {
+    use std::process::Command;
+
+    if cmd.ptr.is_null() || cmd.len == 0 {
+        return -1;
+    }
+
+    let cmd_slice = std::slice::from_raw_parts(cmd.ptr, cmd.len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    match Command::new("sh").arg("-c").arg(cmd_str).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+// ============================================================================
 // Command-Line Argument Functions
 // ============================================================================
 
@@ -1854,7 +1950,7 @@ fn string_to_blood_str(s: String) -> BloodStr {
 
     // Allocate buffer for the string
     let layout = std::alloc::Layout::from_size_align(len, 1).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { runtime_alloc(layout) };
     if ptr.is_null() {
         eprintln!("blood: out of memory in string_to_blood_str");
         std::process::exit(1);
@@ -4163,7 +4259,7 @@ pub unsafe extern "C" fn vec_with_capacity(elem_size: i64, capacity: i64, out: *
             (capacity * elem_size) as usize,
             16,
         ).unwrap();
-        std::alloc::alloc(layout)
+        runtime_alloc(layout)
     } else {
         std::ptr::null_mut()
     };
@@ -4262,13 +4358,13 @@ pub unsafe extern "C" fn vec_push(vec: *mut BloodVec, elem: *const u8, elem_size
         // Use 16-byte alignment to support enums with i128 payloads
         let new_ptr = if v.ptr.is_null() {
             let layout = std::alloc::Layout::from_size_align(new_size, 16).unwrap();
-            std::alloc::alloc(layout)
+            runtime_alloc(layout)
         } else {
             let old_layout = std::alloc::Layout::from_size_align(
                 (v.capacity * elem_size) as usize,
                 16,
             ).unwrap();
-            std::alloc::realloc(v.ptr, old_layout, new_size)
+            runtime_realloc(v.ptr, old_layout, new_size)
         };
 
         v.ptr = new_ptr;
@@ -4523,7 +4619,7 @@ pub unsafe extern "C" fn vec_free(vec: *mut BloodVec, elem_size: i64) {
             (v.capacity * elem_size) as usize,
             16,
         ).unwrap();
-        std::alloc::dealloc(v.ptr, layout);
+        runtime_dealloc(v.ptr, layout);
     }
 
     // Zero out the Vec to prevent double-free if called again
@@ -4850,13 +4946,13 @@ pub unsafe extern "C" fn vec_reserve(vec: *mut BloodVec, additional: i64, elem_s
     ).unwrap();
 
     let new_ptr = if v.ptr.is_null() || v.capacity == 0 {
-        std::alloc::alloc(new_layout)
+        runtime_alloc(new_layout)
     } else {
         let old_layout = std::alloc::Layout::from_size_align(
             (v.capacity * elem_size) as usize,
             16,
         ).unwrap();
-        std::alloc::realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize)
+        runtime_realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize)
     };
 
     v.ptr = new_ptr;
@@ -4889,7 +4985,7 @@ pub unsafe extern "C" fn vec_shrink_to_fit(vec: *mut BloodVec, elem_size: i64) {
         16,
     ).unwrap();
 
-    let new_ptr = std::alloc::realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize);
+    let new_ptr = runtime_realloc(v.ptr, old_layout, (new_capacity * elem_size) as usize);
     v.ptr = new_ptr;
     v.capacity = new_capacity;
 }
@@ -5083,7 +5179,7 @@ pub unsafe extern "C" fn box_new(value: *const u8, size: i64) -> *mut u8 {
     }
 
     let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
-    let ptr = std::alloc::alloc(layout);
+    let ptr = runtime_alloc(layout);
 
     if !ptr.is_null() && !value.is_null() {
         std::ptr::copy_nonoverlapping(value, ptr, size as usize);
@@ -5137,7 +5233,7 @@ pub unsafe extern "C" fn box_free(boxed: *mut u8, size: i64) {
     }
 
     let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
-    std::alloc::dealloc(boxed, layout);
+    runtime_dealloc(boxed, layout);
 }
 
 /// Extract the inner value from a Box and deallocate it.
@@ -5166,7 +5262,7 @@ pub unsafe extern "C" fn box_into_inner(boxed: *mut u8, size: i64, out: *mut u8)
 
     // Deallocate the box
     let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap();
-    std::alloc::dealloc(boxed, layout);
+    runtime_dealloc(boxed, layout);
 }
 
 /// Convert a Box into a raw pointer without deallocating.
