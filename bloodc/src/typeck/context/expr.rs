@@ -35,6 +35,19 @@ impl<'a> TypeContext<'a> {
             return self.check_literal(lit, expected, expr.span);
         }
 
+        // Special case for unary negate of a literal (e.g., `-1`): propagate expected
+        // type through the negation so unsuffixed integer literals get the right type.
+        if let ast::ExprKind::Unary { op: ast::UnaryOp::Neg, operand } = &expr.kind {
+            if let ast::ExprKind::Literal(lit) = &operand.kind {
+                let inner = self.check_literal(lit, expected, operand.span)?;
+                return Ok(hir::Expr::new(
+                    hir::ExprKind::Unary { op: ast::UnaryOp::Neg, operand: Box::new(inner) },
+                    expected.clone(),
+                    expr.span,
+                ));
+            }
+        }
+
         // Special case for if expressions: propagate expected type to branches
         if let ast::ExprKind::If { condition, then_branch, else_branch } = &expr.kind {
             return self.check_if(condition, then_branch, else_branch.as_ref(), expected, expr.span);
@@ -5149,14 +5162,11 @@ impl<'a> TypeContext<'a> {
     ) -> Result<hir::Expr, Box<TypeError>> {
         let left_expr = self.infer_expr(left)?;
         // Use check_expr for right side to propagate left type for better literal inference
-        let right_expr = self.check_expr(right, &left_expr.ty).unwrap_or_else(|_| {
+        let right_expr = match self.check_expr(right, &left_expr.ty) {
+            Ok(expr) => expr,
             // Fall back to infer if check fails (types may legitimately differ)
-            self.infer_expr(right).unwrap_or_else(|_| hir::Expr::new(
-                hir::ExprKind::Literal(hir::LiteralValue::Int(0)),
-                Type::error(),
-                right.span,
-            ))
-        });
+            Err(_) => self.infer_expr(right)?,
+        };
 
         let result_ty = match op {
             ast::BinOp::Add | ast::BinOp::Sub | ast::BinOp::Mul | ast::BinOp::Div | ast::BinOp::Rem => {
@@ -7248,6 +7258,8 @@ impl<'a> TypeContext<'a> {
                                     let value_expr = if let Some(value) = &field.value {
                                         // Use check_expr to propagate expected type for better literal inference
                                         self.check_expr(value, &expected_ty).map_err(|_| {
+                                            // Type::error() is acceptable here: a diagnostic is emitted
+                                            // below. The found type is only used for the error message.
                                             let found = self.infer_expr(value).map(|e| e.ty).unwrap_or_else(|_| Type::error());
                                             TypeError::new(
                                                 TypeErrorKind::Mismatch {
@@ -7463,6 +7475,8 @@ impl<'a> TypeContext<'a> {
                                     let value_expr = if let Some(value) = &field.value {
                                         // Use check_expr to propagate expected type for better literal inference
                                         self.check_expr(value, &expected_ty).map_err(|_| {
+                                            // Type::error() is acceptable here: a diagnostic is emitted
+                                            // below. The found type is only used for the error message.
                                             let found = self.infer_expr(value).map(|e| e.ty).unwrap_or_else(|_| Type::error());
                                             TypeError::new(
                                                 TypeErrorKind::Mismatch {
@@ -7740,7 +7754,8 @@ impl<'a> TypeContext<'a> {
             let value_expr = if let Some(value) = &field.value {
                 // Use check_expr to propagate expected type for better literal inference
                 self.check_expr(value, &expected_ty).map_err(|_| {
-                    // Re-infer to get the actual found type for error message
+                    // Type::error() is acceptable here: a diagnostic is emitted below.
+                    // The found type is only used for the error message.
                     let found = self.infer_expr(value).map(|e| e.ty).unwrap_or_else(|_| Type::error());
                     TypeError::new(
                         TypeErrorKind::Mismatch {
