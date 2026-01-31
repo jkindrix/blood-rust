@@ -1632,6 +1632,23 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 format!("LLVM call error: {}", e), span
                             )])?;
 
+                        // Track active regions for effect suspension.
+                        // When a region is activated, push its ID onto the stack.
+                        // When deactivated, pop. This allows compile_perform_terminator
+                        // to emit blood_continuation_add_suspended_region calls.
+                        match builtin_name.as_str() {
+                            "blood_region_activate" => {
+                                // First argument is the region_id (i64)
+                                if let Some(region_id_val) = arg_vals.first() {
+                                    self.active_regions.push(region_id_val.into_int_value());
+                                }
+                            }
+                            "blood_region_deactivate" => {
+                                self.active_regions.pop();
+                            }
+                            _ => {}
+                        }
+
                         // If we used an output buffer, load the result from it and store to destination
                         if let Some(out_alloca) = output_buffer_alloca {
                             let dest_ptr = self.compile_mir_place(destination, body, escape_results)?;
@@ -2096,27 +2113,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         //
         // Tail-resumptive effects (like State.get/put, IO.print) don't need this
         // because they always resume immediately after the operation completes.
-        if !is_tail_resumptive {
-            // Non-tail-resumptive effects require continuation capture.
-            // Currently we fall through to the synchronous path which works
-            // as long as the handler resumes immediately (which Error.throw doesn't).
-            //
-            // Full continuation capture would require:
-            // 1. Generate LLVM function for "rest of computation" from target block
-            // 2. Pack live variables into a context struct
-            // 3. Call blood_continuation_create(callback, context)
-            // 4. Store continuation handle in effect context before blood_perform
-            // 5. Handler retrieves continuation and calls blood_continuation_resume
-            // 6. **Region Suspension**: For each active region scope containing effect-
-            //    captured allocations, call blood_continuation_add_suspended_region()
-            //    to defer deallocation until the continuation is resumed or dropped.
-            //    The runtime handles this automatically via:
-            //    - blood_continuation_add_suspended_region(cont_id, region_id) at capture
-            //    - blood_continuation_resume_with_regions() handles restoration on resume
-            //
-            // For now, non-tail-resumptive effects work correctly if the handler
-            // either resumes immediately or is a final control effect (like throw).
-        }
+        // For non-tail-resumptive effects, suspend any active regions so they
+        // stay alive across continuation capture. The continuation handle is
+        // created below (at create_perform_continuation) and the suspension
+        // calls are emitted there. We record whether suspension is needed here.
+        let needs_region_suspension = !is_tail_resumptive && !self.active_regions.is_empty();
 
         // Compile arguments
         let arg_vals: Vec<_> = args.iter()
@@ -2326,6 +2327,30 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // For non-tail-resumptive handlers, this allows the handler to continue
         // executing code after resume() returns.
         let continuation_val = self.create_perform_continuation()?;
+
+        // For non-tail-resumptive effects inside region blocks, suspend the
+        // active regions so they aren't destroyed while the continuation exists.
+        // Each active region is associated with the continuation so that
+        // blood_continuation_resume_with_regions() can restore them on resume.
+        if needs_region_suspension {
+            let add_suspended_fn = self.module.get_function("blood_continuation_add_suspended_region")
+                .ok_or_else(|| vec![Diagnostic::error(
+                    "Runtime function blood_continuation_add_suspended_region not found", span
+                )])?;
+
+            // Clone the region list to avoid borrow issues (active_regions
+            // is on `self` which we also mutate via builder calls).
+            let regions: Vec<_> = self.active_regions.clone();
+            for region_id in &regions {
+                self.builder.build_call(
+                    add_suspended_fn,
+                    &[continuation_val.into(), (*region_id).into()],
+                    "",
+                ).map_err(|e| vec![Diagnostic::error(
+                    format!("LLVM call error: {}", e), span
+                )])?;
+            }
+        }
 
         let result = self.builder.build_call(
             perform_fn,

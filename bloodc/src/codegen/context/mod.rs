@@ -756,6 +756,13 @@ pub struct CodegenContext<'ctx, 'a> {
     /// When a closure's environment is ≤16 bytes and the closure doesn't escape,
     /// captures are stored directly in the closure struct instead of through a pointer.
     pub(super) closure_analysis: Option<ClosureAnalysisResults>,
+    /// Stack of LLVM values representing currently active region IDs.
+    /// Pushed when `blood_region_activate(region_id)` is called during codegen,
+    /// popped when `blood_region_deactivate()` is called. Used by
+    /// `compile_perform_terminator` to emit `blood_continuation_add_suspended_region`
+    /// calls for non-tail-resumptive effects so that regions are kept alive
+    /// across continuation capture/resume.
+    pub(super) active_regions: Vec<inkwell::values::IntValue<'ctx>>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -812,6 +819,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             result_def_id: None,
             def_paths: HashMap::new(),
             closure_analysis: None,
+            active_regions: Vec::new(),
         }
     }
 
