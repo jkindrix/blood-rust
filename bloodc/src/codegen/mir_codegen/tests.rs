@@ -28,6 +28,7 @@ fn make_test_crate(body_expr: Expr, return_type: Type) -> HirCrate {
         is_async: false,
         is_unsafe: false,
         generics: Vec::new(),
+        const_generics: Vec::new(),
     };
 
     let fn_def = FnDef {
@@ -273,6 +274,7 @@ fn test_mir_codegen_let_binding() {
         is_async: false,
         is_unsafe: false,
         generics: Vec::new(),
+        const_generics: Vec::new(),
     };
 
     let fn_def = FnDef {

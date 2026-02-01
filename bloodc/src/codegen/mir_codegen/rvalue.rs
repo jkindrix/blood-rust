@@ -1884,6 +1884,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             ConstantKind::ZeroSized => {
                 Ok(self.context.i8_type().const_int(0, false).into())
             }
+
+            ConstantKind::ConstParam(id) => {
+                panic!("unsubstituted const param {:?} in codegen — monomorphization should have replaced this", id);
+            }
         }
     }
 

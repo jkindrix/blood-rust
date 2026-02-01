@@ -134,11 +134,11 @@ impl Unifier {
                 Ok(())
             }
 
-            // Arrays with same size
+            // Arrays with same size or const param size
             (
                 TypeKind::Array { element: e1, size: s1 },
                 TypeKind::Array { element: e2, size: s2 },
-            ) if s1 == s2 => self.unify(e1, e2, span),
+            ) if s1 == s2 || s1.is_param() || s2.is_param() => self.unify(e1, e2, span),
 
             // Slices
             (TypeKind::Slice { element: e1 }, TypeKind::Slice { element: e2 }) => {

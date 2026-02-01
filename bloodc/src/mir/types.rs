@@ -893,6 +893,8 @@ pub enum ConstantKind {
     StaticDef(DefId),
     /// Zero-sized type value.
     ZeroSized,
+    /// Const generic parameter (substituted during monomorphization).
+    ConstParam(crate::hir::ConstParamId),
 }
 
 // ============================================================================

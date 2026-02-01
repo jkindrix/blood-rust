@@ -153,6 +153,8 @@ pub struct FnSig {
     pub is_unsafe: bool,
     /// Generic type parameters (TyVarIds for each type parameter).
     pub generics: Vec<TyVarId>,
+    /// Const generic parameters (ConstParamIds for each const parameter).
+    pub const_generics: Vec<super::ty::ConstParamId>,
 }
 
 impl FnSig {
@@ -165,6 +167,7 @@ impl FnSig {
             is_async: false,
             is_unsafe: false,
             generics: Vec::new(),
+            const_generics: Vec::new(),
         }
     }
 }

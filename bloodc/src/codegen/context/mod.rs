@@ -239,6 +239,12 @@ mod tests;
 /// This creates a monomorphized copy of the MIR body where all type parameters
 /// (represented as Param(TyVarId)) are replaced with concrete types.
 fn substitute_mir_types(mir: &MirBody, subst: &HashMap<TyVarId, Type>) -> MirBody {
+    let ctx = SubstContext::new(subst.clone());
+    substitute_mir_types_with_ctx(mir, &ctx)
+}
+
+/// Substitute type and const parameters in a MIR body with full context.
+fn substitute_mir_types_with_ctx(mir: &MirBody, ctx: &SubstContext) -> MirBody {
     // Clone the MIR body
     let mut result = mir.clone();
 
@@ -247,7 +253,7 @@ fn substitute_mir_types(mir: &MirBody, subst: &HashMap<TyVarId, Type>) -> MirBod
     // not the actual captured environment type.
     for local in &mut result.locals {
         if local.name.as_deref() != Some("__env") {
-            local.ty = substitute_type(&local.ty, subst);
+            local.ty = substitute_type_with_ctx(&local.ty, ctx);
         }
     }
 
@@ -255,12 +261,12 @@ fn substitute_mir_types(mir: &MirBody, subst: &HashMap<TyVarId, Type>) -> MirBod
     for block in &mut result.basic_blocks {
         // Substitute in statements
         for stmt in &mut block.statements {
-            substitute_statement_types(stmt, subst);
+            substitute_statement_types_with_ctx(stmt, ctx);
         }
 
         // Substitute in terminator
         if let Some(term) = &mut block.terminator {
-            substitute_terminator_types(term, subst);
+            substitute_terminator_types_with_ctx(term, ctx);
         }
     }
 
@@ -289,12 +295,6 @@ impl SubstContext {
             _ => cv.clone(),
         }
     }
-}
-
-/// Substitute type parameters in a type (legacy wrapper).
-fn substitute_type(ty: &Type, subst: &HashMap<TyVarId, Type>) -> Type {
-    let ctx = SubstContext::new(subst.clone());
-    substitute_type_with_ctx(ty, &ctx)
 }
 
 /// Substitute type parameters in a type with full context.
@@ -357,23 +357,7 @@ fn substitute_type_with_ctx(ty: &Type, ctx: &SubstContext) -> Type {
 /// Result of type inference containing both type and const param substitutions.
 struct InferResult {
     type_subst: HashMap<TyVarId, Type>,
-    #[allow(dead_code)] // Const generic substitution — will be used when const generics codegen is complete
     const_subst: HashMap<hir::ConstParamId, hir::ConstValue>,
-}
-
-/// Infer type arguments by unifying generic signature with concrete types.
-///
-/// This matches the generic parameter types (which contain TypeKind::Param) with
-/// the concrete parameter types to determine what each type variable maps to.
-/// Also extracts const param mappings for const generics.
-fn infer_type_args(
-    generic_params: &[Type],
-    concrete_params: &[Type],
-    generic_ret: &Type,
-    concrete_ret: &Type,
-) -> HashMap<TyVarId, Type> {
-    let result = infer_type_and_const_args(generic_params, concrete_params, generic_ret, concrete_ret);
-    result.type_subst
 }
 
 /// Infer both type and const arguments.
@@ -472,24 +456,22 @@ fn unify_types(
     }
 }
 
-/// Substitute types in a MIR statement.
-fn substitute_statement_types(stmt: &mut crate::mir::types::Statement, subst: &HashMap<TyVarId, Type>) {
+/// Substitute types in a MIR statement with full context.
+fn substitute_statement_types_with_ctx(stmt: &mut crate::mir::types::Statement, ctx: &SubstContext) {
     use crate::mir::types::StatementKind;
 
     match &mut stmt.kind {
         StatementKind::Assign(_, rvalue) => {
-            substitute_rvalue_types(rvalue, subst);
+            substitute_rvalue_types_with_ctx(rvalue, ctx);
         }
-        // PushInlineHandler contains types in operations that need substitution
         StatementKind::PushInlineHandler { operations, .. } => {
             for op in operations {
                 for ty in &mut op.param_types {
-                    substitute_type(ty, subst);
+                    *ty = substitute_type_with_ctx(ty, ctx);
                 }
-                substitute_type(&op.return_type, subst);
+                op.return_type = substitute_type_with_ctx(&op.return_type, ctx);
             }
         }
-        // These statement kinds don't contain types that need substitution
         StatementKind::Nop
         | StatementKind::StorageLive(_)
         | StatementKind::StorageDead(_)
@@ -503,87 +485,97 @@ fn substitute_statement_types(stmt: &mut crate::mir::types::Statement, subst: &H
     }
 }
 
-/// Substitute types in an rvalue.
-fn substitute_rvalue_types(rvalue: &mut crate::mir::types::Rvalue, subst: &HashMap<TyVarId, Type>) {
+/// Substitute types in an rvalue with full context.
+fn substitute_rvalue_types_with_ctx(rvalue: &mut crate::mir::types::Rvalue, ctx: &SubstContext) {
     use crate::mir::types::Rvalue;
 
     match rvalue {
-        Rvalue::Use(op) => substitute_operand_types(op, subst),
+        Rvalue::Use(op) => substitute_operand_types_with_ctx(op, ctx),
         Rvalue::BinaryOp { left, right, .. } | Rvalue::CheckedBinaryOp { left, right, .. } => {
-            substitute_operand_types(left, subst);
-            substitute_operand_types(right, subst);
+            substitute_operand_types_with_ctx(left, ctx);
+            substitute_operand_types_with_ctx(right, ctx);
         }
-        Rvalue::UnaryOp { operand, .. } => substitute_operand_types(operand, subst),
+        Rvalue::UnaryOp { operand, .. } => substitute_operand_types_with_ctx(operand, ctx),
         Rvalue::Ref { .. } | Rvalue::AddressOf { .. } => {}
         Rvalue::Aggregate { operands, .. } => {
             for op in operands {
-                substitute_operand_types(op, subst);
+                substitute_operand_types_with_ctx(op, ctx);
             }
         }
         Rvalue::Discriminant(_) | Rvalue::Len(_) | Rvalue::VecLen(_) | Rvalue::ReadGeneration(_) => {}
         Rvalue::Cast { operand, target_ty } => {
-            substitute_operand_types(operand, subst);
-            *target_ty = substitute_type(target_ty, subst);
+            substitute_operand_types_with_ctx(operand, ctx);
+            *target_ty = substitute_type_with_ctx(target_ty, ctx);
         }
-        Rvalue::NullCheck(op) => substitute_operand_types(op, subst),
+        Rvalue::NullCheck(op) => substitute_operand_types_with_ctx(op, ctx),
         Rvalue::MakeGenPtr { address, generation, metadata } => {
-            substitute_operand_types(address, subst);
-            substitute_operand_types(generation, subst);
-            substitute_operand_types(metadata, subst);
+            substitute_operand_types_with_ctx(address, ctx);
+            substitute_operand_types_with_ctx(generation, ctx);
+            substitute_operand_types_with_ctx(metadata, ctx);
         }
         Rvalue::ZeroInit(ty) => {
-            *ty = substitute_type(ty, subst);
+            *ty = substitute_type_with_ctx(ty, ctx);
         }
         Rvalue::StringIndex { base, index } => {
-            substitute_operand_types(base, subst);
-            substitute_operand_types(index, subst);
+            substitute_operand_types_with_ctx(base, ctx);
+            substitute_operand_types_with_ctx(index, ctx);
         }
         Rvalue::ArrayToSlice { array_ref, .. } => {
-            substitute_operand_types(array_ref, subst);
+            substitute_operand_types_with_ctx(array_ref, ctx);
         }
     }
 }
 
-/// Substitute types in an operand.
-fn substitute_operand_types(op: &mut crate::mir::types::Operand, subst: &HashMap<TyVarId, Type>) {
-    use crate::mir::types::Operand;
+/// Substitute types in an operand with full context (including const param substitution).
+fn substitute_operand_types_with_ctx(op: &mut crate::mir::types::Operand, ctx: &SubstContext) {
+    use crate::mir::types::{Operand, ConstantKind};
 
     match op {
         Operand::Constant(c) => {
-            c.ty = substitute_type(&c.ty, subst);
+            c.ty = substitute_type_with_ctx(&c.ty, ctx);
+            // Substitute const params with concrete values
+            if let ConstantKind::ConstParam(id) = &c.kind {
+                if let Some(concrete_val) = ctx.const_subst.get(id) {
+                    match concrete_val {
+                        hir::ConstValue::Uint(n) => c.kind = ConstantKind::Uint(*n),
+                        hir::ConstValue::Int(n) => c.kind = ConstantKind::Int(*n as i128),
+                        _ => {}
+                    }
+                }
+            }
         }
         Operand::Copy(_) | Operand::Move(_) => {}
     }
 }
 
-/// Substitute types in a terminator.
-fn substitute_terminator_types(term: &mut crate::mir::types::Terminator, subst: &HashMap<TyVarId, Type>) {
+/// Substitute types in a terminator with full context.
+fn substitute_terminator_types_with_ctx(term: &mut crate::mir::types::Terminator, ctx: &SubstContext) {
     use crate::mir::types::TerminatorKind;
 
     match &mut term.kind {
         TerminatorKind::Call { func, args, .. } => {
-            substitute_operand_types(func, subst);
+            substitute_operand_types_with_ctx(func, ctx);
             for arg in args {
-                substitute_operand_types(arg, subst);
+                substitute_operand_types_with_ctx(arg, ctx);
             }
         }
         TerminatorKind::SwitchInt { discr, .. } => {
-            substitute_operand_types(discr, subst);
+            substitute_operand_types_with_ctx(discr, ctx);
         }
         TerminatorKind::Assert { cond, .. } => {
-            substitute_operand_types(cond, subst);
+            substitute_operand_types_with_ctx(cond, ctx);
         }
         TerminatorKind::DropAndReplace { value, .. } => {
-            substitute_operand_types(value, subst);
+            substitute_operand_types_with_ctx(value, ctx);
         }
         TerminatorKind::Perform { args, .. } => {
             for arg in args {
-                substitute_operand_types(arg, subst);
+                substitute_operand_types_with_ctx(arg, ctx);
             }
         }
         TerminatorKind::Resume { value } => {
             if let Some(val) = value {
-                substitute_operand_types(val, subst);
+                substitute_operand_types_with_ctx(val, ctx);
             }
         }
         TerminatorKind::Goto { .. }
@@ -722,8 +714,8 @@ pub struct CodegenContext<'ctx, 'a> {
     /// Generic function MIR bodies for monomorphization.
     /// Maps DefId to MirBody for generic functions.
     pub(super) generic_mir_bodies: HashMap<DefId, MirBody>,
-    /// Monomorphization cache: (generic DefId, type args) -> monomorphized DefId.
-    pub(super) mono_cache: HashMap<(DefId, Vec<Type>), DefId>,
+    /// Monomorphization cache: (generic DefId, type args, const args) -> monomorphized DefId.
+    pub(super) mono_cache: HashMap<(DefId, Vec<Type>, Vec<(hir::ConstParamId, hir::ConstValue)>), DefId>,
     /// Counter for generating unique monomorphized DefIds (for non-closure functions).
     pub(super) mono_counter: u32,
     /// Counter for generating unique monomorphized closure DefIds.
@@ -919,7 +911,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         for (&def_id, mir_body) in mir_bodies {
             // Store generic function MIR bodies
             if let Some((fn_def, _)) = self.generic_fn_defs.get(&def_id) {
-                if !fn_def.sig.generics.is_empty() {
+                if !fn_def.sig.generics.is_empty() || !fn_def.sig.const_generics.is_empty() {
                     self.generic_mir_bodies.insert(def_id, mir_body.clone());
                 }
             }
@@ -1098,7 +1090,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
 
                 // Store generic function definitions for on-demand monomorphization
-                if !fn_def.sig.generics.is_empty() {
+                if !fn_def.sig.generics.is_empty() || !fn_def.sig.const_generics.is_empty() {
                     if let Some(body_id) = fn_def.body_id {
                         if let Some(body) = hir_crate.get_body(body_id) {
                             self.generic_fn_defs.insert(*def_id, (fn_def.clone(), body.clone()));
@@ -2386,7 +2378,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         fn_def: &hir::FnDef,
     ) -> Result<(), Vec<Diagnostic>> {
         // Skip generic functions - they will be monomorphized on-demand at call sites
-        if !fn_def.sig.generics.is_empty() {
+        if !fn_def.sig.generics.is_empty() || !fn_def.sig.const_generics.is_empty() {
             return Ok(());
         }
 
@@ -2626,10 +2618,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             None => return None,
         };
 
-        // Infer type arguments by unifying generic signature with concrete types
+        // Infer type and const arguments by unifying generic signature with concrete types
         // This is needed for higher-order generics like `apply<T, R>(f: fn(T) -> R, x: T) -> R`
         // where concrete_params = [fn(i32) -> i32, i32] but we need type_args = [i32, i32]
-        let subst = infer_type_args(
+        let infer_result = infer_type_and_const_args(
             &fn_def.sig.inputs,
             concrete_params,
             &fn_def.sig.output,
@@ -2638,7 +2630,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Build type args list from inferred substitution (in order of fn_def.sig.generics)
         let type_args: Vec<Type> = fn_def.sig.generics.iter()
-            .filter_map(|tyvar_id| subst.get(tyvar_id).cloned())
+            .filter_map(|tyvar_id| infer_result.type_subst.get(tyvar_id).cloned())
             .collect();
 
         // Critical: check if type inference succeeded
@@ -2646,8 +2638,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             return None;
         }
 
-        // Check if already monomorphized
-        let cache_key = (generic_def_id, type_args.clone());
+        // Build const args for cache key
+        let mut const_args_sorted: Vec<_> = infer_result.const_subst.iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        const_args_sorted.sort_by_key(|(k, _)| k.0);
+
+        // Check if already monomorphized (including const args in cache key)
+        let cache_key = (generic_def_id, type_args.clone(), const_args_sorted.clone());
         if let Some(&mono_def_id) = self.mono_cache.get(&cache_key) {
             return self.functions.get(&mono_def_id).copied();
         }
@@ -2662,13 +2660,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let mono_def_id = DefId::new(0xFFFE_0000 + self.mono_counter);
         self.mono_counter += 1;
 
-        // Clone and substitute types in MIR body
-        let mut mono_mir = substitute_mir_types(&mir_body, &subst);
+        // Clone and substitute types and const params in MIR body
+        let subst_ctx = SubstContext {
+            type_subst: infer_result.type_subst,
+            const_subst: infer_result.const_subst,
+        };
+        let mut mono_mir = substitute_mir_types_with_ctx(&mir_body, &subst_ctx);
 
         // Monomorphize closures referenced in this function.
         // Closures that capture generic-typed variables need their MIR bodies
         // to also be type-substituted with the same substitution map.
-        let closure_remap = self.monomorphize_closures_recursive(&mono_mir, &subst);
+        let closure_remap = self.monomorphize_closures_recursive(&mono_mir, &subst_ctx.type_subst);
         remap_closure_def_ids(&mut mono_mir, &closure_remap);
 
         // Build mangled name for monomorphized function.
@@ -3165,6 +3167,27 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // u128_to_string(u128) -> {*i8, i64} - convert u128 to string
         let u128_to_string_type = str_slice_type.fn_type(&[i128_type.into()], false); // u128 has same LLVM type as i128
         self.module.add_function("u128_to_string", u128_to_string_type, None);
+
+        // i32_to_i64(i32) -> i64 - widen i32 to i64
+        let i32_to_i64_type = i64_type.fn_type(&[i32_type.into()], false);
+        self.module.add_function("i32_to_i64", i32_to_i64_type, None);
+
+        // i64_to_i32(i64) -> i32 - truncate i64 to i32
+        let i64_to_i32_type = i32_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("i64_to_i32", i64_to_i32_type, None);
+
+        // char_from_u32(u32) -> u32 (char as u32) - convert code point to char
+        let char_from_u32_type = i32_type.fn_type(&[i32_type.into()], false);
+        self.module.add_function("char_from_u32", char_from_u32_type, None);
+
+        // parse_f64(str) -> f64 - parse string as f64, returns 0.0 on failure
+        let f64_ty = self.context.f64_type();
+        let parse_f64_type = f64_ty.fn_type(&[str_slice_type.into()], false);
+        self.module.add_function("parse_f64", parse_f64_type, None);
+
+        // parse_i64_radix(str, u32) -> i64 - parse string as i64 with radix, returns 0 on failure
+        let parse_i64_radix_type = i64_type.fn_type(&[str_slice_type.into(), i32_type.into()], false);
+        self.module.add_function("parse_i64_radix", parse_i64_radix_type, None);
 
         // read_line() -> {*i8, i64} - read a line from stdin
         let read_line_type = str_slice_type.fn_type(&[], false);
@@ -3940,6 +3963,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Read file contents as String
         let file_read_to_string_type = str_slice_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("file_read_to_string", file_read_to_string_type, None);
+
+        // file_delete(path: {*i8, i64}) -> i32 (bool: 1 = success, 0 = error)
+        // Delete a file at the given path
+        let file_delete_type = i32_type.fn_type(&[str_slice_type.into()], false);
+        self.module.add_function("file_delete", file_delete_type, None);
 
         // file_append_string(path: {*i8, i64}, content: {*i8, i64}) -> i32 (0 = success, non-zero = error)
         // Append string content to a file (creates if needed)

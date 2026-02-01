@@ -1291,6 +1291,10 @@ fn hash_expr(expr: &hir::Expr, items: &HashMap<DefId, hir::Item>, hasher: &mut C
             hash_expr(expr, items, hasher);
             hasher.update_u64(*array_len);
         }
+        hir::ExprKind::ConstParam(id) => {
+            hasher.update_u8(0x2E);
+            hasher.update_u32(id.0);
+        }
         hir::ExprKind::Error => {
             hasher.update_u8(0xFF);
         }
@@ -1915,6 +1919,7 @@ fn extract_expr_deps(expr: &hir::Expr, deps: &mut HashSet<DefId>) {
         // (Local is handled above at line 1330)
         hir::ExprKind::Literal(_)
         | hir::ExprKind::Continue { .. }
+        | hir::ExprKind::ConstParam(_)
         | hir::ExprKind::Default
         | hir::ExprKind::Error => {}
     }

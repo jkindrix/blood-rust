@@ -238,6 +238,7 @@ pub fn collect_local_refs(expr: &Expr, refs: &mut Vec<CaptureCandidate>, in_muta
         | ExprKind::Def(_)
         | ExprKind::Continue { .. }
         | ExprKind::Default
+        | ExprKind::ConstParam(_)
         | ExprKind::Error
         | ExprKind::MethodFamily { .. }
         | ExprKind::MethodCall { .. }
@@ -476,6 +477,18 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
 
             ExprKind::Cast { expr: inner, target_ty } => {
                 self.lower_cast(inner, target_ty, expr.span)
+            }
+
+            ExprKind::ConstParam(id) => {
+                let temp = self.new_temp(expr.ty.clone(), expr.span);
+                self.push_assign(
+                    Place::local(temp),
+                    Rvalue::Use(Operand::Constant(Constant::new(
+                        expr.ty.clone(),
+                        ConstantKind::ConstParam(*id),
+                    ))),
+                );
+                Ok(Operand::Copy(Place::local(temp)))
             }
 
             ExprKind::Error => {

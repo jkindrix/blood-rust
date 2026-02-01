@@ -426,6 +426,9 @@ pub enum ExprKind {
         expr: Option<Box<Expr>>,
     },
 
+    /// A const generic parameter used as an expression value: `N`
+    ConstParam(crate::hir::ConstParamId),
+
     /// Error placeholder (for error recovery).
     Error,
 }

@@ -386,6 +386,7 @@ impl EffectInferencer {
             ExprKind::Local(_) |
             ExprKind::Def(_) |
             ExprKind::MethodFamily { .. } |
+            ExprKind::ConstParam(_) |
             ExprKind::Continue { .. } |
             ExprKind::Return(None) |
             ExprKind::Break { value: None, .. } |

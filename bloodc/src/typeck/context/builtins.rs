@@ -405,6 +405,7 @@ impl<'a> TypeContext<'a> {
             is_async: false,
             is_unsafe: false,
             generics: Vec::new(),
+            const_generics: Vec::new(),
         });
 
         // Track runtime function name for codegen to resolve runtime function calls
@@ -485,13 +486,11 @@ impl<'a> TypeContext<'a> {
             let u32_ty = Type::u32();
             let ref_str_ty = Type::reference(Type::str(), false);
 
-            // Parse string to f64, returns None on parse failure
-            let option_f64 = Type::adt(option_def_id, vec![f64_ty.clone()]);
-            self.register_builtin_fn("parse_f64", vec![ref_str_ty.clone()], option_f64);
+            // Parse string to f64, returns 0.0 on parse failure
+            self.register_builtin_fn("parse_f64", vec![ref_str_ty.clone()], f64_ty.clone());
 
-            // Parse string to i64 with given radix, returns None on parse failure
-            let option_i64 = Type::adt(option_def_id, vec![i64_ty.clone()]);
-            self.register_builtin_fn("parse_i64_radix", vec![ref_str_ty.clone(), u32_ty.clone()], option_i64);
+            // Parse string to i64 with given radix, returns 0 on parse failure
+            self.register_builtin_fn("parse_i64_radix", vec![ref_str_ty.clone(), u32_ty.clone()], i64_ty.clone());
 
             // Parse string to u8 with given radix, returns None on parse failure
             let option_u8 = Type::adt(option_def_id, vec![u8_ty.clone()]);
@@ -501,10 +500,9 @@ impl<'a> TypeContext<'a> {
             let option_u32 = Type::adt(option_def_id, vec![u32_ty.clone()]);
             self.register_builtin_fn("parse_u32_radix", vec![ref_str_ty.clone(), u32_ty.clone()], option_u32);
 
-            // Convert u32 code point to char, returns None if invalid
+            // Convert u32 code point to char (returns U+FFFD for invalid code points)
             let char_ty = Type::char();
-            let option_char = Type::adt(option_def_id, vec![char_ty.clone()]);
-            self.register_builtin_fn("char_from_u32", vec![u32_ty.clone()], option_char);
+            self.register_builtin_fn("char_from_u32", vec![u32_ty.clone()], char_ty.clone());
         }
 
         // Register Result<T, E> as a built-in enum
@@ -3228,6 +3226,7 @@ impl<'a> TypeContext<'a> {
             is_async: false,
             is_unsafe: false,
             generics,
+            const_generics: Vec::new(),
         });
 
         // Track runtime function name

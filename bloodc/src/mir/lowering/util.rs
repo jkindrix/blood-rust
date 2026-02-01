@@ -513,6 +513,18 @@ pub trait ExprLowering {
                 Ok(Operand::Copy(Place::local(temp)))
             }
 
+            ExprKind::ConstParam(id) => {
+                let temp = self.new_temp(expr.ty.clone(), expr.span);
+                self.push_assign(
+                    Place::local(temp),
+                    Rvalue::Use(Operand::Constant(Constant::new(
+                        expr.ty.clone(),
+                        ConstantKind::ConstParam(*id),
+                    ))),
+                );
+                Ok(Operand::Copy(Place::local(temp)))
+            }
+
             ExprKind::Error => {
                 Err(vec![Diagnostic::error("lowering error expression".to_string(), expr.span)])
             }

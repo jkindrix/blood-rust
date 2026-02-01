@@ -478,6 +478,7 @@ impl<'hir> LinearityChecker<'hir> {
             | hir::ExprKind::Continue { .. }
             | hir::ExprKind::Error
             | hir::ExprKind::MethodFamily { .. }
+            | hir::ExprKind::ConstParam(_)
             | hir::ExprKind::Resume { value: None }
             | hir::ExprKind::Default => {}
         }

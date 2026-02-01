@@ -328,6 +328,7 @@ impl<'a> TypeContext<'a> {
         if let Some(ref type_params) = func.type_params {
             // Map type param names from AST to TyVarIds from the signature
             let mut generic_idx = 0;
+            let mut const_generic_idx = 0;
             for generic_param in &type_params.params {
                 match generic_param {
                     ast::GenericParam::Type(type_param) => {
@@ -345,8 +346,16 @@ impl<'a> TypeContext<'a> {
                     }
                     ast::GenericParam::Const(const_param) => {
                         let param_name = self.symbol_to_string(const_param.name.node);
-                        let const_id = hir::ConstParamId::new(self.next_const_param_id);
-                        self.next_const_param_id += 1;
+                        // Reuse the ConstParamId from the signature to ensure consistency
+                        // between the function's array types and const param expressions in the body
+                        let const_id = if const_generic_idx < sig.const_generics.len() {
+                            sig.const_generics[const_generic_idx]
+                        } else {
+                            let id = hir::ConstParamId::new(self.next_const_param_id);
+                            self.next_const_param_id += 1;
+                            id
+                        };
+                        const_generic_idx += 1;
                         self.const_params.insert(param_name, const_id);
                     }
                 }

@@ -482,6 +482,7 @@ impl<'a> TypeContext<'a> {
             | hir::ExprKind::Def(_)
             | hir::ExprKind::Continue { .. }
             | hir::ExprKind::MethodFamily { .. }
+            | hir::ExprKind::ConstParam(_)
             | hir::ExprKind::Default
             | hir::ExprKind::Error => {}
         }

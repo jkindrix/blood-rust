@@ -1692,8 +1692,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     // Function not found - this is likely a generic function.
                     // Try to monomorphize it on-demand with concrete types from the call.
                     if let crate::hir::TypeKind::Fn { params, ret, .. } = ty.kind() {
+                        // For const-generic functions, the function type may still have
+                        // Param sizes in array types. Use actual argument types from the
+                        // call operands which have concrete sizes.
+                        let concrete_params: Vec<_> = if args.len() == params.len() {
+                            args.iter().map(|arg| self.get_operand_type(arg, body)).collect()
+                        } else {
+                            params.clone()
+                        };
+                        // Use destination type for concrete return if available
+                        let concrete_ret = self.get_place_base_type(destination, body)
+                            .unwrap_or_else(|_| ret.clone());
                         // Attempt monomorphization
-                        if let Some(mono_fn) = self.monomorphize_function(*def_id, params, ret) {
+                        if let Some(mono_fn) = self.monomorphize_function(*def_id, &concrete_params, &concrete_ret) {
                             self.builder.build_call(mono_fn, &arg_metas, "mono_call")
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM call error: {}", e), span
@@ -1704,7 +1715,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                 format!("Failed to monomorphize generic function {:?}.\n\
                                          Concrete type at call site: Fn {{ params: {:?}, ret: {:?} }}\n\
                                          This may indicate missing MIR body or type substitution error.",
-                                        def_id, params, ret),
+                                        def_id, concrete_params, ret),
                                 span
                             )]);
                         }

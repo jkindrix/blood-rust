@@ -4418,6 +4418,15 @@ impl<'a> TypeContext<'a> {
         if path.segments.len() == 1 {
             let name = self.symbol_to_string(path.segments[0].name.node);
 
+            // Check const generic parameters first (e.g., `N` in `fn foo<const N: usize>`)
+            if let Some(&const_param_id) = self.const_params.get(&name) {
+                return Ok(hir::Expr::new(
+                    hir::ExprKind::ConstParam(const_param_id),
+                    Type::usize(),
+                    span,
+                ));
+            }
+
             match self.resolver.lookup(&name) {
                 Some(Binding::Local { local_id, ty, .. }) => {
                     Ok(hir::Expr::new(

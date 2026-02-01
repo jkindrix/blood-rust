@@ -386,6 +386,7 @@ impl<'a> MacroExpander<'a> {
                 | ExprKind::Def(_)
                 | ExprKind::Continue { .. }
                 | ExprKind::MethodFamily { .. }
+                | ExprKind::ConstParam(_)
                 | ExprKind::Default
                 | ExprKind::Error) => kind,
         };
@@ -461,6 +462,16 @@ impl<'a> MacroExpander<'a> {
                         self.make_panic_call(&format!("not implemented: {}", format_str), span)
                     }
                 }
+                "unreachable" => {
+                    if format_str.is_empty() {
+                        self.make_panic_call("internal error: entered unreachable code", span)
+                    } else {
+                        self.make_panic_call(
+                            &format!("internal error: entered unreachable code: {}", format_str),
+                            span,
+                        )
+                    }
+                }
                 "format" => {
                     // format! with no args just returns the string
                     ExprKind::Literal(LiteralValue::String(format_str.to_string()))
@@ -507,6 +518,22 @@ impl<'a> MacroExpander<'a> {
                             // Prepend "not implemented: " to the message
                             let prefix_expr = Expr::new(
                                 ExprKind::Literal(LiteralValue::String("not implemented: ".to_string())),
+                                Type::str(),
+                                span,
+                            );
+                            match self.make_str_concat(prefix_expr, formatted_expr, span) {
+                                Ok(combined) => self.make_panic_expr_call(combined, span),
+                                Err(e) => {
+                                    self.diagnostics.push(Diagnostic::error(e, span));
+                                    ExprKind::Error
+                                }
+                            }
+                        }
+                        "unreachable" => {
+                            let prefix_expr = Expr::new(
+                                ExprKind::Literal(LiteralValue::String(
+                                    "internal error: entered unreachable code: ".to_string(),
+                                )),
                                 Type::str(),
                                 span,
                             );
@@ -775,6 +802,18 @@ impl<'a> MacroExpander<'a> {
                     return Err("cannot format never type".to_string());
                 }
             },
+            TypeKind::Ref { inner, .. } => {
+                match inner.kind() {
+                    TypeKind::Primitive(PrimitiveTy::Str) => ("", false), // &str is already a string
+                    TypeKind::Primitive(PrimitiveTy::String) => ("", false), // &String is already a string
+                    _ => {
+                        return Err(format!(
+                            "cannot format value of type {}; only primitive types are supported",
+                            ty
+                        ));
+                    }
+                }
+            }
             _ => {
                 return Err(format!(
                     "cannot format value of type {}; only primitive types are supported",

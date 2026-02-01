@@ -1268,6 +1268,9 @@ impl<'a> TypeContext<'a> {
             }
         }
 
+        // Collect const generics before restoring scope
+        let const_generics_vec: Vec<hir::ConstParamId> = self.const_params.values().copied().collect();
+
         // Restore previous generic params scope (after processing signature including effects)
         self.generic_params = saved_generic_params;
         self.const_params = saved_const_params;
@@ -1275,7 +1278,30 @@ impl<'a> TypeContext<'a> {
 
         let mut sig = hir::FnSig::new(param_types, return_type);
         sig.generics = generics_vec;
+        sig.const_generics = const_generics_vec;
         self.fn_sigs.insert(def_id, sig);
+
+        // Check for duplicate function signatures (same name AND same parameter types).
+        // Multiple dispatch allows same-name functions with different signatures,
+        // but identical signatures are an error.
+        if let Some(Binding::Methods(ref methods)) = self.resolver.current_scope().bindings.get(&name) {
+            for &other_id in methods {
+                if other_id == def_id {
+                    continue;
+                }
+                if let Some(other_sig) = self.fn_sigs.get(&other_id) {
+                    let current_sig = &self.fn_sigs[&def_id];
+                    if other_sig.inputs.len() == current_sig.inputs.len()
+                        && other_sig.inputs.iter().zip(current_sig.inputs.iter()).all(|(a, b)| a == b)
+                    {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::DuplicateDefinition { name },
+                            func.span,
+                        )));
+                    }
+                }
+            }
+        }
 
         // Queue function for later body type-checking
         if func.body.is_some() {
@@ -1779,6 +1805,7 @@ impl<'a> TypeContext<'a> {
                 is_async: false,
                 is_unsafe: false,
                 generics: generics_vec.clone(),
+                const_generics: Vec::new(),
             });
 
             // Note: Effect operations are not builtins - they will be handled
@@ -2102,6 +2129,7 @@ impl<'a> TypeContext<'a> {
                         is_async: func.qualifiers.is_async,
                         is_unsafe: func.qualifiers.is_unsafe,
                         generics: method_generics,
+                        const_generics: Vec::new(),
                     };
 
                     self.fn_sigs.insert(method_def_id, sig);
@@ -2311,6 +2339,7 @@ impl<'a> TypeContext<'a> {
                         is_async: func.qualifiers.is_async,
                         is_unsafe: func.qualifiers.is_unsafe,
                         generics: method_generics,
+                        const_generics: Vec::new(),
                     };
 
                     self.fn_sigs.insert(method_def_id, sig.clone());

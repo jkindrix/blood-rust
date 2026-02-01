@@ -344,6 +344,7 @@ fn contains_nested_handle(expr: &Expr) -> bool {
         | ExprKind::Perform { .. }
         | ExprKind::Resume { .. }
         | ExprKind::Continue { .. }
+        | ExprKind::ConstParam(_)
         | ExprKind::Default
         | ExprKind::MethodFamily { .. }
         | ExprKind::Error => false,
@@ -812,6 +813,7 @@ fn contains_escaping_control_flow(expr: &Expr) -> bool {
         | ExprKind::Local(_)
         | ExprKind::Def(_)
         | ExprKind::Continue { .. }
+        | ExprKind::ConstParam(_)
         | ExprKind::Default
         | ExprKind::Error => false,
     }

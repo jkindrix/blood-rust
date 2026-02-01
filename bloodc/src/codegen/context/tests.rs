@@ -31,6 +31,7 @@ fn make_test_crate(body_expr: Expr, return_type: Type) -> Crate {
         is_async: false,
         is_unsafe: false,
         generics: Vec::new(),
+        const_generics: Vec::new(),
     };
 
     let fn_def = hir::FnDef {

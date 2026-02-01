@@ -232,7 +232,7 @@ fn check_expr_tail_resumptive(expr: &hir::Expr, in_tail_position: bool) -> bool 
         ArrayToSlice { expr, .. } => check_expr_tail_resumptive(expr, false),
 
         // Leaf nodes - no resume inside
-        Literal(_) | Local(_) | Def(_) | Continue { .. } | Error
+        Literal(_) | Local(_) | Def(_) | Continue { .. } | ConstParam(_) | Error
         | MethodFamily { .. } | Default => true,
     }
 }

@@ -321,6 +321,7 @@ fn count_resumes(expr: &Expr) -> usize {
         | ExprKind::Continue { .. }
         | ExprKind::Closure { .. } // Closures define their own scope; resumes in body are separate
         | ExprKind::MethodFamily { .. }
+        | ExprKind::ConstParam(_)
         | ExprKind::Default
         | ExprKind::Error => 0,
     }
