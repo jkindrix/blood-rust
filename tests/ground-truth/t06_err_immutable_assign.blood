@@ -1,0 +1,8 @@
+// XFAIL: immutability check not yet implemented in typeck
+// Test: assigning to an immutable let binding should fail
+// TODO: change to COMPILE_FAIL once immutability enforcement is added
+fn main() -> i32 {
+    let x: i32 = 10;
+    x = 20;
+    0
+}

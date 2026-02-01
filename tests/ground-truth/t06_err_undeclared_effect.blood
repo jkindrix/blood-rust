@@ -1,0 +1,15 @@
+// XFAIL: effect declaration check not yet enforced
+// Test: performing an effect not declared in function signature should fail
+// TODO: change to COMPILE_FAIL once effect checking is enforced
+effect Logger {
+    op log(msg: i32) -> ();
+}
+
+fn pure_function() -> i32 {
+    perform Logger.log(42);
+    0
+}
+
+fn main() -> i32 {
+    0
+}
