@@ -1880,6 +1880,62 @@ pub extern "C" fn f64_to_string(n: f64) -> BloodStr {
     string_to_blood_str(s)
 }
 
+/// Convert an i32 to an i64.
+#[no_mangle]
+pub extern "C" fn i32_to_i64(val: i32) -> i64 {
+    val as i64
+}
+
+/// Convert an i64 to an i32 (truncating).
+#[no_mangle]
+pub extern "C" fn i64_to_i32(val: i64) -> i32 {
+    val as i32
+}
+
+/// Convert a u32 code point to a char (returned as u32).
+///
+/// Returns the Unicode replacement character U+FFFD for invalid code points.
+#[no_mangle]
+pub extern "C" fn char_from_u32(code: u32) -> u32 {
+    char::from_u32(code).unwrap_or('\u{FFFD}') as u32
+}
+
+/// Parse a string as f64.
+///
+/// Returns 0.0 on parse failure.
+///
+/// # Safety
+/// The string pointer must be valid for `s.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn parse_f64(s: BloodStr) -> f64 {
+    if s.ptr.is_null() || s.len == 0 {
+        return 0.0;
+    }
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    std::str::from_utf8(slice)
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+}
+
+/// Parse a string as i64 with the given radix.
+///
+/// Returns 0 on parse failure.
+///
+/// # Safety
+/// The string pointer must be valid for `s.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn parse_i64_radix(s: BloodStr, radix: u32) -> i64 {
+    if s.ptr.is_null() || s.len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
+    std::str::from_utf8(slice)
+        .ok()
+        .and_then(|s| i64::from_str_radix(s, radix).ok())
+        .unwrap_or(0)
+}
+
 /// Convert an i8 to a string.
 ///
 /// Returns a newly allocated BloodStr containing the string representation.
