@@ -4380,3 +4380,51 @@ fn test_file_io_builtins() {
 fn test_cli_args_builtins() {
     assert_file_type_checks("tests/fixtures/cli_args_builtins.blood");
 }
+
+/// Test E0701: module not found during module resolution.
+/// References `mod nonexistent_child_module;` where no corresponding file exists.
+#[test]
+fn test_module_not_found_error() {
+    let file_path = "tests/fixtures/modules/io_error_main.blood";
+    let result = check_file_with_modules(file_path);
+
+    assert!(result.is_err(), "Expected error for missing module file");
+
+    let errors = result.unwrap_err();
+    assert!(!errors.is_empty(), "Expected at least one error");
+
+    let has_module_error = errors.iter().any(|e| e.message.contains("cannot find module"));
+    assert!(
+        has_module_error,
+        "Expected 'cannot find module' error, got:\n{}",
+        errors
+            .iter()
+            .map(|e| format!("  - {}", e.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Test E0703: parse error in an imported module.
+/// The child module contains intentionally invalid syntax.
+#[test]
+fn test_module_parse_error() {
+    let file_path = "tests/fixtures/modules/parse_error_main.blood";
+    let result = check_file_with_modules(file_path);
+
+    assert!(result.is_err(), "Expected error for module with parse error");
+
+    let errors = result.unwrap_err();
+    assert!(!errors.is_empty(), "Expected at least one error");
+
+    let has_parse_error = errors.iter().any(|e| e.message.contains("parse error"));
+    assert!(
+        has_parse_error,
+        "Expected 'parse error' in error message, got:\n{}",
+        errors
+            .iter()
+            .map(|e| format!("  - {}", e.message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
