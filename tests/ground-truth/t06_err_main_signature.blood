@@ -1,0 +1,5 @@
+// XFAIL: main function signature check not yet implemented
+// Test: main with wrong parameter signature should fail (E0219)
+fn main(x: i32) -> i32 {
+    x
+}

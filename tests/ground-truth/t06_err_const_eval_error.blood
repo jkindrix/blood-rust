@@ -1,0 +1,7 @@
+// XFAIL: const evaluation error detection not yet enforced at compile time
+// Test: division by zero in const context should fail (E0235)
+const BAD: i32 = 10 / 0;
+
+fn main() -> i32 {
+    0
+}

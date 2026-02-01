@@ -1,0 +1,9 @@
+// XFAIL: FFI type safety checking not yet implemented
+// Test: non-FFI-safe type in extern function should fail (E0501)
+extern "C" {
+    fn takes_string(s: String) -> i32;
+}
+
+fn main() -> i32 {
+    0
+}

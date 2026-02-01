@@ -1,0 +1,17 @@
+// XFAIL: multiple dispatch method resolution not yet implemented
+// Test: calling a multimethod with no matching specialization should fail (E0601)
+struct Cat {}
+struct Dog {}
+
+trait Greet {
+    fn greet(self) -> i32;
+}
+
+impl Greet for Cat {
+    fn greet(self) -> i32 { 1 }
+}
+
+fn main() -> i32 {
+    let d: Dog = Dog {};
+    d.greet()
+}

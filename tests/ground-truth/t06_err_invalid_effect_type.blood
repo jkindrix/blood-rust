@@ -1,0 +1,9 @@
+// XFAIL: invalid effect type syntax check not yet implemented
+// Test: non-path expression in effect annotation should fail (E0307)
+fn uses_effect() -> i32 / {42} {
+    0
+}
+
+fn main() -> i32 {
+    uses_effect()
+}

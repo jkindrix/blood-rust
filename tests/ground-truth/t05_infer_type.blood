@@ -1,0 +1,7 @@
+// XFAIL: explicit infer type annotation not yet supported
+// Test: using _ as a type annotation should let the compiler infer
+fn main() -> i32 {
+    let x: _ = 42;
+    x
+}
+// EXPECT: 42

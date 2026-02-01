@@ -1,0 +1,9 @@
+// XFAIL: FFI portability warnings not yet implemented
+// Test: platform-dependent type in extern function should warn (E0502)
+extern "C" {
+    fn get_size() -> usize;
+}
+
+fn main() -> i32 {
+    0
+}

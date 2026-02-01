@@ -1,0 +1,13 @@
+// XFAIL: invalid handler validation not yet comprehensive
+// Test: handler with mismatched operation name should fail (E0305)
+effect Foo {
+    op bar() -> i32;
+}
+
+fn main() -> i32 {
+    with Foo {
+        op nonexistent() -> i32 { resume(42) }
+    } do {
+        perform Foo.bar()
+    }
+}

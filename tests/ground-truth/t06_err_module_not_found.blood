@@ -1,0 +1,7 @@
+// XFAIL: external module loading not yet supported
+// Test: importing a nonexistent module should fail (E0701)
+mod nonexistent_module;
+
+fn main() -> i32 {
+    0
+}

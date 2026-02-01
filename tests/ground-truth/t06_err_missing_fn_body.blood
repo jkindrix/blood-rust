@@ -1,0 +1,7 @@
+// XFAIL: bodyless function declarations outside traits not yet rejected
+// Test: function declaration without body outside trait should fail (E0114)
+fn foo() -> i32;
+
+fn main() -> i32 {
+    0
+}

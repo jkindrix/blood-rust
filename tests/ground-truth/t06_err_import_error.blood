@@ -1,0 +1,7 @@
+// XFAIL: import resolution not yet implemented
+// Test: importing a nonexistent path should fail (E0704)
+use nonexistent::module::Item;
+
+fn main() -> i32 {
+    0
+}

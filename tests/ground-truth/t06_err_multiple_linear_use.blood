@@ -1,0 +1,10 @@
+// XFAIL: linear value tracking not yet enforced
+// Test: using a linear value more than once should fail (E0802)
+fn consume(x: @linear i32) -> i32 { x }
+
+fn main() -> i32 {
+    let x: @linear i32 = 42;
+    let a: i32 = consume(x);
+    let b: i32 = consume(x);
+    a + b
+}
