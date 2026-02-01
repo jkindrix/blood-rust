@@ -1,0 +1,17 @@
+// XFAIL: multi-resume check in shallow handlers not yet implemented
+// Test: resuming twice in a shallow handler should fail
+effect Eff {
+    op do_it() -> i32;
+}
+
+fn main() -> i32 {
+    handle {
+        perform Eff.do_it()
+    } with Eff {
+        op do_it(resume) -> i32 {
+            let a: i32 = resume(1);
+            let b: i32 = resume(2);
+            a + b
+        }
+    }
+}

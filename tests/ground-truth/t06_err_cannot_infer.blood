@@ -1,0 +1,10 @@
+// XFAIL: type inference ambiguity detection not yet implemented
+// Test: ambiguous type that cannot be inferred should fail
+fn id<T>(x: T) -> T {
+    x
+}
+
+fn main() -> i32 {
+    let x = id(id);
+    0
+}

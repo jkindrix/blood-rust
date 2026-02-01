@@ -1,0 +1,14 @@
+// XFAIL: user-defined macros not yet implemented
+// Test: user-defined macro declaration
+macro my_assert {
+    ($cond:expr) => {
+        if !$cond {
+            panic!("assertion failed");
+        }
+    };
+}
+
+fn main() -> i32 {
+    my_assert!(true);
+    0
+}

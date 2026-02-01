@@ -1,4 +1,4 @@
-// TODO: COMPILE_FAIL once effect declaration check is enforced
+// XFAIL: effect declaration check not yet enforced
 // Test: performing an effect not listed in the function's effect row should fail
 effect Logger {
     op log(msg: i32) -> ();

@@ -1,0 +1,9 @@
+// XFAIL: higher-rank polymorphism not yet implemented
+// Test: forall type quantifier
+fn apply<F: forall<T> Fn(T) -> T>(f: F, x: i32) -> i32 {
+    f(x)
+}
+
+fn main() -> i32 {
+    0
+}

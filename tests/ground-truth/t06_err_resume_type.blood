@@ -1,0 +1,15 @@
+// XFAIL: resume type checking not yet implemented
+// Test: resume with wrong type should fail
+effect Ask {
+    op ask() -> i32;
+}
+
+fn main() -> i32 {
+    handle {
+        perform Ask.ask()
+    } with Ask {
+        op ask(resume) -> i32 {
+            resume(true)
+        }
+    }
+}

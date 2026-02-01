@@ -1,0 +1,7 @@
+// XFAIL: default expression not yet implemented
+// Test: default expression for types
+fn main() -> i32 {
+    let x: i32 = default;
+    println_int(x);
+    0
+}

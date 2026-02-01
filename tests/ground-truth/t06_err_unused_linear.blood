@@ -1,0 +1,6 @@
+// XFAIL: linear value consumption check not yet implemented
+// Test: linear value not consumed should fail
+fn main() -> i32 {
+    let x: linear i32 = 42;
+    0
+}

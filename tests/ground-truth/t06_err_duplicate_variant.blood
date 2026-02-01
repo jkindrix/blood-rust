@@ -1,0 +1,11 @@
+// XFAIL: duplicate variant detection not yet implemented
+// Test: enum with duplicate variant names should fail
+enum Color {
+    Red,
+    Blue,
+    Red,
+}
+
+fn main() -> i32 {
+    0
+}

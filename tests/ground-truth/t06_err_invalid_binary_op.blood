@@ -1,0 +1,6 @@
+// XFAIL: binary operator type checking not yet enforced for booleans
+// Test: adding two booleans should fail
+fn main() -> i32 {
+    let x: bool = true + false;
+    0
+}

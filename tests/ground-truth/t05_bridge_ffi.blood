@@ -1,0 +1,11 @@
+// XFAIL: bridge FFI not yet implemented
+// Test: bridge declaration for foreign functions
+bridge "C" {
+    fn abs(x: i32) -> i32;
+}
+
+fn main() -> i32 {
+    let x: i32 = abs(-42);
+    println_int(x);
+    0
+}

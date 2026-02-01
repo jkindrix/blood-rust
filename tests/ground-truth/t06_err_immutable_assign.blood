@@ -1,4 +1,4 @@
-// TODO: COMPILE_FAIL once immutability check is enforced
+// XFAIL: immutability check not yet enforced
 // Test: assigning to an immutable let binding should fail
 fn main() -> i32 {
     let x: i32 = 10;

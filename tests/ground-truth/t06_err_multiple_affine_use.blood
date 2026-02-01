@@ -1,0 +1,16 @@
+// XFAIL: affine usage tracking not yet implemented
+// Test: affine value used more than once should fail
+struct Token {
+    id: i32,
+}
+
+fn consume(t: Token) -> i32 {
+    t.id
+}
+
+fn main() -> i32 {
+    let t: affine Token = Token { id: 1 };
+    let a: i32 = consume(t);
+    let b: i32 = consume(t);
+    a + b
+}

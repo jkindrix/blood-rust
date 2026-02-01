@@ -1,0 +1,14 @@
+// XFAIL: linear branch consumption check not yet implemented
+// Test: if/else consuming linear value differently should fail
+fn consume(x: i32) -> i32 {
+    x
+}
+
+fn main() -> i32 {
+    let x: linear i32 = 42;
+    let cond: bool = true;
+    if cond {
+        consume(x);
+    }
+    0
+}

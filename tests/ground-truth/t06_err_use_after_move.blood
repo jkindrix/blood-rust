@@ -1,4 +1,4 @@
-// TODO: COMPILE_FAIL once move semantics are enforced
+// XFAIL: move semantics not yet enforced
 // Test: using a value after it has been moved should fail
 struct Data {
     value: i32,

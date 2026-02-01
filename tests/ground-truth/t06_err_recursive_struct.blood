@@ -1,0 +1,10 @@
+// XFAIL: recursive struct size check not yet implemented
+// Test: directly recursive struct should fail
+struct S {
+    value: i32,
+    next: S,
+}
+
+fn main() -> i32 {
+    0
+}
