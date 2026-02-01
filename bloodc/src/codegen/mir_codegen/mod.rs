@@ -253,14 +253,20 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     if let Some(info) = self.closure_analysis.as_ref()
                         .and_then(|ca| ca.get(*closure_def_id))
                     {
-                        let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
-                        let mut field_types: Vec<inkwell::types::BasicTypeEnum> =
-                            Vec::with_capacity(info.capture_types.len() + 1);
-                        field_types.push(i8_ptr_ty.into());
-                        for cap_ty in &info.capture_types {
-                            field_types.push(self.lower_type(cap_ty));
+                        if info.capture_types.is_empty() {
+                            // Zero captures: use standard fat pointer {fn_ptr, env_ptr}
+                            // to match rvalue path which skips inline for empty captures
+                            self.lower_type(&local.ty)
+                        } else {
+                            let i8_ptr_ty = self.context.i8_type().ptr_type(AddressSpace::default());
+                            let mut field_types: Vec<inkwell::types::BasicTypeEnum> =
+                                Vec::with_capacity(info.capture_types.len() + 1);
+                            field_types.push(i8_ptr_ty.into());
+                            for cap_ty in &info.capture_types {
+                                field_types.push(self.lower_type(cap_ty));
+                            }
+                            self.context.struct_type(&field_types, false).into()
                         }
-                        self.context.struct_type(&field_types, false).into()
                     } else {
                         self.lower_type(&local.ty)
                     }
