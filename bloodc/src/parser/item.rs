@@ -1226,8 +1226,11 @@ impl<'src> Parser<'src> {
 
         let type_params = self.parse_optional_type_params();
 
-        self.expect(TokenKind::Eq);
-        let ty = self.parse_type();
+        let ty = if self.try_consume(TokenKind::Eq) {
+            Some(self.parse_type())
+        } else {
+            None
+        };
         self.expect(TokenKind::Semi);
 
         TypeDecl {

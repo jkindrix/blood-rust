@@ -314,8 +314,12 @@ impl SemanticAnalyzer {
             }
             Declaration::Type(type_decl) => {
                 let name = self.resolve_symbol(&type_decl.name.node, interner);
-                let aliased = self.type_to_string(&type_decl.ty, interner);
-                let description = format!("type {} = {}", name, aliased);
+                let description = if let Some(ref ty) = type_decl.ty {
+                    let aliased = self.type_to_string(ty, interner);
+                    format!("type {} = {}", name, aliased)
+                } else {
+                    format!("type {}", name)
+                };
                 let doc = self.extract_doc_comment(source, self.get_decl_span_start(decl));
 
                 let idx = symbols.len();

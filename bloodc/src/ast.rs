@@ -312,7 +312,7 @@ pub struct TypeDecl {
     pub vis: Visibility,
     pub name: Spanned<Symbol>,
     pub type_params: Option<TypeParams>,
-    pub ty: Type,
+    pub ty: Option<Type>,
     pub span: Span,
 }
 

@@ -1,4 +1,4 @@
-// XFAIL: non-effect in effect position check not yet implemented
+// COMPILE_FAIL: E0306
 // Test: using a struct in an effect position should fail (E0306)
 struct NotAnEffect {
     x: i32,

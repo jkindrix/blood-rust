@@ -1,4 +1,4 @@
-// XFAIL: const evaluation error detection not yet enforced at compile time
+// COMPILE_FAIL: E0235
 // Test: division by zero in const context should fail (E0235)
 const BAD: i32 = 10 / 0;
 

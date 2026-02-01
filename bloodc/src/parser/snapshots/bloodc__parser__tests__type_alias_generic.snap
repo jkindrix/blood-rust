@@ -55,123 +55,125 @@ Program {
                         },
                     },
                 ),
-                ty: Type {
-                    kind: Path(
-                        TypePath {
-                            segments: [
-                                TypePathSegment {
-                                    name: Spanned {
-                                        node: SymbolU32 {
-                                            value: 3,
-                                        },
-                                        span: Span {
-                                            start: 20,
-                                            end: 27,
-                                            start_line: 1,
-                                            start_col: 21,
-                                        },
-                                    },
-                                    args: Some(
-                                        TypeArgs {
-                                            args: [
-                                                Type(
-                                                    Type {
-                                                        kind: Path(
-                                                            TypePath {
-                                                                segments: [
-                                                                    TypePathSegment {
-                                                                        name: Spanned {
-                                                                            node: SymbolU32 {
-                                                                                value: 4,
-                                                                            },
-                                                                            span: Span {
-                                                                                start: 28,
-                                                                                end: 34,
-                                                                                start_line: 1,
-                                                                                start_col: 29,
-                                                                            },
-                                                                        },
-                                                                        args: None,
-                                                                    },
-                                                                ],
-                                                                span: Span {
-                                                                    start: 28,
-                                                                    end: 34,
-                                                                    start_line: 1,
-                                                                    start_col: 29,
-                                                                },
-                                                            },
-                                                        ),
-                                                        span: Span {
-                                                            start: 28,
-                                                            end: 34,
-                                                            start_line: 1,
-                                                            start_col: 29,
-                                                        },
-                                                    },
-                                                ),
-                                                Type(
-                                                    Type {
-                                                        kind: Path(
-                                                            TypePath {
-                                                                segments: [
-                                                                    TypePathSegment {
-                                                                        name: Spanned {
-                                                                            node: SymbolU32 {
-                                                                                value: 2,
-                                                                            },
-                                                                            span: Span {
-                                                                                start: 36,
-                                                                                end: 37,
-                                                                                start_line: 1,
-                                                                                start_col: 37,
-                                                                            },
-                                                                        },
-                                                                        args: None,
-                                                                    },
-                                                                ],
-                                                                span: Span {
-                                                                    start: 36,
-                                                                    end: 37,
-                                                                    start_line: 1,
-                                                                    start_col: 37,
-                                                                },
-                                                            },
-                                                        ),
-                                                        span: Span {
-                                                            start: 36,
-                                                            end: 37,
-                                                            start_line: 1,
-                                                            start_col: 37,
-                                                        },
-                                                    },
-                                                ),
-                                            ],
+                ty: Some(
+                    Type {
+                        kind: Path(
+                            TypePath {
+                                segments: [
+                                    TypePathSegment {
+                                        name: Spanned {
+                                            node: SymbolU32 {
+                                                value: 3,
+                                            },
                                             span: Span {
-                                                start: 27,
-                                                end: 38,
+                                                start: 20,
+                                                end: 27,
                                                 start_line: 1,
-                                                start_col: 28,
+                                                start_col: 21,
                                             },
                                         },
-                                    ),
+                                        args: Some(
+                                            TypeArgs {
+                                                args: [
+                                                    Type(
+                                                        Type {
+                                                            kind: Path(
+                                                                TypePath {
+                                                                    segments: [
+                                                                        TypePathSegment {
+                                                                            name: Spanned {
+                                                                                node: SymbolU32 {
+                                                                                    value: 4,
+                                                                                },
+                                                                                span: Span {
+                                                                                    start: 28,
+                                                                                    end: 34,
+                                                                                    start_line: 1,
+                                                                                    start_col: 29,
+                                                                                },
+                                                                            },
+                                                                            args: None,
+                                                                        },
+                                                                    ],
+                                                                    span: Span {
+                                                                        start: 28,
+                                                                        end: 34,
+                                                                        start_line: 1,
+                                                                        start_col: 29,
+                                                                    },
+                                                                },
+                                                            ),
+                                                            span: Span {
+                                                                start: 28,
+                                                                end: 34,
+                                                                start_line: 1,
+                                                                start_col: 29,
+                                                            },
+                                                        },
+                                                    ),
+                                                    Type(
+                                                        Type {
+                                                            kind: Path(
+                                                                TypePath {
+                                                                    segments: [
+                                                                        TypePathSegment {
+                                                                            name: Spanned {
+                                                                                node: SymbolU32 {
+                                                                                    value: 2,
+                                                                                },
+                                                                                span: Span {
+                                                                                    start: 36,
+                                                                                    end: 37,
+                                                                                    start_line: 1,
+                                                                                    start_col: 37,
+                                                                                },
+                                                                            },
+                                                                            args: None,
+                                                                        },
+                                                                    ],
+                                                                    span: Span {
+                                                                        start: 36,
+                                                                        end: 37,
+                                                                        start_line: 1,
+                                                                        start_col: 37,
+                                                                    },
+                                                                },
+                                                            ),
+                                                            span: Span {
+                                                                start: 36,
+                                                                end: 37,
+                                                                start_line: 1,
+                                                                start_col: 37,
+                                                            },
+                                                        },
+                                                    ),
+                                                ],
+                                                span: Span {
+                                                    start: 27,
+                                                    end: 38,
+                                                    start_line: 1,
+                                                    start_col: 28,
+                                                },
+                                            },
+                                        ),
+                                    },
+                                ],
+                                span: Span {
+                                    start: 20,
+                                    end: 38,
+                                    start_line: 1,
+                                    start_col: 21,
                                 },
-                            ],
-                            span: Span {
-                                start: 20,
-                                end: 38,
-                                start_line: 1,
-                                start_col: 21,
                             },
+                        ),
+                        span: Span {
+                            start: 20,
+                            end: 38,
+                            start_line: 1,
+                            start_col: 21,
                         },
-                    ),
-                    span: Span {
-                        start: 20,
-                        end: 38,
-                        start_line: 1,
-                        start_col: 21,
                     },
-                },
+                ),
                 span: Span {
                     start: 0,
                     end: 39,

@@ -150,13 +150,21 @@ impl<'a> TypeContext<'a> {
     }
 
     /// Check if a field type creates a recursive cycle.
-    /// Types behind references and pointers are fine (they provide indirection).
+    /// Types behind indirection (Box, Vec, &, *const, *mut) are fine — they have
+    /// a fixed stack size regardless of the inner type.
     fn field_type_has_cycle(&self, ty: &Type, visiting: &HashSet<DefId>) -> bool {
         match ty.kind() {
             // ADT types — check if this creates a cycle
             TypeKind::Adt { def_id, args } => {
                 if visiting.contains(def_id) {
                     return true;
+                }
+                // Box<T> and Vec<T> are heap-allocated indirection types with fixed
+                // stack sizes (pointer / ptr+len+cap). Their type arguments don't
+                // contribute to the parent type's stack layout, so recursive
+                // references through them are not infinite-size cycles.
+                if self.is_heap_indirection(*def_id) {
+                    return false;
                 }
                 // Check through this struct's fields recursively
                 if let Some(struct_info) = self.struct_defs.get(def_id) {
@@ -201,6 +209,16 @@ impl<'a> TypeContext<'a> {
             // Everything else (primitives, fn types, inference vars, etc.) — no cycle
             _ => false,
         }
+    }
+
+    /// Check if a DefId refers to a known heap-indirection type (Box, Vec).
+    ///
+    /// These types are heap-allocated with fixed stack sizes regardless of their
+    /// type arguments: Box<T> is a single pointer (8 bytes on 64-bit), Vec<T> is
+    /// {ptr, len, cap} (24 bytes). Recursive type references through them do not
+    /// create infinite-size types.
+    fn is_heap_indirection(&self, def_id: DefId) -> bool {
+        self.box_def_id == Some(def_id) || self.vec_def_id == Some(def_id)
     }
 
     /// Import prelude items from the standard library.
@@ -1398,10 +1416,24 @@ impl<'a> TypeContext<'a> {
             }
         }
 
-        // Queue function for later body type-checking
-        if func.body.is_some() {
-            self.pending_bodies.push((def_id, func.clone(), self.current_module));
+        // Reject functions without a body outside traits/extern blocks.
+        // This method is only called for free-standing Declaration::Function items,
+        // not for trait methods (handled in collect_trait) or extern fns (collect_bridge).
+        if func.body.is_none() {
+            let name = self.symbol_to_string(func.name.node);
+            return Err(Box::new(TypeError::new(
+                TypeErrorKind::UnsupportedFeature {
+                    feature: format!(
+                        "function `{}` declared without a body; only trait methods and extern functions may omit the body",
+                        name
+                    ),
+                },
+                func.span,
+            )));
         }
+
+        // Queue function for later body type-checking
+        self.pending_bodies.push((def_id, func.clone(), self.current_module));
 
         Ok(())
     }
@@ -1589,7 +1621,20 @@ impl<'a> TypeContext<'a> {
         }
 
         // Convert the aliased type (now with generics in scope)
-        let aliased_ty = self.ast_type_to_hir_type(&type_decl.ty)?;
+        // Top-level type aliases must have a type (only trait items may omit it)
+        let ty_ast = type_decl.ty.as_ref().ok_or_else(|| {
+            let name = self.symbol_to_string(type_decl.name.node);
+            Box::new(TypeError::new(
+                TypeErrorKind::UnsupportedFeature {
+                    feature: format!(
+                        "type alias `{}` declared without a type; only trait associated types may omit the type",
+                        name
+                    ),
+                },
+                type_decl.span,
+            ))
+        })?;
+        let aliased_ty = self.ast_type_to_hir_type(ty_ast)?;
 
         // Restore previous generic params scope
         self.generic_params = saved_generic_params;
@@ -1781,10 +1826,19 @@ impl<'a> TypeContext<'a> {
         }
 
         // Try to evaluate the const value for use in const contexts (e.g., array sizes).
-        // This is a best-effort evaluation - complex expressions that reference other consts
-        // may fail here but succeed during full type checking.
-        if let Ok(value) = const_eval::eval_const_expr(&const_decl.value) {
-            self.const_values.insert(def_id, value);
+        // Path resolution failures are expected during collection (other consts may not be
+        // collected yet), but genuine evaluation errors (div-by-zero, overflow) must propagate.
+        match const_eval::eval_const_expr(&const_decl.value) {
+            Ok(value) => {
+                self.const_values.insert(def_id, value);
+            }
+            Err(e) => {
+                if !matches!(&e.kind, TypeErrorKind::ConstEvalError { reason }
+                    if reason.contains("cannot evaluate path"))
+                {
+                    return Err(e);
+                }
+            }
         }
 
         // Queue for body type-checking (the value expression)
@@ -2160,7 +2214,19 @@ impl<'a> TypeContext<'a> {
         for item in &impl_block.items {
             if let ast::ImplItem::Type(type_decl) = item {
                 let type_name = self.symbol_to_string(type_decl.name.node);
-                let ty = self.ast_type_to_hir_type(&type_decl.ty)?;
+                // Impl associated types must have a concrete type
+                let ty_ast = type_decl.ty.as_ref().ok_or_else(|| {
+                    Box::new(TypeError::new(
+                        TypeErrorKind::UnsupportedFeature {
+                            feature: format!(
+                                "associated type `{}` in impl block must have a concrete type",
+                                type_name
+                            ),
+                        },
+                        type_decl.span,
+                    ))
+                })?;
+                let ty = self.ast_type_to_hir_type(ty_ast)?;
                 let assoc_type_info = ImplAssocTypeInfo {
                     name: type_name,
                     ty,
@@ -2407,11 +2473,38 @@ impl<'a> TypeContext<'a> {
             }
         }
 
-        // Process trait items
+        // Process trait items in two passes:
+        // 1. First collect associated types so Self::AssocType can be resolved in method signatures
+        // 2. Then collect methods and constants
         let mut methods = Vec::new();
         let mut assoc_types = Vec::new();
         let mut assoc_consts = Vec::new();
 
+        // First pass: collect associated types
+        for item in &trait_decl.items {
+            if let ast::TraitItem::Type(type_decl) = item {
+                let type_name = self.symbol_to_string(type_decl.name.node);
+                let default = match &type_decl.ty {
+                    Some(ty_ast) => {
+                        match self.ast_type_to_hir_type(ty_ast) {
+                            Ok(ty) if !ty.is_error() => Some(ty),
+                            _ => None,
+                        }
+                    }
+                    None => None, // Bare `type Item;` — no default
+                };
+
+                assoc_types.push(TraitAssocTypeInfo {
+                    name: type_name,
+                    default,
+                });
+            }
+        }
+
+        // Set trait associated types context so Self::AssocType resolves in method signatures
+        self.current_trait_assoc_types = assoc_types.clone();
+
+        // Second pass: collect methods and constants
         for item in &trait_decl.items {
             match item {
                 ast::TraitItem::Function(func) => {
@@ -2480,24 +2573,8 @@ impl<'a> TypeContext<'a> {
                         has_default,
                     });
                 }
-                ast::TraitItem::Type(type_decl) => {
-                    let type_name = self.symbol_to_string(type_decl.name.node);
-                    // For associated types, the `ty` field in TypeDecl is the default
-                    // Check if it's meaningful (not just a placeholder)
-                    let default = if type_decl.type_params.is_none() {
-                        // Try to convert the type - if it's just a name binding, there's no default
-                        match self.ast_type_to_hir_type(&type_decl.ty) {
-                            Ok(ty) if !ty.is_error() => Some(ty),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-
-                    assoc_types.push(TraitAssocTypeInfo {
-                        name: type_name,
-                        default,
-                    });
+                ast::TraitItem::Type(_) => {
+                    // Already processed in first pass
                 }
                 ast::TraitItem::Const(const_decl) => {
                     let const_name = self.symbol_to_string(const_decl.name.node);
@@ -2523,6 +2600,9 @@ impl<'a> TypeContext<'a> {
                 }
             }
         }
+
+        // Clear trait associated types context
+        self.current_trait_assoc_types.clear();
 
         // Restore generic params and current_impl_self_ty
         self.generic_params = saved_generic_params;
@@ -2601,6 +2681,12 @@ impl<'a> TypeContext<'a> {
                         };
 
                         return Ok(Some(EffectRef { def_id, type_args }));
+                    } else {
+                        // Name resolves to something, but it's not an effect
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::NotAnEffect { name: effect_name },
+                            ty.span,
+                        )));
                     }
                 }
 

@@ -135,10 +135,18 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                         _ => false,
                     };
 
-                    // Update current_ty to the inner type (dereference the reference/pointer)
+                    // Update current_ty to the inner type (dereference the reference/pointer/Box)
+                    let is_box_deref = matches!(
+                        original_ty.kind(),
+                        TypeKind::Adt { def_id, .. } if Some(*def_id) == self.box_def_id
+                    );
                     current_ty = match original_ty.kind() {
                         TypeKind::Ref { inner, .. } => inner.clone(),
                         TypeKind::Ptr { inner, .. } => inner.clone(),
+                        // Box<T> → T: Box is heap indirection, deref yields the inner type
+                        TypeKind::Adt { def_id, args } if Some(*def_id) == self.box_def_id => {
+                            args.first().cloned().unwrap_or(current_ty.clone())
+                        }
                         _ => current_ty.clone(), // Keep as-is if not a reference type
                     };
 
@@ -200,6 +208,20 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                                 body.span,
                             )]);
                         }
+                    };
+
+                    // For Box<T> deref, the loaded pointer is an opaque i8* (Box's
+                    // LLVM representation). Cast it to T* so subsequent loads produce
+                    // the correct LLVM type for the inner value.
+                    let ptr_val = if is_box_deref {
+                        let inner_llvm_ty = self.lower_type(&current_ty);
+                        let typed_ptr_ty = inner_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                        self.builder.build_pointer_cast(ptr_val, typed_ptr_ty, "box_deref_cast")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM pointer_cast error: {}", e), body.span
+                            )])?
+                    } else {
+                        ptr_val
                     };
 
                     // Check if we should skip generation checks for this local.

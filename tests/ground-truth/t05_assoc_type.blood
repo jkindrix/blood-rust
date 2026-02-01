@@ -1,4 +1,3 @@
-// XFAIL: associated types not yet implemented
 // Test: trait with associated type
 trait Container {
     type Item;

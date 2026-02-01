@@ -3568,7 +3568,22 @@ impl<'a> TypeContext<'a> {
 
                     // Handle Self::AssocType (associated type projection)
                     if first_segment == "Self" {
-                        // First check current_impl_assoc_types (for associated types in the
+                        // Check current trait context first (for Self::Item in trait bodies)
+                        for assoc_ty in &self.current_trait_assoc_types {
+                            if assoc_ty.name == second_segment {
+                                // In a trait body, Self::Item is abstract.
+                                // If there's a default, use it; otherwise create a fresh type variable.
+                                if let Some(ref default_ty) = assoc_ty.default {
+                                    return Ok(default_ty.clone());
+                                } else {
+                                    let var_id = TyVarId::new(self.next_type_param_id);
+                                    self.next_type_param_id += 1;
+                                    return Ok(Type::param(var_id));
+                                }
+                            }
+                        }
+
+                        // Then check current_impl_assoc_types (for associated types in the
                         // impl block currently being collected)
                         for assoc_ty in &self.current_impl_assoc_types {
                             if assoc_ty.name == second_segment {
