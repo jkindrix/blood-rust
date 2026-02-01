@@ -5184,6 +5184,27 @@ impl<'a> TypeContext<'a> {
         let result_ty = match op {
             ast::BinOp::Add | ast::BinOp::Sub | ast::BinOp::Mul | ast::BinOp::Div | ast::BinOp::Rem => {
                 self.unifier.unify(&left_expr.ty, &right_expr.ty, span)?;
+                // Verify the resolved type is numeric (not bool, str, etc.)
+                let resolved = self.unifier.resolve(&left_expr.ty);
+                match resolved.kind() {
+                    // Numeric primitives are allowed
+                    TypeKind::Primitive(PrimitiveTy::Int(_) | PrimitiveTy::Uint(_) | PrimitiveTy::Float(_)) => {}
+                    // Inference variables and type params — allow (checked later or by monomorphization)
+                    TypeKind::Infer(_) | TypeKind::Param(_) => {}
+                    // Error type — don't cascade errors
+                    TypeKind::Error => {}
+                    // Everything else is invalid
+                    _ => {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::InvalidBinaryOp {
+                                op: op.as_str().to_string(),
+                                left: self.unifier.resolve(&left_expr.ty),
+                                right: self.unifier.resolve(&right_expr.ty),
+                            },
+                            span,
+                        )));
+                    }
+                }
                 left_expr.ty.clone()
             }
             ast::BinOp::Eq | ast::BinOp::Ne | ast::BinOp::Lt | ast::BinOp::Le | ast::BinOp::Gt | ast::BinOp::Ge => {
@@ -5844,6 +5865,21 @@ impl<'a> TypeContext<'a> {
 
     /// Infer type of an assignment.
     pub(crate) fn infer_assign(&mut self, target: &ast::Expr, value: &ast::Expr, span: Span) -> Result<hir::Expr, Box<TypeError>> {
+        // Check mutability for simple variable assignments
+        if let ast::ExprKind::Path(path) = &target.kind {
+            if path.segments.len() == 1 {
+                let name = self.symbol_to_string(path.segments[0].name.node);
+                if let Some(Binding::Local { mutable, .. }) = self.resolver.lookup(&name) {
+                    if !mutable {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::ImmutableAssign { name: name.clone() },
+                            span,
+                        ).with_help(format!("consider making `{name}` mutable: `let mut {name}`"))));
+                    }
+                }
+            }
+        }
+
         let target_expr = self.infer_expr(target)?;
         let value_expr = self.check_expr(value, &target_expr.ty)?;
 
@@ -7983,6 +8019,21 @@ impl<'a> TypeContext<'a> {
         value: &ast::Expr,
         span: Span,
     ) -> Result<hir::Expr, Box<TypeError>> {
+        // Check mutability for simple variable compound assignments
+        if let ast::ExprKind::Path(path) = &target.kind {
+            if path.segments.len() == 1 {
+                let name = self.symbol_to_string(path.segments[0].name.node);
+                if let Some(Binding::Local { mutable, .. }) = self.resolver.lookup(&name) {
+                    if !mutable {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::ImmutableAssign { name: name.clone() },
+                            span,
+                        ).with_help(format!("consider making `{name}` mutable: `let mut {name}`"))));
+                    }
+                }
+            }
+        }
+
         let target_expr = self.infer_expr(target)?;
         // Use check_expr to propagate target type for better literal inference
         let value_expr = self.check_expr(value, &target_expr.ty)?;

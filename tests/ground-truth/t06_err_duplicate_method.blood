@@ -1,4 +1,4 @@
-// XFAIL: duplicate method detection not yet implemented
+// COMPILE_FAIL: duplicate method name in impl block
 // Test: two methods with the same name in impl block should fail
 struct Foo {
     x: i32,

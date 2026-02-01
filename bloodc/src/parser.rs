@@ -975,11 +975,11 @@ impl<'src> Parser<'src> {
                 LiteralKind::Float { value: value.into(), suffix }
             }
             TokenKind::StringLit => {
-                let s = self.parse_string_literal(text);
+                let s = self.parse_string_literal(text, span);
                 LiteralKind::String(s)
             }
             TokenKind::ByteStringLit => {
-                let bytes = self.parse_byte_string_literal(text);
+                let bytes = self.parse_byte_string_literal(text, span);
                 LiteralKind::ByteString(bytes)
             }
             TokenKind::RawStringLit => {
@@ -995,7 +995,7 @@ impl<'src> Parser<'src> {
                 LiteralKind::String(s)
             }
             TokenKind::CharLit => {
-                let c = self.parse_char_literal(text);
+                let c = self.parse_char_literal(text, span);
                 LiteralKind::Char(c)
             }
             TokenKind::True => LiteralKind::Bool(true),
@@ -1100,7 +1100,7 @@ impl<'src> Parser<'src> {
         (value, suffix)
     }
 
-    fn parse_string_literal(&self, text: &str) -> String {
+    fn parse_string_literal(&mut self, text: &str, span: Span) -> String {
         // Remove quotes and process escape sequences
         let inner = &text[1..text.len() - 1];
         let mut result = String::new();
@@ -1148,7 +1148,15 @@ impl<'src> Parser<'src> {
                             }
                         }
                     }
-                    Some(c) => result.push(c),
+                    Some(c) => {
+                        self.errors.push(
+                            Diagnostic::error(
+                                &format!("unknown escape sequence `\\{c}`"),
+                                span,
+                            ).with_error_code(ErrorCode::InvalidEscape),
+                        );
+                        result.push(c);
+                    }
                     None => {}
                 }
             } else {
@@ -1160,7 +1168,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a byte string literal like b"..."
-    fn parse_byte_string_literal(&self, text: &str) -> Vec<u8> {
+    fn parse_byte_string_literal(&mut self, text: &str, span: Span) -> Vec<u8> {
         // Remove b prefix and quotes, then process escape sequences
         let inner = &text[2..text.len() - 1];
         let mut result = Vec::new();
@@ -1188,7 +1196,15 @@ impl<'src> Parser<'src> {
                             result.push(n);
                         }
                     }
-                    Some(c) if c.is_ascii() => result.push(c as u8),
+                    Some(c) if c.is_ascii() => {
+                        self.errors.push(
+                            Diagnostic::error(
+                                &format!("unknown escape sequence `\\{c}`"),
+                                span,
+                            ).with_error_code(ErrorCode::InvalidEscape),
+                        );
+                        result.push(c as u8);
+                    }
                     _ => {}
                 }
             } else if c.is_ascii() {
@@ -1211,7 +1227,7 @@ impl<'src> Parser<'src> {
         inner.to_string()
     }
 
-    fn parse_char_literal(&self, text: &str) -> char {
+    fn parse_char_literal(&mut self, text: &str, span: Span) -> char {
         let inner = &text[1..text.len() - 1];
         let mut chars = inner.chars();
 
@@ -1257,7 +1273,15 @@ impl<'src> Parser<'src> {
                         '\0'
                     }
                 }
-                Some(c) => c,
+                Some(c) => {
+                    self.errors.push(
+                        Diagnostic::error(
+                            &format!("unknown escape sequence `\\{c}`"),
+                            span,
+                        ).with_error_code(ErrorCode::InvalidEscape),
+                    );
+                    c
+                }
                 None => '\0',
             },
             Some(c) => c,

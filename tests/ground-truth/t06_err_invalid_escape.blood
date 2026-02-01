@@ -1,4 +1,4 @@
-// XFAIL: invalid escape sequence detection not yet implemented
+// COMPILE_FAIL: invalid escape sequence
 // Test: invalid escape sequence in string should fail
 fn main() -> i32 {
     let s: &str = "\z";

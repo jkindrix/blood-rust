@@ -4,10 +4,10 @@
 //! (functions, structs, enums, effects, handlers, impl blocks, traits)
 //! and registering them in the type context.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
-use crate::hir::{self, DefId, Type, TyVarId};
+use crate::hir::{self, DefId, Type, TypeKind, TyVarId};
 use crate::diagnostics::Diagnostic;
 
 use super::{
@@ -106,6 +106,101 @@ impl<'a> TypeContext<'a> {
         }
 
         Ok(())
+    }
+
+    /// Check for recursive types with infinite size.
+    ///
+    /// A struct that directly or indirectly contains itself without indirection
+    /// (Box, &, *const, *mut) has infinite size and is rejected.
+    pub fn check_recursive_types(&self) -> Result<(), Vec<Diagnostic>> {
+        let mut errors = Vec::new();
+
+        for (&def_id, struct_info) in &self.struct_defs {
+            let mut visiting = HashSet::new();
+            visiting.insert(def_id);
+            if self.type_contains_cycle(def_id, &visiting) {
+                let span = self.resolver.def_info.get(&def_id)
+                    .map(|info| info.span)
+                    .unwrap_or_else(crate::span::Span::dummy);
+                errors.push(TypeError::new(
+                    TypeErrorKind::RecursiveType { name: struct_info.name.clone() },
+                    span,
+                ).to_diagnostic());
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Check if a type definition contains a cycle through its fields.
+    /// `visiting` tracks the set of struct DefIds currently being explored (for cycle detection).
+    fn type_contains_cycle(&self, check_def_id: DefId, visiting: &HashSet<DefId>) -> bool {
+        if let Some(struct_info) = self.struct_defs.get(&check_def_id) {
+            for field in &struct_info.fields {
+                if self.field_type_has_cycle(&field.ty, visiting) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a field type creates a recursive cycle.
+    /// Types behind references and pointers are fine (they provide indirection).
+    fn field_type_has_cycle(&self, ty: &Type, visiting: &HashSet<DefId>) -> bool {
+        match ty.kind() {
+            // ADT types — check if this creates a cycle
+            TypeKind::Adt { def_id, args } => {
+                if visiting.contains(def_id) {
+                    return true;
+                }
+                // Check through this struct's fields recursively
+                if let Some(struct_info) = self.struct_defs.get(def_id) {
+                    let mut new_visiting = visiting.clone();
+                    new_visiting.insert(*def_id);
+                    for field in &struct_info.fields {
+                        if self.field_type_has_cycle(&field.ty, &new_visiting) {
+                            return true;
+                        }
+                    }
+                }
+                // Also check through enum variants
+                if let Some(enum_info) = self.enum_defs.get(def_id) {
+                    let mut new_visiting = visiting.clone();
+                    new_visiting.insert(*def_id);
+                    for variant in &enum_info.variants {
+                        for field in &variant.fields {
+                            if self.field_type_has_cycle(&field.ty, &new_visiting) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Check type arguments (e.g., Wrapper<S> where S is recursive)
+                for arg in args {
+                    if self.field_type_has_cycle(arg, visiting) {
+                        return true;
+                    }
+                }
+                false
+            }
+            // References and pointers provide indirection — no infinite size
+            TypeKind::Ref { .. } | TypeKind::Ptr { .. } => false,
+            // Tuples — check each element
+            TypeKind::Tuple(elems) => {
+                elems.iter().any(|e| self.field_type_has_cycle(e, visiting))
+            }
+            // Arrays — check element type
+            TypeKind::Array { element, .. } => {
+                self.field_type_has_cycle(element, visiting)
+            }
+            // Everything else (primitives, fn types, inference vars, etc.) — no cycle
+            _ => false,
+        }
     }
 
     /// Import prelude items from the standard library.
@@ -1400,6 +1495,19 @@ impl<'a> TypeContext<'a> {
             ast::StructBody::Unit => Vec::new(),
         };
 
+        // Check for duplicate field names
+        {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for field in &fields {
+                if !seen.insert(&field.name) {
+                    return Err(Box::new(TypeError::new(
+                        TypeErrorKind::DuplicateDefinition { name: field.name.clone() },
+                        struct_decl.span,
+                    )));
+                }
+            }
+        }
+
         // Restore previous generic params scope
         self.generic_params = saved_generic_params;
         self.const_params = saved_const_params;
@@ -1610,6 +1718,19 @@ impl<'a> TypeContext<'a> {
                 index: i as u32,
                 def_id: variant_def_id,
             });
+        }
+
+        // Check for duplicate variant names
+        {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for variant in &variants {
+                if !seen.insert(&variant.name) {
+                    return Err(Box::new(TypeError::new(
+                        TypeErrorKind::DuplicateDefinition { name: variant.name.clone() },
+                        enum_decl.span,
+                    )));
+                }
+            }
         }
 
         // Restore previous generic params scope

@@ -697,6 +697,15 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
     // Expand derive macros after collection, before type checking bodies
     ctx.expand_derives();
 
+    // Check for recursive types with infinite size
+    if let Err(errors) = ctx.check_recursive_types() {
+        for error in &errors {
+            emitter.emit(error);
+        }
+        eprintln!("Type checking failed: {} error(s).", errors.len());
+        return ExitCode::from(1);
+    }
+
     // Type-check all function bodies
     if let Err(errors) = ctx.check_all_bodies() {
         for error in &errors {
@@ -885,6 +894,15 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Expand derive macros after collection, before type checking bodies
     ctx.expand_derives();
+
+    // Check for recursive types with infinite size
+    if let Err(errors) = ctx.check_recursive_types() {
+        for error in &errors {
+            emitter.emit(error);
+        }
+        eprintln!("Build failed: type errors.");
+        return ExitCode::from(1);
+    }
 
     // Type-check all function bodies
     if let Err(errors) = ctx.check_all_bodies() {

@@ -80,6 +80,9 @@ pub fn check_program(
     // Phase 1.5: Expand derive macros
     ctx.expand_derives();
 
+    // Phase 1.6: Check for recursive types with infinite size
+    ctx.check_recursive_types()?;
+
     // Phase 2: Type-check all bodies
     ctx.check_all_bodies()?;
 

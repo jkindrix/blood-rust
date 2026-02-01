@@ -1,4 +1,4 @@
-// XFAIL: overlapping impl detection not yet implemented
+// COMPILE_FAIL: overlapping impl blocks
 // Test: implementing same trait twice for same type should fail
 trait Foo {
     fn foo(self) -> i32;

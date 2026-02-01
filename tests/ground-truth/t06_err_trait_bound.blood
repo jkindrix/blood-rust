@@ -1,4 +1,4 @@
-// XFAIL: trait bound checking not yet implemented
+// COMPILE_FAIL: trait bound not satisfied
 // Test: calling generic function without required trait implementation
 trait Printable {
     fn print_val(self) -> i32;

@@ -1,4 +1,4 @@
-// XFAIL: effect row mismatch checking not yet implemented
+// COMPILE_FAIL: undeclared effects
 // Test: mismatched effect rows in function call should fail
 effect Log {
     op log(msg: i32) -> ();

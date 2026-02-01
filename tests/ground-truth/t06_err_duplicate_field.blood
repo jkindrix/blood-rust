@@ -1,4 +1,4 @@
-// XFAIL: duplicate field detection not yet implemented
+// COMPILE_FAIL: duplicate field name in struct
 // Test: struct with duplicate field names should fail
 struct Bad {
     x: i32,

@@ -1,4 +1,4 @@
-// XFAIL: return-outside-function check not yet implemented
+// COMPILE_FAIL: return outside function
 // Test: return statement at module scope should fail
 return 42;
 

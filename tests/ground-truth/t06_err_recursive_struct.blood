@@ -1,4 +1,4 @@
-// XFAIL: recursive struct size check not yet implemented
+// COMPILE_FAIL: recursive struct with infinite size
 // Test: directly recursive struct should fail
 struct S {
     value: i32,

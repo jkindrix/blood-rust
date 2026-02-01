@@ -290,6 +290,10 @@ impl TypeError {
                 "E0237",
                 "unreachable pattern".to_string(),
             ),
+            TypeErrorKind::ImmutableAssign { name } => (
+                "E0238",
+                format!("cannot assign twice to immutable variable `{name}`"),
+            ),
 
             // Linearity errors (E08xx)
             TypeErrorKind::UnusedLinearValue { name, ty } => (
@@ -601,6 +605,10 @@ pub enum TypeErrorKind {
     },
     /// Unreachable pattern (dead code).
     UnreachablePattern,
+    /// Assignment to immutable variable.
+    ImmutableAssign {
+        name: String,
+    },
 
     // Linearity errors (E08xx)
     /// Linear value was never consumed.

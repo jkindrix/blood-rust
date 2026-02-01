@@ -1,4 +1,4 @@
-// XFAIL: duplicate variant detection not yet implemented
+// COMPILE_FAIL: duplicate variant name in enum
 // Test: enum with duplicate variant names should fail
 enum Color {
     Red,
