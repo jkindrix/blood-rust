@@ -1,0 +1,10 @@
+// TODO: COMPILE_FAIL once borrow checker is implemented
+// Test: two mutable borrows of the same variable should fail
+fn main() -> i32 {
+    let mut x: i32 = 10;
+    let r1: &mut i32 = &mut x;
+    let r2: &mut i32 = &mut x; // should fail: x already mutably borrowed
+    *r1 = 20;
+    *r2 = 30;
+    0
+}

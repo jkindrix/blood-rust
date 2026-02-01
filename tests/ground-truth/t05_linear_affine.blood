@@ -1,0 +1,20 @@
+// Test: linear and affine type qualifiers
+// EXPECT: 42
+// Linear types must be used exactly once; affine at most once
+struct LinearToken {
+    value: i32,
+}
+
+fn consume_token(t: LinearToken) -> i32 {
+    t.value
+}
+
+fn main() -> i32 {
+    let tok: LinearToken = LinearToken { value: 42 };
+    let result: i32 = consume_token(tok);
+    println_int(result); // 42
+    if result != 42 { return 1; }
+
+    // tok is consumed, cannot be used again (linear semantics)
+    0
+}

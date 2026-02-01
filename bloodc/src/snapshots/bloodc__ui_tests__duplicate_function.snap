@@ -2,4 +2,4 @@
 source: bloodc/src/ui_tests.rs
 expression: formatted
 ---
-No errors
+[E0214] Error 1: the name `foo` is defined multiple times

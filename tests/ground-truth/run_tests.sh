@@ -65,6 +65,14 @@ run_one_test() {
         compile_fail=$(head -1 "$src" | sed 's|^// COMPILE_FAIL: *||')
     fi
 
+    # Check for expected exit code marker: // EXPECT_EXIT: <code|nonzero>
+    local expect_exit=""
+    local expect_exit_line
+    expect_exit_line=$(grep '^// EXPECT_EXIT:' "$src" | head -1) || true
+    if [[ -n "$expect_exit_line" ]]; then
+        expect_exit=$(echo "$expect_exit_line" | sed 's|^// EXPECT_EXIT: *||')
+    fi
+
     # Check for expected output marker: // EXPECT: <line>
     local -a expected_lines=()
     while IFS= read -r line; do
@@ -115,14 +123,23 @@ run_one_test() {
 
     # Check exit code
     if [[ $exit_code -ne 0 ]]; then
-        if [[ -n "$xfail" ]]; then
+        if [[ -n "$expect_exit" ]]; then
+            if [[ "$expect_exit" == "nonzero" || "$expect_exit" == "$exit_code" ]]; then
+                : # Expected exit code — fall through to output checking
+            else
+                FAIL=$((FAIL + 1))
+                RESULTS+=("${RED}FAIL${RESET} $name (expected exit $expect_exit, got $exit_code)")
+                return
+            fi
+        elif [[ -n "$xfail" ]]; then
             XFAIL=$((XFAIL + 1))
             RESULTS+=("${YELLOW}XFAIL${RESET} $name (runtime: $xfail)")
+            return
         else
             CRASH=$((CRASH + 1))
             RESULTS+=("${RED}CRASH${RESET} $name (exit code $exit_code)\n    stdout: $(echo "$run_out" | head -3)")
+            return
         fi
-        return
     fi
 
     # Check expected output if specified
