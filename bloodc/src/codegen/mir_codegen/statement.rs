@@ -603,20 +603,164 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                 // Stateless handlers use null, avoiding any allocation overhead.
                 // Constant/ZeroInit handlers use stack allocation, avoiding heap allocation.
                 // Dynamic handlers use the full state place (which may be heap-allocated).
+                //
+                // UNIFORM i64 STATE LAYOUT:
+                // Handler op bodies are compiled once per handler definition (not per
+                // instantiation), so they use a uniform {i64, i64, ...} layout for
+                // state fields. We create a "shadow" alloca with this i64 layout,
+                // copy the typed state fields into it (with zero-extension), and pass
+                // the shadow pointer to the evidence system. This bridges the typed
+                // caller-side state struct with the handler body's i64 view.
                 let state_void_ptr = match state_kind {
                     HandlerStateKind::Stateless => {
                         // No state needed - pass null pointer
                         i8_ptr_ty.const_null()
                     }
                     HandlerStateKind::Constant | HandlerStateKind::ZeroInit | HandlerStateKind::Dynamic => {
-                        // Cast state_ptr to i8* (void*)
-                        self.builder.build_pointer_cast(
-                            state_ptr,
-                            i8_ptr_ty,
-                            "state_void_ptr"
-                        ).map_err(|e| vec![Diagnostic::error(
-                            format!("LLVM error: {}", e), stmt.span
-                        )])?
+                        // Look up the handler's state field types from struct_defs
+                        let field_count = self.struct_defs.get(handler_id)
+                            .map(|fields| fields.len())
+                            .unwrap_or(0);
+
+                        if field_count == 0 {
+                            // No state fields - just cast the typed pointer
+                            self.builder.build_pointer_cast(
+                                state_ptr,
+                                i8_ptr_ty,
+                                "state_void_ptr"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM error: {}", e), stmt.span
+                            )])?
+                        } else {
+                            // Create shadow alloca with uniform i64 layout
+                            let i64_array_type = i64_ty.array_type(field_count as u32);
+                            let shadow_alloca = self.builder
+                                .build_alloca(i64_array_type, "state_shadow")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM error: {}", e), stmt.span
+                                )])?;
+
+                            // Build the typed struct type for GEP into the original state
+                            let handler_field_types = self.struct_defs.get(handler_id).cloned()
+                                .unwrap_or_default();
+                            let typed_field_llvm_types: Vec<inkwell::types::BasicTypeEnum> = handler_field_types.iter()
+                                .map(|t| self.lower_type(t))
+                                .collect();
+                            let typed_struct_type = self.context.struct_type(&typed_field_llvm_types, false);
+                            let typed_struct_ptr_type = typed_struct_type.ptr_type(AddressSpace::default());
+                            let typed_struct_ptr = self.builder
+                                .build_pointer_cast(state_ptr, typed_struct_ptr_type, "typed_state_for_shadow")
+                                .map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM error: {}", e), stmt.span
+                                )])?;
+
+                            let i32_ty = self.context.i32_type();
+                            let zero_i32 = i32_ty.const_zero();
+
+                            // Copy each field from typed struct to shadow i64 array
+                            for idx in 0..field_count {
+                                // GEP into typed struct to get field value
+                                let field_ptr = self.builder
+                                    .build_struct_gep(typed_struct_ptr, idx as u32, &format!("state_field_{}_ptr", idx))
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM error: {}", e), stmt.span
+                                    )])?;
+                                let field_val = self.builder
+                                    .build_load(field_ptr, &format!("state_field_{}", idx))
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM error: {}", e), stmt.span
+                                    )])?;
+
+                                // Convert field value to i64
+                                let field_as_i64 = match field_val {
+                                    BasicValueEnum::IntValue(iv) => {
+                                        let bw = iv.get_type().get_bit_width();
+                                        if bw == 64 {
+                                            iv
+                                        } else if bw < 64 {
+                                            self.builder.build_int_z_extend(iv, i64_ty, &format!("state_field_{}_zext", idx))
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM error: {}", e), stmt.span
+                                                )])?
+                                        } else {
+                                            // Wider than 64 bits - truncate (shouldn't normally happen for state fields)
+                                            self.builder.build_int_truncate(iv, i64_ty, &format!("state_field_{}_trunc", idx))
+                                                .map_err(|e| vec![Diagnostic::error(
+                                                    format!("LLVM error: {}", e), stmt.span
+                                                )])?
+                                        }
+                                    }
+                                    BasicValueEnum::PointerValue(pv) => {
+                                        self.builder.build_ptr_to_int(pv, i64_ty, &format!("state_field_{}_ptoi", idx))
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?
+                                    }
+                                    BasicValueEnum::FloatValue(fv) => {
+                                        self.builder.build_bit_cast(fv, i64_ty, &format!("state_field_{}_fcast", idx))
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?
+                                            .into_int_value()
+                                    }
+                                    _ => {
+                                        // For struct/array state fields, store to temp alloca and load as i64
+                                        let tmp_alloca = self.builder
+                                            .build_alloca(i64_ty, &format!("state_field_{}_tmp", idx))
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?;
+                                        // Zero-initialize first
+                                        self.builder.build_store(tmp_alloca, i64_ty.const_zero())
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?;
+                                        // Cast to field type pointer and store
+                                        let field_type = field_val.get_type();
+                                        let field_ptr_type = field_type.ptr_type(AddressSpace::default());
+                                        let typed_tmp = self.builder
+                                            .build_pointer_cast(tmp_alloca, field_ptr_type, &format!("state_field_{}_typed_tmp", idx))
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?;
+                                        self.builder.build_store(typed_tmp, field_val)
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?;
+                                        // Load back as i64
+                                        self.builder.build_load(tmp_alloca, &format!("state_field_{}_as_i64", idx))
+                                            .map_err(|e| vec![Diagnostic::error(
+                                                format!("LLVM error: {}", e), stmt.span
+                                            )])?
+                                            .into_int_value()
+                                    }
+                                };
+
+                                // GEP into shadow array and store i64 value
+                                let idx_val = i32_ty.const_int(idx as u64, false);
+                                let shadow_elem_ptr = unsafe {
+                                    self.builder.build_gep(shadow_alloca, &[zero_i32, idx_val], &format!("shadow_{}_ptr", idx))
+                                }.map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM error: {}", e), stmt.span
+                                )])?;
+                                self.builder.build_store(shadow_elem_ptr, field_as_i64)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM error: {}", e), stmt.span
+                                    )])?;
+                            }
+
+                            // Store shadow alloca for use by CallReturnClause
+                            self.handler_state_shadows.insert(state_local, shadow_alloca);
+
+                            // Cast shadow to i8* (void*) for evidence
+                            self.builder.build_pointer_cast(
+                                shadow_alloca,
+                                i8_ptr_ty,
+                                "state_void_ptr"
+                            ).map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM error: {}", e), stmt.span
+                            )])?
+                        }
                     }
                 };
                 self.builder.build_call(
@@ -1176,12 +1320,30 @@ impl<'ctx, 'a> MirStatementCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                     }
                 };
 
-                // Get state pointer from state_place
-                let state_ptr = self.compile_mir_place(state_place, body, escape_results)?;
-                let state_void_ptr = self.builder.build_pointer_cast(state_ptr, i8_ptr_ty, "state_void_ptr")
-                    .map_err(|e| vec![Diagnostic::error(
-                        format!("LLVM cast error: {}", e), stmt.span
-                    )])?;
+                // Get state pointer: prefer shadow i64 alloca if one was created
+                // by PushHandler (for uniform i64 state layout), otherwise fall back
+                // to the typed state_place.
+                let state_void_ptr = if let Some(state_local) = state_place.as_local() {
+                    if let Some(&shadow_ptr) = self.handler_state_shadows.get(&state_local) {
+                        // Use shadow i64 alloca (matches handler body's i64 layout)
+                        self.builder.build_pointer_cast(shadow_ptr, i8_ptr_ty, "state_void_ptr")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM cast error: {}", e), stmt.span
+                            )])?
+                    } else {
+                        let state_ptr = self.compile_mir_place(state_place, body, escape_results)?;
+                        self.builder.build_pointer_cast(state_ptr, i8_ptr_ty, "state_void_ptr")
+                            .map_err(|e| vec![Diagnostic::error(
+                                format!("LLVM cast error: {}", e), stmt.span
+                            )])?
+                    }
+                } else {
+                    let state_ptr = self.compile_mir_place(state_place, body, escape_results)?;
+                    self.builder.build_pointer_cast(state_ptr, i8_ptr_ty, "state_void_ptr")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM cast error: {}", e), stmt.span
+                        )])?
+                };
 
                 // Call return clause: fn(result: i64, state_ptr: *void) -> i64
                 let call_result = self.builder.build_call(

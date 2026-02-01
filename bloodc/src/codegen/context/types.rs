@@ -104,92 +104,124 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     } else {
                         tag_type.into()
                     }
-                } else if let Some(fields) = self.struct_defs.get(def_id) {
-                // Look up struct or enum definition
-                    // Substitute type parameters with concrete type arguments
-                    let field_types: Vec<BasicTypeEnum> = fields.iter()
-                        .map(|f| {
-                            let substituted = self.substitute_type_params(f, args);
-                            self.lower_type(&substituted)
-                        })
-                        .collect();
-                    if field_types.is_empty() {
-                        // Unit struct - use i8 placeholder
-                        self.context.i8_type().into()
-                    } else {
-                        self.context.struct_type(&field_types, false).into()
+                } else if self.struct_defs.contains_key(def_id) || self.enum_defs.contains_key(def_id) {
+                    // Cycle detection for recursive types (e.g. enum List { Cons(i32, List), Nil }).
+                    // If we're already lowering this ADT, we've hit a recursive cycle.
+                    // Recursive types have infinite size and cannot be stack-allocated;
+                    // return a pointer placeholder. The type checker should have caught
+                    // this, but we handle it gracefully to avoid stack overflow.
+                    if !self.lowering_adts.borrow_mut().insert(ty.clone()) {
+                        // Already lowering this exact ADT instantiation → true recursive cycle.
+                        // Look up the type name for a useful error message.
+                        let type_name = self.def_paths.get(def_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{:?}", def_id));
+                        self.type_lowering_errors.borrow_mut().push(
+                            crate::diagnostics::Diagnostic::error(
+                                format!(
+                                    "recursive type `{}` has infinite size; \
+                                     consider using indirection (e.g., Box<{}>)",
+                                    type_name, type_name
+                                ),
+                                crate::span::Span::dummy(),
+                            )
+                        );
+                        return self.context.i8_type().ptr_type(AddressSpace::default()).into();
                     }
-                } else if let Some(variants) = self.enum_defs.get(def_id) {
-                    // Enum: { i32 tag, payload }
-                    // The payload must have:
-                    // 1. Enough size to hold the largest variant
-                    // 2. Alignment at least as high as the most-aligned variant
-                    //
-                    // IMPORTANT: We track both max_size AND max_alignment separately because
-                    // the largest variant might not have the highest alignment requirement.
-                    // For example: Variant A = {i32, i32, i32} (12 bytes, 4-byte align)
-                    //              Variant B = {i64} (8 bytes, 8-byte align)
-                    // Using A's type as payload would misalign B's i64 access.
-                    //
-                    // Solution: Use an array of the highest-alignment type, sized to fit
-                    // the largest variant. This ensures proper alignment for all variants.
-                    let mut max_payload_size: u64 = 0;
-                    let mut max_alignment: u32 = 1;
-                    let mut has_payload = false;
 
-                    for variant_fields in variants {
-                        if !variant_fields.is_empty() {
-                            has_payload = true;
-                            // Build the variant's struct type to get its size and alignment
-                            let variant_field_types: Vec<BasicTypeEnum> = variant_fields.iter()
-                                .map(|field_ty| {
-                                    let substituted = self.substitute_type_params(field_ty, args);
-                                    self.lower_type(&substituted)
-                                })
-                                .collect();
-                            let variant_struct_ty = self.context.struct_type(&variant_field_types, false);
-                            let variant_size = self.get_type_size_approx(variant_struct_ty.into()) as u64;
-                            let variant_align = self.get_max_field_alignment(&variant_field_types);
+                    let result = if let Some(fields) = self.struct_defs.get(def_id).cloned() {
+                    // Look up struct definition
+                        // Substitute type parameters with concrete type arguments
+                        let field_types: Vec<BasicTypeEnum> = fields.iter()
+                            .map(|f| {
+                                let substituted = self.substitute_type_params(f, args);
+                                self.lower_type(&substituted)
+                            })
+                            .collect();
+                        if field_types.is_empty() {
+                            // Unit struct - use i8 placeholder
+                            self.context.i8_type().into()
+                        } else {
+                            self.context.struct_type(&field_types, false).into()
+                        }
+                    } else if let Some(variants) = self.enum_defs.get(def_id).cloned() {
+                        // Enum: { i32 tag, payload }
+                        // The payload must have:
+                        // 1. Enough size to hold the largest variant
+                        // 2. Alignment at least as high as the most-aligned variant
+                        //
+                        // IMPORTANT: We track both max_size AND max_alignment separately because
+                        // the largest variant might not have the highest alignment requirement.
+                        // For example: Variant A = {i32, i32, i32} (12 bytes, 4-byte align)
+                        //              Variant B = {i64} (8 bytes, 8-byte align)
+                        // Using A's type as payload would misalign B's i64 access.
+                        //
+                        // Solution: Use an array of the highest-alignment type, sized to fit
+                        // the largest variant. This ensures proper alignment for all variants.
+                        let mut max_payload_size: u64 = 0;
+                        let mut max_alignment: u32 = 1;
+                        let mut has_payload = false;
 
-                            if variant_size > max_payload_size {
-                                max_payload_size = variant_size;
-                            }
-                            if variant_align > max_alignment {
-                                max_alignment = variant_align;
+                        for variant_fields in &variants {
+                            if !variant_fields.is_empty() {
+                                has_payload = true;
+                                // Build the variant's struct type to get its size and alignment
+                                let variant_field_types: Vec<BasicTypeEnum> = variant_fields.iter()
+                                    .map(|field_ty| {
+                                        let substituted = self.substitute_type_params(field_ty, args);
+                                        self.lower_type(&substituted)
+                                    })
+                                    .collect();
+                                let variant_struct_ty = self.context.struct_type(&variant_field_types, false);
+                                let variant_size = self.get_type_size_approx(variant_struct_ty.into()) as u64;
+                                let variant_align = self.get_max_field_alignment(&variant_field_types);
+
+                                if variant_size > max_payload_size {
+                                    max_payload_size = variant_size;
+                                }
+                                if variant_align > max_alignment {
+                                    max_alignment = variant_align;
+                                }
                             }
                         }
-                    }
 
-                    if !has_payload {
-                        // No payload fields in any variant - just tag
-                        self.context.i32_type().into()
-                    } else {
-                        // Create { i32 tag, aligned_payload }
-                        // Use an array of the appropriately-aligned type to ensure
-                        // proper alignment for all variant payloads.
-                        let tag_type = self.context.i32_type();
-                        let payload_type = if max_alignment >= 16 {
-                            // Need 16-byte alignment: use [i128 x N] for i128 fields
-                            let num_i128s = max_payload_size.div_ceil(16);
-                            self.context.i128_type().array_type(num_i128s as u32).into()
-                        } else if max_alignment >= 8 {
-                            // Need 8-byte alignment: use [i64 x N]
-                            let num_i64s = max_payload_size.div_ceil(8);
-                            self.context.i64_type().array_type(num_i64s as u32).into()
-                        } else if max_alignment >= 4 {
-                            // Need 4-byte alignment: use [i32 x N]
-                            let num_i32s = max_payload_size.div_ceil(4);
-                            self.context.i32_type().array_type(num_i32s as u32).into()
-                        } else if max_alignment >= 2 {
-                            // Need 2-byte alignment: use [i16 x N]
-                            let num_i16s = max_payload_size.div_ceil(2);
-                            self.context.i16_type().array_type(num_i16s as u32).into()
+                        if !has_payload {
+                            // No payload fields in any variant - just tag
+                            self.context.i32_type().into()
                         } else {
-                            // 1-byte alignment: use [i8 x N]
-                            self.context.i8_type().array_type(max_payload_size as u32).into()
-                        };
-                        self.context.struct_type(&[tag_type.into(), payload_type], false).into()
-                    }
+                            // Create { i32 tag, aligned_payload }
+                            // Use an array of the appropriately-aligned type to ensure
+                            // proper alignment for all variant payloads.
+                            let tag_type = self.context.i32_type();
+                            let payload_type = if max_alignment >= 16 {
+                                // Need 16-byte alignment: use [i128 x N] for i128 fields
+                                let num_i128s = max_payload_size.div_ceil(16);
+                                self.context.i128_type().array_type(num_i128s as u32).into()
+                            } else if max_alignment >= 8 {
+                                // Need 8-byte alignment: use [i64 x N]
+                                let num_i64s = max_payload_size.div_ceil(8);
+                                self.context.i64_type().array_type(num_i64s as u32).into()
+                            } else if max_alignment >= 4 {
+                                // Need 4-byte alignment: use [i32 x N]
+                                let num_i32s = max_payload_size.div_ceil(4);
+                                self.context.i32_type().array_type(num_i32s as u32).into()
+                            } else if max_alignment >= 2 {
+                                // Need 2-byte alignment: use [i16 x N]
+                                let num_i16s = max_payload_size.div_ceil(2);
+                                self.context.i16_type().array_type(num_i16s as u32).into()
+                            } else {
+                                // 1-byte alignment: use [i8 x N]
+                                self.context.i8_type().array_type(max_payload_size as u32).into()
+                            };
+                            self.context.struct_type(&[tag_type.into(), payload_type], false).into()
+                        }
+                    } else {
+                        unreachable!()
+                    };
+
+                    // Remove from cycle detection set
+                    self.lowering_adts.borrow_mut().remove(ty);
+                    result
                 } else {
                     // Unknown ADT at codegen time is a compiler bug — panic with diagnostic info
                     panic!(

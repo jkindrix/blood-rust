@@ -3,6 +3,7 @@
 //! This module provides the main code generation context which
 //! coordinates LLVM code generation for a Blood program.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use inkwell::context::Context;
@@ -763,6 +764,19 @@ pub struct CodegenContext<'ctx, 'a> {
     /// calls for non-tail-resumptive effects so that regions are kept alive
     /// across continuation capture/resume.
     pub(super) active_regions: Vec<inkwell::values::IntValue<'ctx>>,
+    /// Maps handler state local ID → shadow i64 alloca pointer.
+    /// Handler op bodies use uniform i64 layout for state fields because they
+    /// are compiled once per definition (not per instantiation) and may have
+    /// generic/unresolved state field types. The shadow alloca bridges the
+    /// typed state struct and the handler body's i64 view.
+    pub(super) handler_state_shadows: HashMap<LocalId, PointerValue<'ctx>>,
+    /// ADT types currently being lowered (cycle detection for recursive types).
+    /// Uses the full Type (including type arguments) to distinguish between
+    /// different instantiations like Container<i32> vs Container<Container<i32>>.
+    pub(super) lowering_adts: RefCell<HashSet<Type>>,
+    /// Errors collected during type lowering (which takes &self, not &mut self).
+    /// Drained into `self.errors` at compilation checkpoints.
+    pub(super) type_lowering_errors: RefCell<Vec<Diagnostic>>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -820,6 +834,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             def_paths: HashMap::new(),
             closure_analysis: None,
             active_regions: Vec::new(),
+            handler_state_shadows: HashMap::new(),
+            lowering_adts: RefCell::new(HashSet::new()),
+            type_lowering_errors: RefCell::new(Vec::new()),
         }
     }
 
@@ -1101,6 +1118,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Fourth pass: declare FFI external functions from bridge blocks
         self.declare_ffi_functions(hir_crate)?;
+
+        // Drain any errors collected during type lowering (which uses &self).
+        self.errors.extend(self.type_lowering_errors.borrow_mut().drain(..));
 
         if self.errors.is_empty() {
             Ok(())
@@ -2263,6 +2283,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Sixth pass: register handlers with runtime
         self.register_handlers_with_runtime()?;
+
+        // Drain any errors collected during type lowering (which uses &self).
+        self.errors.extend(self.type_lowering_errors.borrow_mut().drain(..));
 
         if self.errors.is_empty() {
             Ok(())

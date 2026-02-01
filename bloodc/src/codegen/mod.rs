@@ -413,6 +413,15 @@ pub fn compile_mir_to_object(
     // Fifth pass: register handlers with runtime
     codegen.register_handlers_with_runtime()?;
 
+    // Drain any errors collected during type lowering (lower_type takes &self,
+    // so errors are stored in a RefCell and drained here).
+    {
+        let mut type_errors = codegen.type_lowering_errors.borrow_mut();
+        if !type_errors.is_empty() {
+            return Err(type_errors.drain(..).collect());
+        }
+    }
+
     // Verify the module before optimization
     if let Err(err) = module.verify() {
         return Err(vec![Diagnostic::error(
@@ -495,6 +504,15 @@ pub fn compile_mir_to_object_with_opt(
 
     // Fifth pass: register handlers with runtime
     codegen.register_handlers_with_runtime()?;
+
+    // Drain any errors collected during type lowering (lower_type takes &self,
+    // so errors are stored in a RefCell and drained here).
+    {
+        let mut type_errors = codegen.type_lowering_errors.borrow_mut();
+        if !type_errors.is_empty() {
+            return Err(type_errors.drain(..).collect());
+        }
+    }
 
     // Verify the module before optimization
     if let Err(err) = module.verify() {
@@ -612,6 +630,14 @@ pub fn compile_definition_to_object(
             _ => {
                 // Type declarations are already handled in compile_crate_declarations
             }
+        }
+    }
+
+    // Drain any errors collected during type lowering.
+    {
+        let mut type_errors = codegen.type_lowering_errors.borrow_mut();
+        if !type_errors.is_empty() {
+            return Err(type_errors.drain(..).collect());
         }
     }
 
