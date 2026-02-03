@@ -1922,7 +1922,7 @@ impl<'src> Parser<'src> {
         let start = self.current.span;
         self.advance(); // consume 'macro'
 
-        // Parse macro name (followed by `!`)
+        // Parse macro name (optionally followed by `!`)
         let name = if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
             self.advance();
             self.spanned_symbol()
@@ -1931,8 +1931,8 @@ impl<'src> Parser<'src> {
             Spanned::new(self.intern(""), self.current.span)
         };
 
-        // Expect `!` after the name
-        self.expect(TokenKind::Not);
+        // `!` after the name is optional (supports both `macro name!` and `macro name`)
+        self.try_consume(TokenKind::Not);
 
         let rules = if self.check(TokenKind::LBrace) {
             // Multiple rules: macro name! { (pattern) => expansion, ... }
@@ -1964,8 +1964,8 @@ impl<'src> Parser<'src> {
             let rule = self.parse_single_macro_rule();
             rules.push(rule);
 
-            // Allow trailing comma
-            if !self.try_consume(TokenKind::Comma) {
+            // Allow trailing comma or semicolon as rule separator (Rust uses semicolons)
+            if !self.try_consume(TokenKind::Comma) && !self.try_consume(TokenKind::Semi) {
                 break;
             }
         }

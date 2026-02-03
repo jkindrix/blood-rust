@@ -211,12 +211,18 @@ impl MacroExpander {
                         match self.expand_macro_to_source(&macro_def, &input, expr.span) {
                             Ok(expanded_source) => {
                                 // Re-parse the expanded source as an expression
-                                let mut parser = crate::parser::Parser::new(&expanded_source);
+                                // Use the same interner to ensure symbols are consistent
+                                let mut parser = crate::parser::Parser::with_interner(
+                                    &expanded_source,
+                                    self.interner.clone()
+                                );
                                 match parser.parse_expr_for_macro() {
                                     Ok(parsed_expr) => {
                                         // Replace the entire expression with the parsed result
                                         expr.kind = parsed_expr.kind;
                                         expr.span = parsed_expr.span;
+                                        // Merge new symbols back into our interner
+                                        self.interner = parser.take_interner();
                                     }
                                     Err(parse_errors) => {
                                         for err in parse_errors {
@@ -794,8 +800,9 @@ impl MacroExpander {
             TokenKind::LtEq => "<=".to_string(),
             TokenKind::Gt => ">".to_string(),
             TokenKind::GtEq => ">=".to_string(),
-            TokenKind::And => "&&".to_string(),
-            TokenKind::Or => "||".to_string(),
+            TokenKind::And => "&".to_string(),
+            TokenKind::Or => "|".to_string(),
+            TokenKind::OrOr => "||".to_string(),
             TokenKind::Not => "!".to_string(),
             TokenKind::Comma => ",".to_string(),
             TokenKind::Colon => ":".to_string(),
@@ -807,6 +814,104 @@ impl MacroExpander {
             TokenKind::RBracket => "]".to_string(),
             TokenKind::LBrace => "{".to_string(),
             TokenKind::RBrace => "}".to_string(),
+            // Keywords
+            TokenKind::As => "as".to_string(),
+            TokenKind::Async => "async".to_string(),
+            TokenKind::Await => "await".to_string(),
+            TokenKind::Break => "break".to_string(),
+            TokenKind::Const => "const".to_string(),
+            TokenKind::Continue => "continue".to_string(),
+            TokenKind::Crate => "crate".to_string(),
+            TokenKind::Deep => "deep".to_string(),
+            TokenKind::Dyn => "dyn".to_string(),
+            TokenKind::Effect => "effect".to_string(),
+            TokenKind::Else => "else".to_string(),
+            TokenKind::Enum => "enum".to_string(),
+            TokenKind::Extends => "extends".to_string(),
+            TokenKind::Extern => "extern".to_string(),
+            TokenKind::False => "false".to_string(),
+            TokenKind::Fn => "fn".to_string(),
+            TokenKind::For => "for".to_string(),
+            TokenKind::Forall => "forall".to_string(),
+            TokenKind::Handler => "handler".to_string(),
+            TokenKind::If => "if".to_string(),
+            TokenKind::Impl => "impl".to_string(),
+            TokenKind::In => "in".to_string(),
+            TokenKind::Let => "let".to_string(),
+            TokenKind::Linear => "linear".to_string(),
+            TokenKind::Loop => "loop".to_string(),
+            TokenKind::Match => "match".to_string(),
+            TokenKind::Mod => "mod".to_string(),
+            TokenKind::Module => "module".to_string(),
+            TokenKind::Move => "move".to_string(),
+            TokenKind::Mut => "mut".to_string(),
+            TokenKind::Op => "op".to_string(),
+            TokenKind::Perform => "perform".to_string(),
+            TokenKind::Pub => "pub".to_string(),
+            TokenKind::Pure => "pure".to_string(),
+            TokenKind::Ref => "ref".to_string(),
+            TokenKind::Region => "region".to_string(),
+            TokenKind::Resume => "resume".to_string(),
+            TokenKind::Return => "return".to_string(),
+            TokenKind::Shallow => "shallow".to_string(),
+            TokenKind::Static => "static".to_string(),
+            TokenKind::Struct => "struct".to_string(),
+            TokenKind::Super => "super".to_string(),
+            TokenKind::Trait => "trait".to_string(),
+            TokenKind::True => "true".to_string(),
+            TokenKind::Type => "type".to_string(),
+            TokenKind::Use => "use".to_string(),
+            TokenKind::Where => "where".to_string(),
+            TokenKind::While => "while".to_string(),
+            TokenKind::With => "with".to_string(),
+            TokenKind::Handle => "handle".to_string(),
+            TokenKind::Affine => "affine".to_string(),
+            TokenKind::Bridge => "bridge".to_string(),
+            TokenKind::Abstract => "abstract".to_string(),
+            TokenKind::Become => "become".to_string(),
+            TokenKind::Box => "box".to_string(),
+            TokenKind::Do => "do".to_string(),
+            TokenKind::Final => "final".to_string(),
+            TokenKind::Macro => "macro".to_string(),
+            TokenKind::Override => "override".to_string(),
+            TokenKind::Priv => "priv".to_string(),
+            TokenKind::Typeof => "typeof".to_string(),
+            TokenKind::Unsized => "unsized".to_string(),
+            TokenKind::Virtual => "virtual".to_string(),
+            TokenKind::Yield => "yield".to_string(),
+            TokenKind::Try => "try".to_string(),
+            TokenKind::Catch => "catch".to_string(),
+            TokenKind::Finally => "finally".to_string(),
+            TokenKind::Throw => "throw".to_string(),
+            TokenKind::Union => "union".to_string(),
+            TokenKind::Default => "default".to_string(),
+            TokenKind::Unsafe => "unsafe".to_string(),
+            // Other operators and punctuation
+            TokenKind::Percent => "%".to_string(),
+            TokenKind::Caret => "^".to_string(),
+            TokenKind::Shl => "<<".to_string(),
+            TokenKind::Shr => ">>".to_string(),
+            TokenKind::Arrow => "->".to_string(),
+            TokenKind::FatArrow => "=>".to_string(),
+            TokenKind::Pipe => "|".to_string(),
+            TokenKind::At => "@".to_string(),
+            TokenKind::Hash => "#".to_string(),
+            TokenKind::Question => "?".to_string(),
+            TokenKind::Dollar => "$".to_string(),
+            TokenKind::ColonColon => "::".to_string(),
+            TokenKind::DotDot => "..".to_string(),
+            TokenKind::DotDotEq => "..=".to_string(),
+            TokenKind::PlusEq => "+=".to_string(),
+            TokenKind::MinusEq => "-=".to_string(),
+            TokenKind::StarEq => "*=".to_string(),
+            TokenKind::SlashEq => "/=".to_string(),
+            TokenKind::PercentEq => "%=".to_string(),
+            TokenKind::AndEq => "&=".to_string(),
+            TokenKind::OrEq => "|=".to_string(),
+            TokenKind::CaretEq => "^=".to_string(),
+            TokenKind::ShlEq => "<<=".to_string(),
+            TokenKind::ShrEq => ">>=".to_string(),
+            TokenKind::AndAnd => "&&".to_string(),
             _ => format!("{:?}", token.kind),
         }
     }
@@ -888,9 +993,38 @@ impl MacroExpander {
     ) -> Result<(), String> {
         match part {
             MacroExpansionPart::Tokens(tokens) => {
-                for t in tokens {
+                for (i, t) in tokens.iter().enumerate() {
                     result.push_str(&self.token_to_source(t));
-                    result.push(' ');
+
+                    // Smart spacing within tokens
+                    let needs_space = if let Some(next) = tokens.get(i + 1) {
+                        match (&t.kind, &next.kind) {
+                            // identifier followed by ! (macro call)
+                            (TokenKind::Ident | TokenKind::TypeIdent, TokenKind::Not) => false,
+                            // ! followed by delimiter (macro arguments)
+                            (TokenKind::Not, TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace) => false,
+                            // before semicolon or comma
+                            (_, TokenKind::Semi | TokenKind::Comma) => false,
+                            // before closing delimiters
+                            (_, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) => false,
+                            // after opening delimiters
+                            (TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace, _) => false,
+                            _ => true,
+                        }
+                    } else {
+                        // Last token in this part - add space if it's not punctuation
+                        // This ensures spacing between parts (e.g., "if" followed by "$x")
+                        !matches!(t.kind,
+                            TokenKind::Semi | TokenKind::Comma |
+                            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace |
+                            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace |
+                            TokenKind::Not
+                        )
+                    };
+
+                    if needs_space {
+                        result.push(' ');
+                    }
                 }
             }
             MacroExpansionPart::Substitution { name, .. } => {

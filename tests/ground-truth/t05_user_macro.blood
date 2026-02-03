@@ -1,4 +1,4 @@
-// XFAIL: user-defined macros not yet implemented
+// EXPECT: 0
 // Test: user-defined macro declaration
 macro my_assert {
     ($cond:expr) => {

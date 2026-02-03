@@ -659,7 +659,7 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
     let interner = parser.take_interner();
 
     // Expand user-defined macros before type checking
-    let mut macro_expander = macro_expand::MacroExpander::with_source(interner.clone(), &source);
+    let mut macro_expander = macro_expand::MacroExpander::with_source(interner, &source);
     let macro_errors = macro_expander.expand_program(&mut program);
     if !macro_errors.is_empty() {
         for error in &macro_errors {
@@ -668,6 +668,9 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Macro expansion failed with {} error(s).", macro_errors.len());
         return ExitCode::from(1);
     }
+
+    // Get the interner back from the expander (it may have new symbols from re-parsing)
+    let interner = macro_expander.into_interner();
 
     if verbosity > 1 {
         eprintln!("Macro expansion passed.");
@@ -868,7 +871,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     }
 
     // Expand user-defined macros before type checking
-    let mut macro_expander = macro_expand::MacroExpander::with_source(interner.clone(), &source);
+    let mut macro_expander = macro_expand::MacroExpander::with_source(interner, &source);
     let macro_errors = macro_expander.expand_program(&mut program);
     if !macro_errors.is_empty() {
         for error in &macro_errors {
@@ -877,6 +880,9 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Build failed: macro expansion errors.");
         return ExitCode::from(1);
     }
+
+    // Get the interner back from the expander (it may have new symbols from re-parsing)
+    let interner = macro_expander.into_interner();
 
     if verbosity > 1 {
         eprintln!("User-defined macro expansion passed.");
