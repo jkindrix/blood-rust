@@ -1000,6 +1000,29 @@ impl<'a> TypeContext<'a> {
             hir_args.push(arg_expr);
         }
 
+        // Validate that the effect is either handled by an enclosing handler or declared in the function signature
+        let is_handled = self.handled_effects.iter().any(|(eff_id, _)| *eff_id == effect_id);
+        let is_declared = if let Some(fn_id) = self.current_fn {
+            self.fn_effects.get(&fn_id)
+                .map(|effects| effects.iter().any(|er| er.def_id == effect_id))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if !is_handled && !is_declared {
+            // Get effect name for error message
+            let effect_name = self.effect_defs.get(&effect_id)
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| format!("effect@{:?}", effect_id));
+            self.errors.push(TypeError::new(
+                TypeErrorKind::UndeclaredEffects {
+                    effects: vec![effect_name],
+                },
+                span,
+            ));
+        }
+
         Ok(hir::Expr::new(
             hir::ExprKind::Perform {
                 effect_id,
@@ -2977,9 +3000,9 @@ impl<'a> TypeContext<'a> {
             }
         }
 
-        // Second, look for trait impl methods
+        // Second, look for trait impl methods (including default methods from trait)
         for impl_block in &self.impl_blocks {
-            let Some(_trait_id) = impl_block.trait_ref else {
+            let Some(trait_id) = impl_block.trait_ref else {
                 continue;
             };
 
@@ -2996,6 +3019,7 @@ impl<'a> TypeContext<'a> {
                 }
             };
 
+            // First check methods defined in the impl block
             for method in &impl_block.methods {
                 if method.name == method_name {
                     if let Some(sig) = self.fn_sigs.get(&method.def_id) {
@@ -3008,6 +3032,25 @@ impl<'a> TypeContext<'a> {
                             impl_block.generics.clone(),
                             sig.generics.clone(),
                         ));
+                    }
+                }
+            }
+
+            // If not found in impl, check for default method in trait definition
+            if let Some(trait_info) = self.trait_defs.get(&trait_id) {
+                for trait_method in &trait_info.methods {
+                    if trait_method.name == method_name && trait_method.has_default {
+                        if let Some(sig) = self.fn_sigs.get(&trait_method.def_id) {
+                            let subst_output = self.substitute_type_vars(&sig.output, &subst);
+                            let first_param = sig.inputs.first().map(|p| self.substitute_type_vars(p, &subst));
+                            return Some((
+                                trait_method.def_id,
+                                subst_output,
+                                first_param,
+                                impl_block.generics.clone(),
+                                sig.generics.clone(),
+                            ));
+                        }
                     }
                 }
             }

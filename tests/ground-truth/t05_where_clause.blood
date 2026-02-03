@@ -1,4 +1,3 @@
-// XFAIL: where clauses not yet implemented
 // Test: where clause on generic function
 trait Printable {
     fn to_int(self) -> i32;

@@ -1,4 +1,4 @@
-// XFAIL: effect declaration check not yet enforced
+// COMPILE_FAIL: performing undeclared effect (E0308)
 // Test: performing an effect not listed in the function's effect row should fail
 effect Logger {
     op log(msg: i32) -> ();

@@ -313,6 +313,15 @@ impl<'a> TypeContext<'a> {
                 func.span,
             )))?;
 
+        // Validate main function signature: main must have no parameters
+        let fn_name = self.symbol_to_string(func.name.node);
+        if fn_name == "main" && !func.params.is_empty() {
+            return Err(Box::new(TypeError::new(
+                TypeErrorKind::MainSignature,
+                func.span,
+            )));
+        }
+
         // Save state for nested function support - these fields are modified
         // during type-checking and need to be restored after nested functions
         let saved_locals = std::mem::take(&mut self.locals);
@@ -357,6 +366,23 @@ impl<'a> TypeContext<'a> {
                         };
                         const_generic_idx += 1;
                         self.const_params.insert(param_name, const_id);
+                    }
+                }
+            }
+        }
+
+        // Register where clause bounds as type parameter bounds for method resolution
+        // This allows methods from trait bounds to be found on type parameters
+        if let Some(predicates) = self.fn_where_bounds.get(&def_id).cloned() {
+            for predicate in predicates {
+                // If the subject type is a type parameter, register its trait bounds
+                if let hir::TypeKind::Param(ty_var_id) = predicate.subject_ty.kind() {
+                    // Merge with existing bounds (if any from inline bounds like `T: Trait`)
+                    let entry = self.type_param_bounds.entry(*ty_var_id).or_default();
+                    for bound in predicate.trait_bounds {
+                        if !entry.contains(&bound) {
+                            entry.push(bound);
+                        }
                     }
                 }
             }
