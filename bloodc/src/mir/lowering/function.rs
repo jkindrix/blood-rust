@@ -2071,23 +2071,65 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
     }
 
     /// Lower a struct expression.
+    ///
+    /// If `base` is provided (struct update syntax: `S { field: val, ..base }`),
+    /// fields not explicitly specified are copied from the base expression.
     fn lower_struct(
         &mut self,
         def_id: DefId,
         fields: &[hir::FieldExpr],
-        _base: Option<&Expr>,
+        base: Option<&Expr>,
         ty: &Type,
         span: Span,
     ) -> Result<Operand, Vec<Diagnostic>> {
-        // Sort fields by their definition index to ensure correct struct layout.
-        // Source code may have fields in arbitrary order (e.g., `Foo { b: 1, a: 2 }`),
-        // but the LLVM struct expects fields in definition order.
-        let mut sorted_fields: Vec<_> = fields.iter().collect();
-        sorted_fields.sort_by_key(|f| f.field_idx);
+        // Get the struct definition to know total field count
+        let struct_def = self.hir.items.get(&def_id).and_then(|item| {
+            if let hir::ItemKind::Struct(s) = &item.kind {
+                Some(s)
+            } else {
+                None
+            }
+        });
 
-        let mut operands = Vec::with_capacity(sorted_fields.len());
-        for field in sorted_fields {
-            operands.push(self.lower_expr(&field.value)?);
+        let total_fields = struct_def
+            .map(|s| match &s.kind {
+                hir::StructKind::Record(fields) => fields.len(),
+                hir::StructKind::Tuple(fields) => fields.len(),
+                hir::StructKind::Unit => 0,
+            })
+            .unwrap_or(fields.len());
+
+        // If we have a base expression, lower it first
+        let base_place = if let Some(base_expr) = base {
+            let base_op = self.lower_expr(base_expr)?;
+            // Store base in a temporary so we can extract fields from it
+            let base_temp = self.new_temp(ty.clone(), span);
+            self.push_assign(
+                Place::local(base_temp),
+                Rvalue::Use(base_op),
+            );
+            Some(Place::local(base_temp))
+        } else {
+            None
+        };
+
+        // Build operands for all fields in order
+        let mut operands = Vec::with_capacity(total_fields);
+        for field_idx in 0..total_fields as u32 {
+            if let Some(field) = fields.iter().find(|f| f.field_idx == field_idx) {
+                // Explicitly specified field
+                operands.push(self.lower_expr(&field.value)?);
+            } else if let Some(base_place) = &base_place {
+                // Field from base expression - extract it
+                let field_place = base_place.clone().project(PlaceElem::Field(field_idx));
+                operands.push(Operand::Copy(field_place));
+            } else {
+                // This shouldn't happen - a field is neither specified nor from base
+                return Err(vec![Diagnostic::error(
+                    format!("Missing value for struct field at index {}", field_idx),
+                    span,
+                )]);
+            }
         }
 
         // Extract type arguments from the struct type

@@ -1,4 +1,3 @@
-// XFAIL: struct update codegen produces LLVM error
 // Test: struct update/spread syntax
 // EXPECT: 10
 // EXPECT: 99

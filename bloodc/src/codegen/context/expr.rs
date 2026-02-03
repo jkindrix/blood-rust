@@ -98,9 +98,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     Ok(None)
                 }
             }
-            Struct { def_id: _, fields, base: _ } => {
-                // Compile struct construction
-                self.compile_struct_expr(&expr.ty, fields)
+            Struct { def_id: _, fields, base } => {
+                // Compile struct construction (with optional base for struct update syntax)
+                self.compile_struct_expr(&expr.ty, fields, base.as_deref())
             }
             Variant { def_id, variant_idx, fields } => {
                 // Compile enum variant construction
@@ -942,19 +942,32 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     }
 
     /// Compile a struct construction expression.
+    ///
+    /// If `base` is provided (struct update syntax: `S { field: val, ..base }`),
+    /// we start with the base struct value and overwrite the specified fields.
     pub(super) fn compile_struct_expr(
         &mut self,
         result_ty: &Type,
         fields: &[hir::FieldExpr],
+        base: Option<&hir::Expr>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
         // Get the LLVM type for the struct
         let struct_llvm_type = self.lower_type(result_ty);
-
-        // Create an undefined struct value
         let struct_type = struct_llvm_type.into_struct_type();
-        let mut struct_val = struct_type.get_undef();
 
-        // Fill in each field
+        // Start with base value if provided, otherwise use undef
+        let mut struct_val = if let Some(base_expr) = base {
+            let base_val = self.compile_expr(base_expr)?
+                .ok_or_else(|| vec![Diagnostic::error(
+                    "Expected value for struct base expression",
+                    base_expr.span,
+                )])?;
+            base_val.into_struct_value()
+        } else {
+            struct_type.get_undef()
+        };
+
+        // Overwrite each explicitly specified field
         for field in fields {
             let field_val = self.compile_expr(&field.value)?
                 .ok_or_else(|| vec![Diagnostic::error(
