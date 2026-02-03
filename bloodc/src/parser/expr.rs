@@ -738,6 +738,16 @@ impl<'src> Parser<'src> {
                 }
             }
 
+            // The `default` keyword as a standalone expression creates a default value
+            // (only when not followed by `::` indicating a path like `Default::default()`)
+            TokenKind::Default if !self.check_next(TokenKind::ColonColon) => {
+                self.advance();
+                Expr {
+                    span: start.merge(self.previous.span),
+                    kind: ExprKind::Default,
+                }
+            }
+
             // Identifiers and paths (including contextual keywords usable as identifiers)
             // Note: Default and Handle can be identifiers in names (fn default, field handle)
             // They are parsed as identifiers/paths first, not as special expressions.
