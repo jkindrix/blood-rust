@@ -3207,6 +3207,18 @@ pub extern "C" fn blood_register_allocation(address: u64, size: u64) -> u32 {
     register_allocation(address, size as usize)
 }
 
+/// Get the number of entries in the slot registry.
+///
+/// This is useful for debugging and memory analysis to understand
+/// how many allocations are being tracked.
+///
+/// # Returns
+/// The number of slots currently in the registry.
+#[no_mangle]
+pub extern "C" fn blood_slot_registry_len() -> u64 {
+    crate::memory::slot_registry().len() as u64
+}
+
 /// Unregister an allocation from the slot registry and add to region free list.
 ///
 /// This should be called by the runtime allocator when memory is freed.
@@ -8289,18 +8301,16 @@ pub extern "C" fn blood_alloc_simple(size: i64) -> i64 {
     }
 
     // No active region — use system allocator
+    // NOTE: We do NOT register non-region allocations in the slot registry.
+    // This saves significant memory overhead. The registry is only needed for
+    // region allocations (to route freed slots to the correct free list).
+    // In blood_free_simple, if an address is not in the registry, we assume
+    // it's a non-region allocation and free directly to the system allocator.
     unsafe {
         let layout = std::alloc::Layout::from_size_align(size_usize, 8)
             .expect("blood_alloc_simple: invalid layout");
         let ptr = runtime_alloc(layout);
-        if ptr.is_null() {
-            0
-        } else {
-            let addr = ptr as u64;
-            // Register with region_id=0 to mark as non-region allocation
-            register_allocation_with_region(addr, size_usize, 0);
-            addr as i64
-        }
+        if ptr.is_null() { 0 } else { ptr as i64 }
     }
 }
 
@@ -8354,19 +8364,13 @@ pub extern "C" fn blood_realloc(ptr: i64, new_size: i64) -> i64 {
         }
         _ => {
             // Non-region allocation or unknown: use system realloc
+            // NOTE: We do NOT register non-region allocations in the slot registry.
+            // This matches the behavior of blood_alloc_simple.
             unsafe {
                 let old_layout = std::alloc::Layout::from_size_align(1, 8)
                     .expect("blood_realloc: invalid old layout");
                 let new_ptr = runtime_realloc(ptr as *mut u8, old_layout, new_size_usize);
-                if new_ptr.is_null() {
-                    0
-                } else {
-                    let addr = new_ptr as u64;
-                    // Update registration (unregister old, register new)
-                    let _ = unregister_allocation(old_addr);
-                    register_allocation_with_region(addr, new_size_usize, 0);
-                    addr as i64
-                }
+                if new_ptr.is_null() { 0 } else { new_ptr as i64 }
             }
         }
     }
