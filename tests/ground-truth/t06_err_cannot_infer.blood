@@ -1,4 +1,4 @@
-// XFAIL: type inference ambiguity detection not yet implemented
+// COMPILE_FAIL: E0202
 // Test: ambiguous type that cannot be inferred should fail
 fn id<T>(x: T) -> T {
     x

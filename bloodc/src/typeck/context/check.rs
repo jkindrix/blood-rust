@@ -518,6 +518,40 @@ impl<'a> TypeContext<'a> {
         // Type-check the body
         let body_expr = self.check_block(body, &sig.output)?;
 
+        // Check for unresolved type variables in the body
+        // This detects cases like `let x = id(id);` where inference cannot determine the type
+        // We check:
+        // 1. The final expression's type
+        // 2. Let binding initializer types (where ambiguity is most common)
+        let resolved_body_ty = self.unifier.resolve(&body_expr.ty);
+        if resolved_body_ty.has_infer_vars() {
+            return Err(Box::new(TypeError::new(
+                TypeErrorKind::CannotInferWithContext {
+                    ty: format!("{}", resolved_body_ty),
+                    hint: "type annotations needed".to_string(),
+                },
+                body_expr.span,
+            )));
+        }
+
+        // Also check let binding initializers in the body
+        if let hir::ExprKind::Block { stmts, .. } = &body_expr.kind {
+            for stmt in stmts {
+                if let hir::Stmt::Let { init: Some(init_expr), .. } = stmt {
+                    let resolved_init_ty = self.unifier.resolve(&init_expr.ty);
+                    if resolved_init_ty.has_infer_vars() {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::CannotInferWithContext {
+                                ty: format!("{}", resolved_init_ty),
+                                hint: "type annotations needed".to_string(),
+                            },
+                            init_expr.span,
+                        )));
+                    }
+                }
+            }
+        }
+
         // Create body
         let body_id = hir::BodyId::new(self.next_body_id);
         self.next_body_id += 1;

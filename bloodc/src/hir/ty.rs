@@ -354,6 +354,38 @@ impl Type {
         }
     }
 
+    /// Check if this type contains unresolved inference variables.
+    ///
+    /// Unlike `has_type_vars`, this only returns true for inference variables (`Infer`),
+    /// not for type parameters (`Param`). This is useful for detecting ambiguous
+    /// type inference where the type couldn't be fully resolved.
+    pub fn has_infer_vars(&self) -> bool {
+        match self.kind() {
+            TypeKind::Infer(_) => true,
+            TypeKind::Param(_) => false, // Type parameters are allowed
+            TypeKind::Primitive(_) | TypeKind::Never | TypeKind::Error => false,
+            TypeKind::Tuple(tys) => tys.iter().any(|t| t.has_infer_vars()),
+            TypeKind::Array { element, .. } => element.has_infer_vars(),
+            TypeKind::Slice { element } => element.has_infer_vars(),
+            TypeKind::Ref { inner, .. } => inner.has_infer_vars(),
+            TypeKind::Ptr { inner, .. } => inner.has_infer_vars(),
+            TypeKind::Fn { params, ret, .. } => {
+                params.iter().any(|t| t.has_infer_vars()) || ret.has_infer_vars()
+            }
+            TypeKind::Closure { params, ret, .. } => {
+                params.iter().any(|t| t.has_infer_vars()) || ret.has_infer_vars()
+            }
+            TypeKind::Adt { args, .. } => args.iter().any(|t| t.has_infer_vars()),
+            TypeKind::Range { element, .. } => element.has_infer_vars(),
+            TypeKind::DynTrait { .. } => false,
+            TypeKind::Record { fields, row_var } => {
+                row_var.is_some() || fields.iter().any(|f| f.ty.has_infer_vars())
+            }
+            TypeKind::Forall { body, .. } => body.has_infer_vars(),
+            TypeKind::Ownership { inner, .. } => inner.has_infer_vars(),
+        }
+    }
+
     // Convenience constructors for common types
 
     /// Create the unit type `()`.

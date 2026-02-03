@@ -73,6 +73,10 @@ impl TypeError {
                 "E0202",
                 "type annotations needed".to_string(),
             ),
+            TypeErrorKind::CannotInferWithContext { ty, hint } => (
+                "E0202",
+                format!("cannot infer type `{ty}`; {hint}"),
+            ),
             TypeErrorKind::TypeNotFound { name } => (
                 "E0203",
                 format!("cannot find type `{name}` in this scope"),
@@ -436,6 +440,11 @@ pub enum TypeErrorKind {
     },
     /// Cannot infer type.
     CannotInfer,
+    /// Cannot infer type (with context about what couldn't be inferred).
+    CannotInferWithContext {
+        ty: String,
+        hint: String,
+    },
     /// Duplicate definition.
     DuplicateDefinition {
         name: String,
