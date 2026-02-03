@@ -26,7 +26,11 @@ use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 
-use crate::memory::{BloodPtr, PointerMetadata, generation, get_slot_generation, Region};
+use crate::memory::{
+    BloodPtr, PointerMetadata, generation, get_slot_generation, Region,
+    size_class_for, slot_size_for_class, unregister_allocation, register_allocation,
+    register_allocation_with_region, get_slot_info,
+};
 use crate::continuation::{
     ContinuationRef, Continuation, EffectContext,
     register_continuation, take_continuation, has_continuation,
@@ -2167,7 +2171,7 @@ pub unsafe extern "C" fn blood_free(addr: u64, size: usize) {
 
     // Unregister from slot registry BEFORE deallocation
     // This increments the generation, invalidating any existing references
-    unregister_allocation(addr);
+    let _ = unregister_allocation(addr);
 
     // Use matching alignment from blood_alloc
     let align = 16.max(std::mem::align_of::<usize>());
@@ -3185,7 +3189,6 @@ pub unsafe extern "C" fn blood_snapshot_get_stale_entry(
 // Slot Registry FFI (for allocation tracking)
 // ============================================================================
 
-use crate::memory::{register_allocation, unregister_allocation};
 use crate::memory::{persistent_alloc, persistent_increment, persistent_decrement, persistent_is_alive};
 
 /// Register a new allocation in the slot registry.
@@ -3204,16 +3207,134 @@ pub extern "C" fn blood_register_allocation(address: u64, size: u64) -> u32 {
     register_allocation(address, size as usize)
 }
 
-/// Unregister an allocation from the slot registry.
+/// Unregister an allocation from the slot registry and add to region free list.
 ///
 /// This should be called by the runtime allocator when memory is freed.
 /// The slot is marked as deallocated but retained for stale reference detection.
+/// If the allocation belongs to a region, it is added to the region's free list
+/// for potential reuse.
+///
+/// # Lock Ordering
+///
+/// This function acquires locks in a consistent order to prevent deadlocks:
+/// 1. Slot registry (via `unregister_allocation`) - released before step 2
+/// 2. Region registry (if region_id != 0)
+/// 3. Region's internal free list mutex (via `region.deallocate`)
 ///
 /// # Arguments
 /// * `address` - The address being freed
 #[no_mangle]
 pub extern "C" fn blood_unregister_allocation(address: u64) {
-    unregister_allocation(address)
+    // Step 1: Unregister from slot registry and get region info.
+    // The slot registry lock is released when unregister_allocation returns.
+    let info = unregister_allocation(address);
+
+    // Step 2: If it belongs to a region, add to the region's free list.
+    if let Some((region_id, size_class)) = info {
+        if region_id != 0 {
+            let registry = get_region_registry();
+            let reg = registry.lock();
+            if let Some(region) = reg.get(&region_id) {
+                // Step 3: Region's internal mutex is acquired here.
+                let _ = region.deallocate(address, size_class);
+            }
+        }
+    }
+}
+
+/// Deallocate memory from a specific region, adding it to the free list.
+///
+/// This is the explicit region deallocation function that enables memory reuse.
+/// The slot's generation is incremented (invalidating old references) and the
+/// address is added to the region's free list for the appropriate size class.
+///
+/// # Lock Ordering
+///
+/// Locks are acquired in consistent order to prevent deadlocks:
+/// 1. Slot registry (via `unregister_allocation`) - released before step 2
+/// 2. Region registry
+/// 3. Region's internal free list mutex
+///
+/// # Arguments
+/// * `region_id` - The region ID
+/// * `address` - The address to deallocate
+///
+/// # Returns
+/// 1 if successfully added to free list, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn blood_region_dealloc(region_id: u64, address: u64) -> c_int {
+    // Step 1: Unregister from slot registry (increments generation).
+    // Lock is released when this returns.
+    let size_class = if let Some((_, sc)) = unregister_allocation(address) {
+        sc
+    } else {
+        return 0;
+    };
+
+    // Step 2 & 3: Acquire region registry, then region's free list.
+    let registry = get_region_registry();
+    let reg = registry.lock();
+    if let Some(region) = reg.get(&region_id) {
+        if region.deallocate(address, size_class) {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+/// Get region allocation statistics.
+///
+/// # Arguments
+/// * `region_id` - The region ID
+/// * `out_allocations` - Output: total allocations
+/// * `out_reused` - Output: allocations from free list
+/// * `out_bumped` - Output: allocations from bump allocator
+/// * `out_deallocations` - Output: total deallocations
+///
+/// # Safety
+/// All output pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn blood_region_get_stats(
+    region_id: u64,
+    out_allocations: *mut u64,
+    out_reused: *mut u64,
+    out_bumped: *mut u64,
+    out_deallocations: *mut u64,
+) {
+    let registry = get_region_registry();
+    let reg = registry.lock();
+
+    if let Some(region) = reg.get(&region_id) {
+        let stats = region.stats();
+        *out_allocations = stats.allocations();
+        *out_reused = stats.reused();
+        *out_bumped = stats.bumped();
+        *out_deallocations = stats.deallocations();
+    } else {
+        *out_allocations = 0;
+        *out_reused = 0;
+        *out_bumped = 0;
+        *out_deallocations = 0;
+    }
+}
+
+/// Get the size class for a given allocation size.
+///
+/// Returns the size class index (0-11) or 255 for large allocations.
+#[no_mangle]
+pub extern "C" fn blood_size_class_for(size: usize) -> u8 {
+    size_class_for(size)
+}
+
+/// Get the slot size for a size class.
+///
+/// Returns 0 for large allocations (class 255).
+#[no_mangle]
+pub extern "C" fn blood_slot_size_for_class(class: u8) -> usize {
+    slot_size_for_class(class)
 }
 
 /// Validate a single address against an expected generation.
@@ -8144,21 +8265,50 @@ pub extern "C" fn print_i64(val: i64) {
 
 /// Allocate memory of the given size with default alignment (8).
 ///
+/// This function is region-aware: if a region is active, it allocates from the region
+/// (enabling memory reuse via the slab allocator). Otherwise, it uses the system allocator.
+///
 /// Returns the address as i64, or 0 on failure.
 #[no_mangle]
 pub extern "C" fn blood_alloc_simple(size: i64) -> i64 {
     if size <= 0 {
         return 0;
     }
+
+    let size_usize = size as usize;
+
+    // Check if a region is active — if so, allocate from it
+    let region_id = current_active_region();
+    if region_id != 0 {
+        let addr = blood_region_alloc(region_id, size_usize, 8);
+        if addr != 0 {
+            // Register in slot registry with region info for proper cleanup
+            register_allocation_with_region(addr, size_usize, region_id);
+        }
+        return addr as i64;
+    }
+
+    // No active region — use system allocator
     unsafe {
-        let layout = std::alloc::Layout::from_size_align(size as usize, 8)
+        let layout = std::alloc::Layout::from_size_align(size_usize, 8)
             .expect("blood_alloc_simple: invalid layout");
         let ptr = runtime_alloc(layout);
-        if ptr.is_null() { 0 } else { ptr as i64 }
+        if ptr.is_null() {
+            0
+        } else {
+            let addr = ptr as u64;
+            // Register with region_id=0 to mark as non-region allocation
+            register_allocation_with_region(addr, size_usize, 0);
+            addr as i64
+        }
     }
 }
 
 /// Reallocate memory at the given address to a new size.
+///
+/// This function is region-aware. For region allocations, it allocates a new buffer,
+/// copies data, and returns the old buffer to the free list. For system allocations,
+/// it uses the system realloc.
 ///
 /// Returns the new address as i64, or 0 on failure.
 /// If ptr is 0, behaves like blood_alloc_simple.
@@ -8167,24 +8317,73 @@ pub extern "C" fn blood_realloc(ptr: i64, new_size: i64) -> i64 {
     if new_size <= 0 {
         return 0;
     }
-    unsafe {
-        if ptr == 0 {
-            let layout = std::alloc::Layout::from_size_align(new_size as usize, 8)
-                .expect("blood_realloc: invalid layout");
-            let new_ptr = runtime_alloc(layout);
-            return if new_ptr.is_null() { 0 } else { new_ptr as i64 };
+
+    // If ptr is null, just allocate new memory
+    if ptr == 0 {
+        return blood_alloc_simple(new_size);
+    }
+
+    let old_addr = ptr as u64;
+    let new_size_usize = new_size as usize;
+
+    // Check if old allocation is in a region by looking up slot registry
+    let old_info = get_slot_info(old_addr);
+
+    match old_info {
+        Some((old_size, region_id)) if region_id != 0 => {
+            // Region allocation: allocate new, copy, free old
+            let new_ptr = blood_alloc_simple(new_size);
+            if new_ptr == 0 {
+                return 0;
+            }
+
+            // Copy old data to new buffer
+            let copy_size = old_size.min(new_size_usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    old_addr as *const u8,
+                    new_ptr as *mut u8,
+                    copy_size,
+                );
+            }
+
+            // Free old buffer (returns to region free list)
+            blood_free_simple(ptr);
+
+            new_ptr
         }
-        // For realloc we need an old layout. We use alignment 8 and size 1
-        // as a minimal valid layout for the realloc call since we do not track
-        // the original allocation size in this simplified interface.
-        let old_layout = std::alloc::Layout::from_size_align(1, 8)
-            .expect("blood_realloc: invalid old layout");
-        let new_ptr = runtime_realloc(ptr as *mut u8, old_layout, new_size as usize);
-        if new_ptr.is_null() { 0 } else { new_ptr as i64 }
+        _ => {
+            // Non-region allocation or unknown: use system realloc
+            unsafe {
+                let old_layout = std::alloc::Layout::from_size_align(1, 8)
+                    .expect("blood_realloc: invalid old layout");
+                let new_ptr = runtime_realloc(ptr as *mut u8, old_layout, new_size_usize);
+                if new_ptr.is_null() {
+                    0
+                } else {
+                    let addr = new_ptr as u64;
+                    // Update registration (unregister old, register new)
+                    let _ = unregister_allocation(old_addr);
+                    register_allocation_with_region(addr, new_size_usize, 0);
+                    addr as i64
+                }
+            }
+        }
     }
 }
 
 /// Free memory allocated by blood_alloc_simple.
+///
+/// This function is region-aware: if the allocation belongs to a region, it adds
+/// the address to the region's free list for reuse. Otherwise, it returns the
+/// memory to the system allocator.
+///
+/// # Lock Ordering
+///
+/// Locks are acquired in consistent order to prevent deadlocks:
+/// 1. Slot registry (via `unregister_allocation`) - released before step 2
+/// 2. Region registry (if region allocation)
+/// 3. Region's internal free list mutex
 ///
 /// If ptr is 0, this is a no-op.
 #[no_mangle]
@@ -8192,6 +8391,28 @@ pub extern "C" fn blood_free_simple(ptr: i64) {
     if ptr == 0 {
         return;
     }
+
+    let addr = ptr as u64;
+
+    // Step 1: Unregister from slot registry and get region/size info.
+    // The slot registry lock is released when this returns.
+    let info = unregister_allocation(addr);
+
+    if let Some((region_id, size_class)) = info {
+        if region_id != 0 {
+            // Step 2 & 3: Region allocation - add to free list for reuse.
+            let registry = get_region_registry();
+            let reg = registry.lock();
+            if let Some(region) = reg.get(&region_id) {
+                let _ = region.deallocate(addr, size_class);
+            }
+            // Don't call system dealloc - region owns the memory
+            return;
+        }
+    }
+
+    // Non-region allocation: return to system allocator
+    // We use alignment 8 to match blood_alloc_simple
     unsafe {
         let layout = std::alloc::Layout::from_size_align(1, 8)
             .expect("blood_free_simple: invalid layout");

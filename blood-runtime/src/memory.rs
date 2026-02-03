@@ -85,6 +85,10 @@ pub struct SlotEntry {
     pub size: usize,
     /// Whether the slot is currently allocated.
     pub is_allocated: bool,
+    /// Size class index (0-11 for slab, 255 for large allocations).
+    pub size_class: u8,
+    /// Region ID this allocation belongs to (0 for non-region allocations).
+    pub region_id: u64,
 }
 
 impl SlotEntry {
@@ -94,16 +98,90 @@ impl SlotEntry {
             generation,
             size,
             is_allocated: true,
+            size_class: size_class_for(size),
+            region_id: 0,
+        }
+    }
+
+    /// Create a new allocated slot entry with region tracking.
+    pub fn new_in_region(generation: Generation, size: usize, region_id: u64) -> Self {
+        Self {
+            generation,
+            size,
+            is_allocated: true,
+            size_class: size_class_for(size),
+            region_id,
         }
     }
 
     /// Mark the slot as deallocated and increment generation.
-    pub fn deallocate(&mut self) {
+    ///
+    /// Returns `true` if the slot was previously allocated (successful deallocation),
+    /// `false` if already deallocated (double-free attempt).
+    #[must_use]
+    pub fn deallocate(&mut self) -> bool {
+        if !self.is_allocated {
+            return false; // Already deallocated
+        }
         self.is_allocated = false;
         // Increment generation for next allocation (prevents ABA problem)
         if self.generation < generation::OVERFLOW_GUARD {
             self.generation += 1;
         }
+        true
+    }
+}
+
+// ============================================================================
+// Size Classes for Slab Allocation
+// ============================================================================
+
+/// Size class for large allocations (>16KB).
+pub const SIZE_CLASS_LARGE: u8 = 255;
+
+/// Maximum size handled by slab allocator (16KB).
+pub const MAX_SLAB_SIZE: usize = 16384;
+
+/// Number of size classes.
+pub const NUM_SIZE_CLASSES: usize = 12;
+
+/// Size class slot sizes (power of 2 from 8 to 16384).
+pub const SIZE_CLASS_SLOTS: [usize; NUM_SIZE_CLASSES] = [
+    8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+];
+
+/// Get the size class index for a given allocation size.
+/// Returns SIZE_CLASS_LARGE (255) if size exceeds MAX_SLAB_SIZE.
+#[inline]
+pub fn size_class_for(size: usize) -> u8 {
+    if size == 0 {
+        return 0;
+    }
+    if size > MAX_SLAB_SIZE {
+        return SIZE_CLASS_LARGE;
+    }
+    // Round up to next power of 2, then find index
+    let rounded = size.next_power_of_two();
+    let index = rounded.trailing_zeros();
+    // Map to our size classes (starting at 8 = 2^3)
+    if index < 3 {
+        0 // Sizes 1-8 go to class 0 (8 bytes)
+    } else {
+        ((index - 3) as u8).min(11)
+    }
+}
+
+/// Get the slot size for a size class.
+///
+/// Returns the slot size in bytes for the given size class index.
+/// Returns 0 for large allocations (class 255) or invalid class indices.
+#[inline]
+#[must_use]
+pub const fn slot_size_for_class(class: u8) -> usize {
+    if class == SIZE_CLASS_LARGE || class as usize >= NUM_SIZE_CLASSES {
+        0 // Large allocs don't use fixed slots
+    } else {
+        SIZE_CLASS_SLOTS[class as usize]
     }
 }
 
@@ -157,15 +235,66 @@ impl SlotRegistry {
         }
     }
 
+    /// Register a new allocation with a specific region ID.
+    ///
+    /// This is used when allocating from a region to associate the allocation
+    /// with that region for proper cleanup.
+    pub fn register_with_region(&self, address: u64, size: usize, region_id: u64) -> Generation {
+        let mut slots = self.slots.write();
+
+        // Check if this address was previously used
+        if let Some(entry) = slots.get_mut(&address) {
+            // Reuse slot with incremented generation
+            entry.generation = if entry.generation < generation::OVERFLOW_GUARD {
+                entry.generation + 1
+            } else {
+                generation::OVERFLOW_GUARD
+            };
+            entry.size = size;
+            entry.is_allocated = true;
+            entry.size_class = size_class_for(size);
+            entry.region_id = region_id;
+            entry.generation
+        } else {
+            // New slot
+            let entry = SlotEntry::new_in_region(generation::FIRST, size, region_id);
+            let gen = entry.generation;
+            slots.insert(address, entry);
+            gen
+        }
+    }
+
+    /// Get information about an allocation.
+    ///
+    /// Returns `Some((size, region_id))` if the address is registered, `None` otherwise.
+    pub fn get_info(&self, address: u64) -> Option<(usize, u64)> {
+        let slots = self.slots.read();
+        slots.get(&address).map(|e| (e.size, e.region_id))
+    }
+
     /// Unregister an allocation (mark as freed).
     ///
     /// The slot entry is retained with an incremented generation to detect
     /// stale references that try to access it after deallocation.
-    pub fn unregister(&self, address: u64) {
+    ///
+    /// Returns `Some((region_id, size_class))` if the slot was found and deallocated,
+    /// `None` if the address was not registered or was already deallocated.
+    #[must_use = "contains region and size class info needed for free list routing"]
+    pub fn unregister(&self, address: u64) -> Option<(u64, u8)> {
         let mut slots = self.slots.write();
         if let Some(entry) = slots.get_mut(&address) {
-            entry.deallocate();
+            let region_id = entry.region_id;
+            let size_class = entry.size_class;
+            if entry.deallocate() {
+                return Some((region_id, size_class));
+            }
         }
+        None
+    }
+
+    /// Unregister without returning info (for backward compatibility).
+    pub fn unregister_simple(&self, address: u64) {
+        let _ = self.unregister(address);
     }
 
     /// Get the current generation for an address.
@@ -296,11 +425,32 @@ pub fn register_allocation(address: u64, size: usize) -> Generation {
     slot_registry().register(address, size)
 }
 
+/// Register an allocation with a specific region ID.
+///
+/// This is used by region-aware allocators to associate allocations with regions.
+pub fn register_allocation_with_region(address: u64, size: usize, region_id: u64) -> Generation {
+    slot_registry().register_with_region(address, size, region_id)
+}
+
+/// Get the size and region ID of an allocation from the global registry.
+///
+/// Returns `Some((size, region_id))` if the address is registered, `None` otherwise.
+pub fn get_slot_info(address: u64) -> Option<(usize, u64)> {
+    slot_registry().get_info(address)
+}
+
 /// Unregister an allocation from the global slot registry.
 ///
 /// This should be called by the allocator when memory is freed.
-pub fn unregister_allocation(address: u64) {
+/// Returns `Some((region_id, size_class))` if found, `None` otherwise.
+#[must_use = "contains region and size class info needed for free list routing"]
+pub fn unregister_allocation(address: u64) -> Option<(u64, u8)> {
     slot_registry().unregister(address)
+}
+
+/// Unregister an allocation without returning info (simple version).
+pub fn unregister_allocation_simple(address: u64) {
+    let _ = slot_registry().unregister(address);
 }
 
 /// Get the current generation for an address from the global registry.
@@ -629,7 +779,161 @@ impl RegionStatus {
     }
 }
 
-/// A memory region for scoped allocation.
+// ============================================================================
+// Slab Allocator Free Lists
+// ============================================================================
+
+/// Initial free list capacities by size class.
+///
+/// Smaller allocations (classes 0-3: 8-64 bytes) are more common,
+/// so they get larger initial capacities. Larger allocations are
+/// less frequent and get smaller capacities.
+const FREE_LIST_CAPACITIES: [usize; NUM_SIZE_CLASSES] = [
+    256,  // Class 0: 8 bytes - very common (small objects, pointers)
+    256,  // Class 1: 16 bytes - very common
+    128,  // Class 2: 32 bytes - common
+    128,  // Class 3: 64 bytes - common
+    64,   // Class 4: 128 bytes - moderate
+    64,   // Class 5: 256 bytes - moderate
+    32,   // Class 6: 512 bytes - less common
+    32,   // Class 7: 1KB - less common
+    16,   // Class 8: 2KB - infrequent
+    16,   // Class 9: 4KB - infrequent
+    8,    // Class 10: 8KB - rare
+    8,    // Class 11: 16KB - rare
+];
+
+/// Per-size-class free list for memory reuse within a region.
+///
+/// When memory is deallocated, the address is added to the appropriate
+/// size class free list. On subsequent allocation, the free list is
+/// checked first before bump-allocating new memory.
+#[derive(Debug)]
+pub struct SizeClassFreeList {
+    /// Freed slot addresses available for reuse.
+    slots: Vec<u64>,
+    /// Statistics: total reuses from this list.
+    reuse_count: u64,
+}
+
+impl SizeClassFreeList {
+    /// Create a new empty free list with default capacity.
+    pub fn new() -> Self {
+        Self {
+            slots: Vec::with_capacity(64), // Default capacity
+            reuse_count: 0,
+        }
+    }
+
+    /// Create a new empty free list with capacity appropriate for the size class.
+    ///
+    /// Smaller size classes get larger capacities since they're more commonly used.
+    pub fn new_for_class(class: usize) -> Self {
+        let capacity = if class < NUM_SIZE_CLASSES {
+            FREE_LIST_CAPACITIES[class]
+        } else {
+            0 // Large allocations don't use free lists
+        };
+        Self {
+            slots: Vec::with_capacity(capacity),
+            reuse_count: 0,
+        }
+    }
+
+    /// Try to get a free slot. Returns None if list is empty.
+    #[inline]
+    pub fn pop(&mut self) -> Option<u64> {
+        let addr = self.slots.pop()?;
+        self.reuse_count += 1;
+        Some(addr)
+    }
+
+    /// Return a slot to the free list.
+    #[inline]
+    pub fn push(&mut self, addr: u64) {
+        self.slots.push(addr);
+    }
+
+    /// Clear all entries (called on region destroy/reset).
+    pub fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    /// Number of available slots.
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Check if empty.
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// Total reuses from this list.
+    pub fn reuse_count(&self) -> u64 {
+        self.reuse_count
+    }
+}
+
+impl Default for SizeClassFreeList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Statistics for region allocation.
+#[derive(Debug, Default)]
+pub struct RegionStats {
+    /// Total allocations.
+    pub allocations: AtomicU64,
+    /// Allocations satisfied from free list.
+    pub reused: AtomicU64,
+    /// Allocations requiring bump.
+    pub bumped: AtomicU64,
+    /// Total deallocations.
+    pub deallocations: AtomicU64,
+    /// Large allocations (>16KB).
+    pub large_allocs: AtomicU64,
+}
+
+impl RegionStats {
+    /// Create new zeroed stats.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get current allocation count.
+    pub fn allocations(&self) -> u64 {
+        self.allocations.load(Ordering::Relaxed)
+    }
+
+    /// Get reuse count.
+    pub fn reused(&self) -> u64 {
+        self.reused.load(Ordering::Relaxed)
+    }
+
+    /// Get bump allocation count.
+    pub fn bumped(&self) -> u64 {
+        self.bumped.load(Ordering::Relaxed)
+    }
+
+    /// Get deallocation count.
+    pub fn deallocations(&self) -> u64 {
+        self.deallocations.load(Ordering::Relaxed)
+    }
+
+    /// Calculate reuse percentage.
+    pub fn reuse_percentage(&self) -> f64 {
+        let allocs = self.allocations();
+        if allocs == 0 {
+            0.0
+        } else {
+            (self.reused() as f64 / allocs as f64) * 100.0
+        }
+    }
+}
+
+/// A memory region for scoped allocation with slab-based memory reuse.
 ///
 /// On Unix, uses `mmap` to reserve a contiguous virtual address range upfront
 /// (`PROT_NONE`), then commits pages on demand via `mprotect`. This ensures the
@@ -638,6 +942,21 @@ impl RegionStatus {
 ///
 /// On non-Unix platforms, falls back to `Vec<u8>` with a documented pointer
 /// invalidation risk when the region grows beyond its current capacity.
+///
+/// ## Slab Allocation
+///
+/// This region supports memory reuse through size-class free lists:
+/// - When memory is deallocated, it's added to the free list for its size class
+/// - On allocation, the free list is checked first before bump-allocating
+/// - This enables memory reuse within a region, preventing accumulation
+///
+/// ## Platform Differences
+///
+/// - **Unix**: `allocate()` takes `&self` because the mmap-backed memory has a
+///   stable base address. Page commits use `mprotect` without reallocating.
+/// - **Non-Unix**: `allocate()` takes `&mut self` because `Vec::resize()` may
+///   reallocate the underlying buffer when growing. For thread-safe usage on
+///   non-Unix, wrap the `Region` in appropriate synchronization (e.g., `Mutex`).
 pub struct Region {
     /// Region ID.
     id: RegionId,
@@ -672,6 +991,17 @@ pub struct Region {
     ///
     /// Tracks whether the region is active, suspended, or pending deallocation.
     status: AtomicU32,
+
+    // ========================================================================
+    // Slab Allocator Fields
+    // ========================================================================
+
+    /// Per-size-class free lists for memory reuse.
+    /// Protected by mutex for thread safety during alloc/dealloc.
+    free_lists: parking_lot::Mutex<[SizeClassFreeList; NUM_SIZE_CLASSES]>,
+
+    /// Allocation statistics.
+    stats: RegionStats,
 }
 
 /// Round `value` up to the nearest multiple of `align` (must be a power of 2).
@@ -744,6 +1074,8 @@ impl Region {
             closed: AtomicU32::new(0),
             suspend_count: AtomicU32::new(0),
             status: AtomicU32::new(RegionStatus::Active as u32),
+            free_lists: parking_lot::Mutex::new(std::array::from_fn(SizeClassFreeList::new_for_class)),
+            stats: RegionStats::new(),
         }
     }
 
@@ -758,6 +1090,8 @@ impl Region {
             closed: AtomicU32::new(0),
             suspend_count: AtomicU32::new(0),
             status: AtomicU32::new(RegionStatus::Active as u32),
+            free_lists: parking_lot::Mutex::new(std::array::from_fn(SizeClassFreeList::new_for_class)),
+            stats: RegionStats::new(),
         }
     }
 
@@ -798,17 +1132,49 @@ impl Region {
         self.closed.store(1, Ordering::Release);
     }
 
-    /// Allocate memory from the region (Unix mmap-backed).
+    /// Allocate memory from the region with slab-based reuse.
     ///
-    /// Uses a bump allocator over a stable mmap range. Commits additional pages
-    /// on demand via `mprotect` — the base address never changes, so previously
-    /// returned pointers remain valid.
+    /// Strategy:
+    /// 1. Determine size class for the allocation
+    /// 2. Check free list for that size class
+    /// 3. If found: reuse the freed slot
+    /// 4. If not found: bump allocate from the region
+    ///
+    /// On Unix, uses mmap-backed memory with on-demand page commits.
     #[cfg(unix)]
     pub fn allocate(&self, size: usize, align: usize) -> Option<*mut u8> {
         if self.is_closed() {
             return None;
         }
 
+        let class = size_class_for(size);
+
+        // For slab-sized allocations, try the free list first
+        if class != SIZE_CLASS_LARGE {
+            let slot_size = slot_size_for_class(class);
+            let mut lists = self.free_lists.lock();
+
+            if let Some(addr) = lists[class as usize].pop() {
+                // Reusing freed slot - just return the address
+                // Generation was already incremented when slot was freed
+                self.stats.reused.fetch_add(1, Ordering::Relaxed);
+                self.stats.allocations.fetch_add(1, Ordering::Relaxed);
+                return Some(addr as *mut u8);
+            }
+            drop(lists);
+
+            // Free list empty - bump allocate with slot size for alignment
+            return self.bump_allocate_unix(slot_size.max(size), align);
+        }
+
+        // Large allocation - always bump allocate
+        self.stats.large_allocs.fetch_add(1, Ordering::Relaxed);
+        self.bump_allocate_unix(size, align)
+    }
+
+    /// Internal bump allocation for Unix.
+    #[cfg(unix)]
+    fn bump_allocate_unix(&self, size: usize, align: usize) -> Option<*mut u8> {
         let offset = self.offset.load(Ordering::Acquire);
         let aligned_offset = round_up(offset, align);
         let new_offset = aligned_offset + size;
@@ -841,10 +1207,12 @@ impl Region {
         }
 
         self.offset.store(new_offset, Ordering::Release);
+        self.stats.bumped.fetch_add(1, Ordering::Relaxed);
+        self.stats.allocations.fetch_add(1, Ordering::Relaxed);
         Some(unsafe { self.base.add(aligned_offset) })
     }
 
-    /// Allocate memory from the region (non-Unix fallback).
+    /// Allocate memory from the region with slab-based reuse (non-Unix fallback).
     ///
     /// WARNING: `Vec::resize` may reallocate, invalidating previously returned
     /// pointers. This is a known limitation on non-Unix platforms.
@@ -854,6 +1222,30 @@ impl Region {
             return None;
         }
 
+        let class = size_class_for(size);
+
+        // For slab-sized allocations, try the free list first
+        if class != SIZE_CLASS_LARGE {
+            let slot_size = slot_size_for_class(class);
+            let mut lists = self.free_lists.lock();
+
+            if let Some(addr) = lists[class as usize].pop() {
+                self.stats.reused.fetch_add(1, Ordering::Relaxed);
+                self.stats.allocations.fetch_add(1, Ordering::Relaxed);
+                return Some(addr as *mut u8);
+            }
+            drop(lists);
+
+            return self.bump_allocate_non_unix(slot_size.max(size), align);
+        }
+
+        self.stats.large_allocs.fetch_add(1, Ordering::Relaxed);
+        self.bump_allocate_non_unix(size, align)
+    }
+
+    /// Internal bump allocation for non-Unix.
+    #[cfg(not(unix))]
+    fn bump_allocate_non_unix(&mut self, size: usize, align: usize) -> Option<*mut u8> {
         let offset = self.offset.load(Ordering::Acquire);
         let aligned_offset = round_up(offset, align);
         let new_offset = aligned_offset + size;
@@ -867,11 +1259,57 @@ impl Region {
         }
 
         self.offset.store(new_offset, Ordering::Release);
+        self.stats.bumped.fetch_add(1, Ordering::Relaxed);
+        self.stats.allocations.fetch_add(1, Ordering::Relaxed);
         Some(unsafe { self.buffer.as_mut_ptr().add(aligned_offset) })
     }
 
-    /// Reset the region, freeing all allocations.
+    /// Deallocate memory, returning it to the appropriate free list.
+    ///
+    /// This enables memory reuse within the region. The slot's generation
+    /// should have been incremented by the caller (via slot registry).
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is thread-safe. It acquires an internal mutex to protect
+    /// the free list during modification. Multiple threads can safely call
+    /// `deallocate` concurrently on the same region.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the address was added to a free list for potential reuse.
+    /// `false` for large allocations (>16KB) which are not added to free lists.
+    #[must_use]
+    pub fn deallocate(&self, addr: u64, size_class: u8) -> bool {
+        if size_class == SIZE_CLASS_LARGE || size_class as usize >= NUM_SIZE_CLASSES {
+            // Large allocations don't go to free lists
+            // They remain allocated until region destruction
+            self.stats.deallocations.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+
+        // Add to the appropriate free list
+        let mut lists = self.free_lists.lock();
+        lists[size_class as usize].push(addr);
+        self.stats.deallocations.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Get allocation statistics.
+    pub fn stats(&self) -> &RegionStats {
+        &self.stats
+    }
+
+    /// Reset the region, freeing all allocations and clearing free lists.
     pub fn reset(&mut self) {
+        // Clear all free lists
+        {
+            let mut lists = self.free_lists.lock();
+            for list in lists.iter_mut() {
+                list.clear();
+            }
+        }
+
         self.offset.store(0, Ordering::Release);
         self.closed.store(0, Ordering::Release);
         self.suspend_count.store(0, Ordering::Release);
@@ -2814,7 +3252,7 @@ mod tests {
 
     #[test]
     fn test_region_allocation() {
-        let mut region = Region::new(1024, 4096);
+        let region = Region::new(1024, 4096);
         assert_eq!(region.used(), 0);
 
         let ptr1 = region.allocate(100, 8).unwrap();
@@ -2838,7 +3276,7 @@ mod tests {
 
     #[test]
     fn test_region_close() {
-        let mut region = Region::new(1024, 4096);
+        let region = Region::new(1024, 4096);
         assert!(!region.is_closed());
 
         region.close();
@@ -3015,7 +3453,7 @@ mod tests {
         let gen = registry.register(0x2000, 32);
         assert!(registry.is_allocated(0x2000));
 
-        registry.unregister(0x2000);
+        let _ = registry.unregister(0x2000);
         assert!(!registry.is_allocated(0x2000));
 
         // Generation should have been incremented on deallocation
@@ -3037,7 +3475,7 @@ mod tests {
         let registry = SlotRegistry::new();
 
         let gen = registry.register(0x4000, 16);
-        registry.unregister(0x4000);
+        let _ = registry.unregister(0x4000);
 
         // Validation should fail because the slot was freed
         let result = registry.validate(0x4000, gen);
@@ -3054,7 +3492,7 @@ mod tests {
 
         // First allocation
         let gen1 = registry.register(0x5000, 16);
-        registry.unregister(0x5000);
+        let _ = registry.unregister(0x5000);
 
         // Reallocate at same address
         let gen2 = registry.register(0x5000, 32);
@@ -3098,7 +3536,7 @@ mod tests {
         assert_eq!(entry.generation, generation::FIRST);
         assert_eq!(entry.size, 64);
 
-        entry.deallocate();
+        let _ = entry.deallocate();
         assert!(!entry.is_allocated);
         assert_eq!(entry.generation, generation::FIRST + 1);
     }
@@ -3116,7 +3554,7 @@ mod tests {
 
         assert!(validate_generation(addr, gen).is_ok());
 
-        unregister_allocation(addr);
+        let _ = unregister_allocation(addr);
         assert!(!slot_registry().is_allocated(addr));
     }
 
@@ -3759,5 +4197,246 @@ mod tests {
 
         allocator.decrement(id);
         assert_eq!(allocator.stats().deallocations.load(Ordering::Relaxed), 1);
+    }
+
+    // ========================================================================
+    // Slab Allocator Tests
+    // ========================================================================
+
+    #[test]
+    fn test_size_class_for() {
+        // Test boundary cases for size class mapping
+        assert_eq!(size_class_for(0), 0);   // 0 -> 8 bytes (class 0)
+        assert_eq!(size_class_for(1), 0);   // 1 -> 8 bytes (class 0)
+        assert_eq!(size_class_for(8), 0);   // 8 -> 8 bytes (class 0)
+        assert_eq!(size_class_for(9), 1);   // 9 -> 16 bytes (class 1)
+        assert_eq!(size_class_for(16), 1);  // 16 -> 16 bytes (class 1)
+        assert_eq!(size_class_for(17), 2);  // 17 -> 32 bytes (class 2)
+        assert_eq!(size_class_for(32), 2);  // 32 -> 32 bytes (class 2)
+        assert_eq!(size_class_for(64), 3);  // 64 -> 64 bytes (class 3)
+        assert_eq!(size_class_for(128), 4); // 128 -> 128 bytes (class 4)
+        assert_eq!(size_class_for(256), 5); // 256 -> 256 bytes (class 5)
+        assert_eq!(size_class_for(512), 6); // 512 -> 512 bytes (class 6)
+        assert_eq!(size_class_for(1024), 7);  // 1KB -> class 7
+        assert_eq!(size_class_for(2048), 8);  // 2KB -> class 8
+        assert_eq!(size_class_for(4096), 9);  // 4KB -> class 9
+        assert_eq!(size_class_for(8192), 10); // 8KB -> class 10
+        assert_eq!(size_class_for(16384), 11); // 16KB -> class 11
+        assert_eq!(size_class_for(16385), SIZE_CLASS_LARGE); // >16KB -> large
+        assert_eq!(size_class_for(100000), SIZE_CLASS_LARGE); // Large
+    }
+
+    #[test]
+    fn test_slot_size_for_class() {
+        // Test all valid size classes
+        assert_eq!(slot_size_for_class(0), 8);
+        assert_eq!(slot_size_for_class(1), 16);
+        assert_eq!(slot_size_for_class(2), 32);
+        assert_eq!(slot_size_for_class(3), 64);
+        assert_eq!(slot_size_for_class(4), 128);
+        assert_eq!(slot_size_for_class(5), 256);
+        assert_eq!(slot_size_for_class(6), 512);
+        assert_eq!(slot_size_for_class(7), 1024);
+        assert_eq!(slot_size_for_class(8), 2048);
+        assert_eq!(slot_size_for_class(9), 4096);
+        assert_eq!(slot_size_for_class(10), 8192);
+        assert_eq!(slot_size_for_class(11), 16384);
+        // Large and invalid classes return 0
+        assert_eq!(slot_size_for_class(SIZE_CLASS_LARGE), 0);
+        assert_eq!(slot_size_for_class(12), 0);
+        assert_eq!(slot_size_for_class(100), 0);
+    }
+
+    #[test]
+    fn test_size_class_free_list_operations() {
+        let mut list = SizeClassFreeList::new();
+
+        // Initially empty
+        assert!(list.pop().is_none());
+        assert_eq!(list.len(), 0);
+        assert!(list.is_empty());
+
+        // Push some addresses
+        list.push(0x1000);
+        list.push(0x2000);
+        list.push(0x3000);
+
+        assert_eq!(list.len(), 3);
+        assert!(!list.is_empty());
+
+        // Pop returns LIFO order
+        assert_eq!(list.pop(), Some(0x3000));
+        assert_eq!(list.pop(), Some(0x2000));
+        assert_eq!(list.pop(), Some(0x1000));
+        assert!(list.pop().is_none());
+
+        // Reuse count is tracked
+        assert_eq!(list.reuse_count(), 3);
+    }
+
+    #[test]
+    fn test_region_stats_tracking() {
+        let stats = RegionStats::new();
+
+        // Initially all zeros
+        assert_eq!(stats.allocations(), 0);
+        assert_eq!(stats.reused(), 0);
+        assert_eq!(stats.bumped(), 0);
+        assert_eq!(stats.deallocations(), 0);
+
+        // Increment counters
+        stats.allocations.fetch_add(5, Ordering::Relaxed);
+        stats.reused.fetch_add(2, Ordering::Relaxed);
+        stats.bumped.fetch_add(3, Ordering::Relaxed);
+        stats.deallocations.fetch_add(1, Ordering::Relaxed);
+
+        assert_eq!(stats.allocations(), 5);
+        assert_eq!(stats.reused(), 2);
+        assert_eq!(stats.bumped(), 3);
+        assert_eq!(stats.deallocations(), 1);
+    }
+
+    #[test]
+    fn test_region_slab_allocation_and_reuse() {
+        let region = Region::new(16384, 65536);
+
+        // Allocate a small object (8 bytes -> size class 0)
+        let ptr1 = region.allocate(8, 8).unwrap();
+        assert!(!ptr1.is_null());
+
+        // Stats should show 1 allocation, 0 reused, 1 bumped
+        assert_eq!(region.stats().allocations(), 1);
+        assert_eq!(region.stats().reused(), 0);
+        assert_eq!(region.stats().bumped(), 1);
+
+        // Deallocate it
+        let _ = region.deallocate(ptr1 as u64, 0);
+        assert_eq!(region.stats().deallocations(), 1);
+
+        // Allocate same size again - should reuse
+        let ptr2 = region.allocate(8, 8).unwrap();
+        assert_eq!(ptr2 as u64, ptr1 as u64); // Same address reused
+        assert_eq!(region.stats().allocations(), 2);
+        assert_eq!(region.stats().reused(), 1);
+        assert_eq!(region.stats().bumped(), 1); // Still 1 bump
+    }
+
+    #[test]
+    fn test_region_large_allocation_no_reuse() {
+        let region = Region::new(65536, 262144);
+
+        // Allocate a large object (>16KB)
+        let ptr = region.allocate(20000, 8).unwrap();
+        assert!(!ptr.is_null());
+
+        // Large allocations tracked
+        assert_eq!(region.stats().large_allocs.load(Ordering::Relaxed), 1);
+
+        // Deallocate it - large allocations don't go to free list
+        let result = region.deallocate(ptr as u64, SIZE_CLASS_LARGE);
+        assert!(!result); // Returns false for large allocations
+
+        // Stats show deallocation counted
+        assert_eq!(region.stats().deallocations(), 1);
+    }
+
+    #[test]
+    fn test_region_multiple_size_classes() {
+        let region = Region::new(32768, 131072);
+
+        // Allocate objects of different sizes
+        let ptr_8 = region.allocate(8, 8).unwrap();
+        let ptr_64 = region.allocate(64, 8).unwrap();
+        let ptr_256 = region.allocate(256, 8).unwrap();
+
+        assert_eq!(region.stats().allocations(), 3);
+        assert_eq!(region.stats().bumped(), 3);
+
+        // Deallocate to different free lists
+        let _ = region.deallocate(ptr_8 as u64, 0);    // Class 0 (8 bytes)
+        let _ = region.deallocate(ptr_64 as u64, 3);   // Class 3 (64 bytes)
+        let _ = region.deallocate(ptr_256 as u64, 5);  // Class 5 (256 bytes)
+
+        // Allocate again - should reuse from correct size classes
+        let ptr_8_new = region.allocate(8, 8).unwrap();
+        let ptr_64_new = region.allocate(64, 8).unwrap();
+
+        assert_eq!(ptr_8_new as u64, ptr_8 as u64);   // Same addresses reused
+        assert_eq!(ptr_64_new as u64, ptr_64 as u64);
+
+        assert_eq!(region.stats().reused(), 2);
+    }
+
+    #[test]
+    fn test_slot_entry_with_region_tracking() {
+        // Test SlotEntry creation with region info
+        let entry = SlotEntry::new_in_region(generation::FIRST, 64, 123);
+
+        assert_eq!(entry.generation, generation::FIRST);
+        assert_eq!(entry.size, 64);
+        assert!(entry.is_allocated);
+        assert_eq!(entry.size_class, 3); // 64 bytes -> class 3
+        assert_eq!(entry.region_id, 123);
+
+        // Test without region (region_id = 0)
+        let entry2 = SlotEntry::new(generation::FIRST, 256);
+        assert_eq!(entry2.size_class, 5); // 256 bytes -> class 5
+        assert_eq!(entry2.region_id, 0);
+    }
+
+    #[test]
+    fn test_slot_registry_with_region() {
+        let registry = SlotRegistry::new();
+
+        // Register with region
+        let addr = 0xABCD1234u64;
+        let gen = registry.register_with_region(addr, 128, 42);
+        assert_eq!(gen, generation::FIRST);
+
+        // Verify info is correct
+        let info = registry.get_info(addr);
+        assert!(info.is_some());
+        let (size, region_id) = info.unwrap();
+        assert_eq!(size, 128);
+        assert_eq!(region_id, 42);
+
+        // Unregister and verify region_id is returned
+        let result = registry.unregister(addr);
+        assert!(result.is_some());
+        let (ret_region, ret_class) = result.unwrap();
+        assert_eq!(ret_region, 42);
+        assert_eq!(ret_class, 4); // 128 bytes -> class 4
+    }
+
+    #[test]
+    fn test_slot_registry_get_info_not_found() {
+        let registry = SlotRegistry::new();
+
+        // Query non-existent address
+        let info = registry.get_info(0xDEADBEEFu64);
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn test_public_api_with_region() {
+        // Test the public API functions
+        let addr = 0xFEEDFACEu64;
+
+        // Register with region
+        let gen = register_allocation_with_region(addr, 64, 999);
+        assert!(gen >= generation::FIRST);
+
+        // Get info
+        let info = get_slot_info(addr);
+        assert!(info.is_some());
+        let (size, region_id) = info.unwrap();
+        assert_eq!(size, 64);
+        assert_eq!(region_id, 999);
+
+        // Unregister
+        let result = unregister_allocation(addr);
+        assert!(result.is_some());
+        let (ret_region, _) = result.unwrap();
+        assert_eq!(ret_region, 999);
     }
 }
