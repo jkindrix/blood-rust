@@ -317,17 +317,24 @@ impl FfiValidator {
     }
 
     /// Validate a type and emit diagnostics if invalid.
+    ///
+    /// Both `Warning` and `Unsafe` cases emit errors to ensure FFI safety
+    /// issues cause compilation to fail. Portability warnings (e.g., `usize`,
+    /// `isize`, `bool`) are treated as errors because platform-dependent
+    /// types in FFI can cause subtle cross-platform bugs.
     pub fn check_ffi_type(&mut self, ty: &Type, span: Span, context: &str) {
         match self.validate_type(ty) {
             FfiSafety::Safe => {}
             FfiSafety::Warning(msg) => {
-                self.diagnostics.push(Diagnostic::warning(format!(
-                    "FFI type in {} may have portability issues: {}", context, msg
+                // E0502: FFI portability error - treat warnings as errors
+                self.diagnostics.push(Diagnostic::error(format!(
+                    "[E0502] FFI portability error in {}: {}", context, msg
                 ), span));
             }
             FfiSafety::Unsafe(msg) => {
+                // E0501: FFI unsafe type error
                 self.diagnostics.push(Diagnostic::error(format!(
-                    "type in {} is not FFI-safe: {}", context, msg
+                    "[E0501] type in {} is not FFI-safe: {}", context, msg
                 ), span));
             }
         }

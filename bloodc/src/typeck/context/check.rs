@@ -1334,6 +1334,11 @@ impl<'a> TypeContext<'a> {
 }
 
 /// Check a single FFI type and return an error if invalid.
+///
+/// Both `Unsafe` and `Warning` cases are treated as errors to ensure
+/// FFI portability issues cause compilation to fail. Platform-dependent
+/// types like `usize`, `isize`, and `bool` can cause subtle cross-platform
+/// bugs and should be avoided in FFI boundaries.
 fn check_ffi_type_inner(
     validator: &FfiValidator,
     ty: &Type,
@@ -1342,12 +1347,19 @@ fn check_ffi_type_inner(
 ) -> Option<TypeError> {
     match validator.validate_type(ty) {
         FfiSafety::Safe => None,
-        FfiSafety::Warning(_reason) => {
-            // For now, we don't report warnings as errors
-            // They could be logged or stored for later reporting
-            None
+        FfiSafety::Warning(reason) => {
+            // E0502: FFI portability error - treat warnings as errors
+            Some(TypeError::new(
+                TypeErrorKind::FfiPortabilityWarning {
+                    ty: ty.clone(),
+                    reason,
+                    context: context.to_string(),
+                },
+                span,
+            ))
         }
         FfiSafety::Unsafe(reason) => {
+            // E0501: FFI unsafe type error
             Some(TypeError::new(
                 TypeErrorKind::FfiUnsafeType {
                     ty: ty.clone(),
