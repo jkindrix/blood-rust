@@ -736,6 +736,11 @@ pub struct CodegenContext<'ctx, 'a> {
     /// Generic function definitions for monomorphization.
     /// Maps DefId to (FnDef, Body) for generic functions.
     pub(super) generic_fn_defs: HashMap<DefId, (hir::FnDef, hir::Body)>,
+    /// Trait default method definitions for monomorphization.
+    /// Maps method DefId to (trait_id, FnSig, Body).
+    /// When a default method is called on a concrete type, we need to
+    /// monomorphize it by substituting `Self` with the concrete type.
+    pub(super) trait_default_fn_defs: HashMap<DefId, (DefId, hir::FnSig, hir::Body)>,
     /// Generic function MIR bodies for monomorphization.
     /// Maps DefId to MirBody for generic functions.
     pub(super) generic_mir_bodies: HashMap<DefId, MirBody>,
@@ -837,6 +842,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             is_multishot_handler: false,
             main_fn_def_id: None,
             generic_fn_defs: HashMap::new(),
+            trait_default_fn_defs: HashMap::new(),
             generic_mir_bodies: HashMap::new(),
             mono_cache: HashMap::new(),
             mono_counter: 0,
@@ -939,6 +945,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 if !fn_def.sig.generics.is_empty() || !fn_def.sig.const_generics.is_empty() {
                     self.generic_mir_bodies.insert(def_id, mir_body.clone());
                 }
+            }
+            // Store trait default method MIR bodies for on-demand monomorphization
+            // These have an implicit `Self` type parameter that needs to be substituted
+            if self.trait_default_fn_defs.contains_key(&def_id) {
+                self.generic_mir_bodies.insert(def_id, mir_body.clone());
             }
             // Also store closure MIR bodies (synthetic DefIds >= 0xFFFF_0000)
             // These may be needed when monomorphizing generic functions that contain closures
@@ -1051,12 +1062,26 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         self.effect_defs.insert(*def_id, effect_info);
                     }
                 }
+                // Collect trait default method definitions for on-demand monomorphization
+                hir::ItemKind::Trait { items, .. } => {
+                    for trait_item in items {
+                        if let hir::TraitItemKind::Fn(sig, Some(body_id)) = &trait_item.kind {
+                            // This is a default method with a body
+                            if let Some(body) = hir_crate.get_body(*body_id) {
+                                self.trait_default_fn_defs.insert(
+                                    trait_item.def_id,
+                                    (*def_id, sig.clone(), body.clone()),
+                                );
+                            }
+                        }
+                    }
+                }
                 // These item kinds are handled elsewhere or don't need declaration-phase processing:
                 // - Fn: processed in second pass for function declarations
                 // - Handler: processed in second pass after effects are registered
                 // - TypeAlias: resolved during type checking
                 // - Const/Static: compiled with function bodies
-                // - Trait/Impl: resolved during type checking
+                // - Impl: resolved during type checking
                 // - ExternFn/Bridge: processed in fourth pass for FFI declarations
                 // - Module: items are processed recursively, no LLVM codegen for the module itself
                 hir::ItemKind::Fn(_)
@@ -1064,7 +1089,6 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 | hir::ItemKind::TypeAlias { .. }
                 | hir::ItemKind::Const { .. }
                 | hir::ItemKind::Static { .. }
-                | hir::ItemKind::Trait { .. }
                 | hir::ItemKind::Impl { .. }
                 | hir::ItemKind::ExternFn(_)
                 | hir::ItemKind::Bridge(_)
@@ -2407,6 +2431,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             return Ok(());
         }
 
+        // Also skip functions with type parameters in the signature (like trait default methods)
+        // These have an implicit `Self` type parameter that isn't in `generics` but appears
+        // as `TypeKind::Param` in the signature.
+        if self.sig_contains_type_params(&fn_def.sig) {
+            return Ok(());
+        }
+
         // Generate mangled name for multiple dispatch support
         // main is special and gets renamed to blood_main
         let (llvm_name, fn_type) = if name == "main" {
@@ -2470,6 +2501,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 .collect();
             format!("blood${}${}", qualified_path, param_mangles.join("$"))
         }
+    }
+
+    /// Check if a function signature contains any type parameters.
+    ///
+    /// This is used to detect trait default methods which have an implicit `Self`
+    /// type parameter that appears as `TypeKind::Param` in the signature but isn't
+    /// listed in the explicit `generics` field.
+    fn sig_contains_type_params(&self, sig: &hir::FnSig) -> bool {
+        fn type_contains_param(ty: &Type) -> bool {
+            match ty.kind() {
+                TypeKind::Param(_) => true,
+                TypeKind::Tuple(elems) => elems.iter().any(type_contains_param),
+                TypeKind::Array { element, .. } => type_contains_param(element),
+                TypeKind::Slice { element } => type_contains_param(element),
+                TypeKind::Ref { inner, .. } => type_contains_param(inner),
+                TypeKind::Ptr { inner, .. } => type_contains_param(inner),
+                TypeKind::Adt { args, .. } => args.iter().any(type_contains_param),
+                TypeKind::Fn { params, ret, .. } => {
+                    params.iter().any(type_contains_param) || type_contains_param(ret)
+                }
+                _ => false,
+            }
+        }
+
+        sig.inputs.iter().any(type_contains_param) || type_contains_param(&sig.output)
     }
 
     /// Generate a mangled name for a type.
@@ -2649,12 +2705,40 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         concrete_ret: &Type,
         explicit_const_args: &[(hir::ConstParamId, hir::ConstValue)],
     ) -> Option<inkwell::values::FunctionValue<'ctx>> {
-        // Get the generic function's HIR definition first (needed for type inference)
-        let (fn_def, _hir_body) = match self.generic_fn_defs.get(&generic_def_id) {
-            Some(v) => v.clone(),
-            None => return None,
-        };
+        // First, try to get from regular generic functions
+        if let Some((fn_def, _hir_body)) = self.generic_fn_defs.get(&generic_def_id).cloned() {
+            return self.monomorphize_regular_generic(
+                generic_def_id,
+                &fn_def,
+                concrete_params,
+                concrete_ret,
+                explicit_const_args,
+            );
+        }
 
+        // Second, try trait default methods
+        if let Some((trait_id, sig, _body)) = self.trait_default_fn_defs.get(&generic_def_id).cloned() {
+            return self.monomorphize_trait_default_method(
+                generic_def_id,
+                trait_id,
+                &sig,
+                concrete_params,
+                concrete_ret,
+            );
+        }
+
+        None
+    }
+
+    /// Monomorphize a regular generic function.
+    fn monomorphize_regular_generic(
+        &mut self,
+        generic_def_id: DefId,
+        fn_def: &hir::FnDef,
+        concrete_params: &[Type],
+        concrete_ret: &Type,
+        explicit_const_args: &[(hir::ConstParamId, hir::ConstValue)],
+    ) -> Option<inkwell::values::FunctionValue<'ctx>> {
         // Infer type and const arguments by unifying generic signature with concrete types
         // This is needed for higher-order generics like `apply<T, R>(f: fn(T) -> R, x: T) -> R`
         // where concrete_params = [fn(i32) -> i32, i32] but we need type_args = [i32, i32]
@@ -2812,6 +2896,147 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         if result.is_err() {
             // Compilation failed - return None
             // The error was already collected in self.errors
+            return None;
+        }
+
+        Some(fn_value)
+    }
+
+    /// Monomorphize a trait default method for a concrete `Self` type.
+    ///
+    /// Trait default methods have an implicit `Self` type parameter that needs to be
+    /// substituted with the concrete receiver type when the method is called.
+    fn monomorphize_trait_default_method(
+        &mut self,
+        method_def_id: DefId,
+        _trait_id: DefId,
+        sig: &hir::FnSig,
+        concrete_params: &[Type],
+        concrete_ret: &Type,
+    ) -> Option<inkwell::values::FunctionValue<'ctx>> {
+        // The first parameter type is `Self`. Extract the TyVarId for Self from the signature.
+        // The concrete receiver type (first element of concrete_params) tells us what Self should be.
+        let self_tyvar_id = sig.inputs.first().and_then(|ty| {
+            if let hir::TypeKind::Param(id) = ty.kind() {
+                Some(*id)
+            } else {
+                None
+            }
+        });
+
+        let concrete_self = concrete_params.first()?.clone();
+
+        // Build the type substitution: Self -> concrete receiver type
+        let mut type_subst: HashMap<TyVarId, Type> = HashMap::new();
+        if let Some(self_id) = self_tyvar_id {
+            type_subst.insert(self_id, concrete_self.clone());
+        }
+
+        // Build cache key for this monomorphization
+        let type_args = vec![concrete_self.clone()];
+        let cache_key = (method_def_id, type_args.clone(), vec![]);
+        if let Some(&mono_def_id) = self.mono_cache.get(&cache_key) {
+            return self.functions.get(&mono_def_id).copied();
+        }
+
+        // Get the trait default method's MIR body
+        let mir_body = match self.generic_mir_bodies.get(&method_def_id) {
+            Some(b) => b.clone(),
+            None => return None,
+        };
+
+        // Generate unique DefId for monomorphized version
+        let mono_def_id = DefId::new(0xFFFE_0000 + self.mono_counter);
+        self.mono_counter += 1;
+
+        // Clone and substitute Self type in MIR body
+        let subst_ctx = SubstContext {
+            type_subst: type_subst.clone(),
+            const_subst: HashMap::new(),
+        };
+        let mut mono_mir = substitute_mir_types_with_ctx(&mir_body, &subst_ctx);
+
+        // Monomorphize closures referenced in this method
+        let closure_remap = self.monomorphize_closures_recursive(&mono_mir, &type_subst);
+        remap_closure_def_ids(&mut mono_mir, &closure_remap);
+
+        // Build mangled name for monomorphized function
+        let param_mangles: Vec<String> = concrete_params.iter()
+            .map(|ty| self.mangle_type(ty))
+            .collect();
+        let method_path = self.def_paths.get(&method_def_id)
+            .map(|p| p.replace("::", "$"))
+            .unwrap_or_else(|| format!("trait_default_{}", method_def_id.index()));
+        let llvm_name = format!("blood_mono${}${}", method_path, param_mangles.join("$"));
+
+        // Build LLVM function type from concrete types
+        let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = concrete_params.iter()
+            .map(|ty| self.lower_type(ty).into())
+            .collect();
+
+        let fn_type = if concrete_ret.is_unit() {
+            self.context.void_type().fn_type(&param_types, false)
+        } else {
+            let llvm_ret_type = self.lower_type(concrete_ret);
+            llvm_ret_type.fn_type(&param_types, false)
+        };
+
+        // Declare the monomorphized function with LinkOnceODR linkage
+        use inkwell::module::Linkage;
+        let fn_value = self.module.add_function(&llvm_name, fn_type, Some(Linkage::LinkOnceODR));
+        self.functions.insert(mono_def_id, fn_value);
+
+        // Cache the monomorphization
+        self.mono_cache.insert(cache_key, mono_def_id);
+
+        // Save current function state
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_local_generations = std::mem::take(&mut self.local_generations);
+        let saved_persistent_slot_ids = std::mem::take(&mut self.persistent_slot_ids);
+        let saved_current_fn = self.current_fn.take();
+        let saved_current_fn_def_id = self.current_fn_def_id.take();
+        let saved_insert_block = self.builder.get_insert_block();
+
+        // Run escape analysis on the monomorphized MIR body
+        let mut escape_analyzer = EscapeAnalyzer::new();
+        let escape_results = escape_analyzer.analyze(&mono_mir);
+
+        // Compile the monomorphized MIR body
+        use crate::codegen::mir_codegen::MirCodegen;
+        let mut result = self.compile_mir_body(mono_def_id, &mono_mir, Some(&escape_results));
+
+        // Compile any monomorphized closures
+        if result.is_ok() {
+            let pending_closures: Vec<(DefId, MirBody)> =
+                std::mem::take(&mut self.mono_closure_mirs).into_iter().collect();
+
+            for (closure_def_id, closure_mir) in pending_closures {
+                self.locals.clear();
+                self.local_generations.clear();
+                self.persistent_slot_ids.clear();
+
+                let mut analyzer = EscapeAnalyzer::new();
+                let closure_escape = analyzer.analyze(&closure_mir);
+
+                if let Err(e) = self.compile_mir_body(closure_def_id, &closure_mir, Some(&closure_escape)) {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+
+        // Restore previous function state
+        self.locals = saved_locals;
+        self.local_generations = saved_local_generations;
+        self.persistent_slot_ids = saved_persistent_slot_ids;
+        self.current_fn = saved_current_fn;
+        self.current_fn_def_id = saved_current_fn_def_id;
+
+        if let Some(insert_bb) = saved_insert_block {
+            self.builder.position_at_end(insert_bb);
+        }
+
+        if result.is_err() {
             return None;
         }
 

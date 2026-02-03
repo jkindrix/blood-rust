@@ -110,32 +110,7 @@ Program {
                                     ],
                                     base: Some(
                                         Expr {
-                                            kind: Path(
-                                                ExprPath {
-                                                    segments: [
-                                                        ExprPathSegment {
-                                                            name: Spanned {
-                                                                node: SymbolU32 {
-                                                                    value: 4,
-                                                                },
-                                                                span: Span {
-                                                                    start: 26,
-                                                                    end: 33,
-                                                                    start_line: 1,
-                                                                    start_col: 27,
-                                                                },
-                                                            },
-                                                            args: None,
-                                                        },
-                                                    ],
-                                                    span: Span {
-                                                        start: 26,
-                                                        end: 33,
-                                                        start_line: 1,
-                                                        start_col: 27,
-                                                    },
-                                                },
-                                            ),
+                                            kind: Default,
                                             span: Span {
                                                 start: 26,
                                                 end: 33,

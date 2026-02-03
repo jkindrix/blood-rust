@@ -161,6 +161,17 @@ impl<'hir> MirLowering<'hir> {
                         }
                     }
                 }
+                ItemKind::Trait { items, .. } => {
+                    // Lower trait default methods - methods with bodies
+                    for trait_item in items {
+                        if let hir::TraitItemKind::Fn(sig, Some(body_id)) = &trait_item.kind {
+                            if let Some(body) = self.hir.get_body(*body_id) {
+                                let mir_body = self.lower_function(trait_item.def_id, sig, body)?;
+                                self.bodies.insert(trait_item.def_id, mir_body);
+                            }
+                        }
+                    }
+                }
                 _ => {
                     // Skip non-function items for now
                 }

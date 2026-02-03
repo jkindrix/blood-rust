@@ -1,4 +1,4 @@
-// XFAIL: trait default methods not yet implemented
+// EXPECT: 6
 // Test: trait method with default implementation
 trait Greet {
     fn name(self) -> i32;

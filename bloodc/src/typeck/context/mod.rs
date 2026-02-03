@@ -1499,9 +1499,32 @@ impl<'a> TypeContext<'a> {
                 }
                 // Associated types and consts are part of impl blocks, not standalone items
                 hir::DefKind::AssocType | hir::DefKind::AssocConst => continue,
-                // TypeAlias and Trait are handled during type checking but don't produce
-                // standalone HIR items (aliases are expanded, traits are used for bounds)
-                hir::DefKind::TypeAlias | hir::DefKind::Trait => continue,
+                // TypeAlias is expanded during type checking, no HIR item needed
+                hir::DefKind::TypeAlias => continue,
+                // Traits produce HIR items with their methods for default method monomorphization
+                hir::DefKind::Trait => {
+                    if let Some(trait_info) = self.trait_defs.get(&def_id) {
+                        let trait_items: Vec<hir::TraitItem> = trait_info.methods.iter().map(|method| {
+                            let body_id = if method.has_default {
+                                self.fn_bodies.get(&method.def_id).copied()
+                            } else {
+                                None
+                            };
+                            hir::TraitItem {
+                                def_id: method.def_id,
+                                name: method.name.clone(),
+                                kind: hir::TraitItemKind::Fn(method.sig.clone(), body_id),
+                                span: info.span,
+                            }
+                        }).collect();
+                        hir::ItemKind::Trait {
+                            generics: hir::Generics::empty(),
+                            items: trait_items,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
                 // Closures are inline, not top-level items
                 hir::DefKind::Closure => continue,
                 // Type/lifetime/const params are not items

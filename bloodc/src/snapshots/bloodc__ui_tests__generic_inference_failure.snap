@@ -2,4 +2,4 @@
 source: bloodc/src/ui_tests.rs
 expression: formatted
 ---
-No errors
+[E0202] Error 1: cannot infer type `fn(?0) -> ?0`; type annotations needed
