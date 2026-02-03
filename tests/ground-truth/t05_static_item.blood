@@ -1,9 +1,9 @@
-// XFAIL: static items not yet implemented
 // Test: static mutable item
+// EXPECT: 2
 static mut COUNTER: i32 = 0;
 
 fn increment() -> () {
-    unsafe {
+    @unsafe {
         COUNTER = COUNTER + 1;
     }
 }
@@ -11,7 +11,7 @@ fn increment() -> () {
 fn main() -> i32 {
     increment();
     increment();
-    unsafe {
+    @unsafe {
         println_int(COUNTER);
     }
     0

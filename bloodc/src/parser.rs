@@ -540,7 +540,10 @@ impl<'src> Parser<'src> {
                 | TokenKind::Static
                 | TokenKind::Pub
                 | TokenKind::Use
-                | TokenKind::Module => return,
+                | TokenKind::Mod
+                | TokenKind::Bridge
+                | TokenKind::Extern
+                | TokenKind::Macro => return,
                 // When we encounter an opening brace, skip the entire block
                 // This prevents getting stuck inside function bodies during error recovery
                 TokenKind::LBrace => {
@@ -641,7 +644,8 @@ impl<'src> Parser<'src> {
         // First segment must be an identifier
         // Blood uses dot-separated paths: std.collections.vec
         // NOT Rust's crate:: or super:: syntax
-        if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
+        // Accept contextual keywords (e.g., `module`) and type identifiers as path segments
+        if self.check_ident() || self.check(TokenKind::TypeIdent) {
             self.advance();
             segments.push(self.spanned_symbol());
         } else {
@@ -653,7 +657,7 @@ impl<'src> Parser<'src> {
         loop {
             if self.try_consume(TokenKind::Dot) {
                 // `.` is always a path separator
-                if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
+                if self.check_ident() || self.check(TokenKind::TypeIdent) {
                     self.advance();
                     segments.push(self.spanned_symbol());
                 } else {
@@ -666,7 +670,7 @@ impl<'src> Parser<'src> {
                     break;
                 }
                 self.advance(); // consume `::`
-                if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
+                if self.check_ident() || self.check(TokenKind::TypeIdent) {
                     self.advance();
                     segments.push(self.spanned_symbol());
                 } else {
