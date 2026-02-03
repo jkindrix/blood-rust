@@ -303,19 +303,25 @@ impl<'hir, 'ctx> FunctionLowering<'hir, 'ctx> {
         builder.set_return_type(body.return_type().clone());
 
         // Add parameters from FnSig inputs
+        // IMPORTANT: HIR local IDs are NOT necessarily sequential. We must use
+        // the actual HIR local ID from each parameter's Local struct.
         let mut local_map = HashMap::new();
+        let hir_params: Vec<_> = body.params().collect();
         for (i, ty) in sig.inputs.iter().enumerate() {
-            // Get param name from body if available
-            let param_name = body.params().nth(i).and_then(|p| p.name.clone());
-            let param_span = body.params().nth(i).map(|p| p.span).unwrap_or(body.span);
+            // Get param info from body
+            let param_name = hir_params.get(i).and_then(|p| p.name.clone());
+            let param_span = hir_params.get(i).map(|p| p.span).unwrap_or(body.span);
+            let hir_local_id = hir_params.get(i).map(|p| p.id);
+
             let mir_local = builder.add_param(
                 param_name,
                 ty.clone(),
                 param_span,
             );
-            // Map HIR local (i+1) to MIR local
-            let hir_local = LocalId::new((i + 1) as u32);
-            local_map.insert(hir_local, mir_local);
+            // Map the actual HIR local ID to MIR local
+            if let Some(hir_local) = hir_local_id {
+                local_map.insert(hir_local, mir_local);
+            }
         }
 
         let current_block = builder.current_block();

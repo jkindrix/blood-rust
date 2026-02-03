@@ -1,4 +1,4 @@
-// XFAIL: move semantics not yet enforced
+// COMPILE_FAIL
 // Test: using a value after it has been moved should fail
 struct Data {
     value: i32,

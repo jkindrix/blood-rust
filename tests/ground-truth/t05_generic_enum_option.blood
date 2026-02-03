@@ -7,10 +7,10 @@ enum Maybe<T> {
     None,
 }
 
-fn unwrap_or<T>(m: Maybe<T>, default: T) -> T {
+fn unwrap_or<T>(m: Maybe<T>, fallback: T) -> T {
     match m {
         Maybe::Some(v) => v,
-        Maybe::None => default,
+        Maybe::None => fallback,
     }
 }
 
