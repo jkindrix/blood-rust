@@ -309,7 +309,10 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse a prefix expression or primary expression.
-    fn parse_prefix_expr(&mut self) -> Expr {
+    /// Parse a prefix expression (unary operators and primary expressions).
+    /// This is useful for const generic arguments where we don't want to parse
+    /// binary operators like `>` which would conflict with the closing angle bracket.
+    pub(super) fn parse_prefix_expr(&mut self) -> Expr {
         let start = self.current.span;
 
         match self.current.kind {

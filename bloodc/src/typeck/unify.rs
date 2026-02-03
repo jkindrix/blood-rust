@@ -548,7 +548,7 @@ impl Unifier {
                     mutable: *mutable,
                 })
             }
-            TypeKind::Fn { params, ret, effects } => {
+            TypeKind::Fn { params, ret, effects, const_args } => {
                 // Resolve params, ret, and also resolve type args in effect annotations
                 let resolved_effects: Vec<FnEffect> = effects.iter()
                     .map(|eff| FnEffect::new(
@@ -556,10 +556,11 @@ impl Unifier {
                         eff.type_args.iter().map(|arg| self.resolve(arg)).collect(),
                     ))
                     .collect();
-                Type::function_with_effects(
+                Type::function_with_const_args(
                     params.iter().map(|t| self.resolve(t)).collect(),
                     self.resolve(ret),
                     resolved_effects,
+                    const_args.clone(),
                 )
             }
             TypeKind::Adt { def_id, args } => Type::adt(

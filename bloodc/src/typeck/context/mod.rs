@@ -924,7 +924,7 @@ impl<'a> TypeContext<'a> {
     fn zonk_type_with_unifier(unifier: &Unifier, ty: &Type) -> Type {
         let resolved = unifier.resolve(ty);
         match resolved.kind() {
-            TypeKind::Fn { params, ret, effects } => {
+            TypeKind::Fn { params, ret, effects, const_args } => {
                 let zonked_params: Vec<_> = params.iter().map(|p| Self::zonk_type_with_unifier(unifier, p)).collect();
                 let zonked_ret = Self::zonk_type_with_unifier(unifier, ret);
                 // Also zonk type arguments in effect annotations
@@ -936,7 +936,7 @@ impl<'a> TypeContext<'a> {
                             .collect(),
                     ))
                     .collect();
-                Type::function_with_effects(zonked_params, zonked_ret, zonked_effects)
+                Type::function_with_const_args(zonked_params, zonked_ret, zonked_effects, const_args.clone())
             }
             TypeKind::Tuple(elems) => {
                 let zonked: Vec<_> = elems.iter().map(|e| Self::zonk_type_with_unifier(unifier, e)).collect();

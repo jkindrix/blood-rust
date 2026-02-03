@@ -3460,7 +3460,7 @@ impl<'a> TypeContext<'a> {
                     .collect();
                 Type::adt(*def_id, subst_args)
             }
-            TypeKind::Fn { params, ret, effects } => {
+            TypeKind::Fn { params, ret, effects, const_args } => {
                 let subst_params: Vec<Type> = params.iter()
                     .map(|p| self.substitute_type_vars(p, subst))
                     .collect();
@@ -3474,7 +3474,7 @@ impl<'a> TypeContext<'a> {
                             .collect(),
                     ))
                     .collect();
-                Type::function_with_effects(subst_params, subst_ret, subst_effects)
+                Type::function_with_const_args(subst_params, subst_ret, subst_effects, const_args.clone())
             }
             TypeKind::Tuple(elems) => {
                 let subst_elems: Vec<Type> = elems.iter()
@@ -4502,7 +4502,48 @@ impl<'a> TypeContext<'a> {
                                 .collect())
                             .unwrap_or_default();
 
+                        // Check for explicit type arguments (turbofish syntax)
+                        let explicit_const_args: Vec<(hir::ConstParamId, hir::ConstValue)> =
+                            if let Some(ref args) = path.segments[0].args {
+                                let mut const_args = Vec::new();
+                                let mut const_idx = 0usize;
+                                for arg in &args.args {
+                                    if let ast::TypeArg::Const(expr) = arg {
+                                        // Get the const param id from the signature
+                                        if const_idx < sig.const_generics.len() {
+                                            let const_param_id = sig.const_generics[const_idx];
+                                            // Evaluate the const expression
+                                            if let Some(val) = self.evaluate_const_expr(expr) {
+                                                const_args.push((const_param_id, val));
+                                            }
+                                            const_idx += 1;
+                                        }
+                                    }
+                                }
+                                const_args
+                            } else {
+                                Vec::new()
+                            };
+
                         let fn_ty = self.instantiate_fn_sig_with_effects(&sig, fn_effects);
+
+                        // If we have explicit const args, add them to the function type
+                        let fn_ty = if !explicit_const_args.is_empty() {
+                            match fn_ty.kind() {
+                                hir::TypeKind::Fn { params, ret, effects, .. } => {
+                                    Type::function_with_const_args(
+                                        params.clone(),
+                                        ret.clone(),
+                                        effects.clone(),
+                                        explicit_const_args,
+                                    )
+                                }
+                                _ => fn_ty,
+                            }
+                        } else {
+                            fn_ty
+                        };
+
                         Ok(hir::Expr::new(
                             hir::ExprKind::Def(def_id),
                             fn_ty,
@@ -8494,6 +8535,18 @@ impl<'a> TypeContext<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Evaluate an AST expression as a compile-time constant.
+    /// Returns Some(ConstValue) if the expression can be evaluated at compile time,
+    /// or None if it cannot. Used for explicit const generic arguments in turbofish syntax.
+    fn evaluate_const_expr(&self, expr: &ast::Expr) -> Option<hir::ConstValue> {
+        match const_eval::eval_const_expr(expr) {
+            Ok(const_eval::ConstResult::Int(v)) => Some(hir::ConstValue::Int(v)),
+            Ok(const_eval::ConstResult::Uint(v)) => Some(hir::ConstValue::Uint(v)),
+            Ok(const_eval::ConstResult::Bool(v)) => Some(hir::ConstValue::Bool(v)),
+            Err(_) => None,
         }
     }
 }

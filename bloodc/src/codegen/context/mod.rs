@@ -81,7 +81,7 @@ fn collect_tyvars(ty: &Type, tyvars: &mut Vec<TyVarId>) {
                 collect_tyvars(arg, tyvars);
             }
         }
-        TypeKind::Fn { params, ret, effects } => {
+        TypeKind::Fn { params, ret, effects, .. } => {
             for p in params {
                 collect_tyvars(p, tyvars);
             }
@@ -136,7 +136,7 @@ fn normalize_type_recursive(ty: &Type, tyvar_to_idx: &HashMap<TyVarId, u32>) -> 
                 .collect();
             Type::adt(*def_id, normalized_args)
         }
-        TypeKind::Fn { params, ret, effects } => {
+        TypeKind::Fn { params, ret, effects, const_args } => {
             let normalized_params: Vec<Type> = params.iter()
                 .map(|p| normalize_type_recursive(p, tyvar_to_idx))
                 .collect();
@@ -150,7 +150,7 @@ fn normalize_type_recursive(ty: &Type, tyvar_to_idx: &HashMap<TyVarId, u32>) -> 
                         .collect(),
                 })
                 .collect();
-            Type::function_with_effects(normalized_params, normalized_ret, normalized_effects)
+            Type::function_with_const_args(normalized_params, normalized_ret, normalized_effects, const_args.clone())
         }
         _ => ty.clone(),
     }
@@ -336,7 +336,7 @@ fn substitute_type_with_ctx(ty: &Type, ctx: &SubstContext) -> Type {
                 .collect();
             Type::adt(*def_id, subst_args)
         }
-        TypeKind::Fn { params, ret, effects } => {
+        TypeKind::Fn { params, ret, effects, const_args } => {
             let subst_params: Vec<Type> = params.iter()
                 .map(|p| substitute_type_with_ctx(p, ctx))
                 .collect();
@@ -348,7 +348,19 @@ fn substitute_type_with_ctx(ty: &Type, ctx: &SubstContext) -> Type {
                         .collect(),
                 })
                 .collect();
-            Type::function_with_effects(subst_params, substitute_type_with_ctx(ret, ctx), subst_effects)
+            // Also substitute const params in const_args
+            let subst_const_args: Vec<(hir::ConstParamId, hir::ConstValue)> = const_args.iter()
+                .map(|(param_id, val)| {
+                    let subst_val = match val {
+                        hir::ConstValue::Param(p) => {
+                            ctx.const_subst.get(p).cloned().unwrap_or_else(|| val.clone())
+                        }
+                        _ => val.clone(),
+                    };
+                    (*param_id, subst_val)
+                })
+                .collect();
+            Type::function_with_const_args(subst_params, substitute_type_with_ctx(ret, ctx), subst_effects, subst_const_args)
         }
         _ => ty.clone(),
     }
@@ -393,9 +405,9 @@ fn unify_types(
             // Found a type variable - record its concrete type
             type_subst.entry(*id).or_insert_with(|| concrete.clone());
         }
-        TypeKind::Fn { params: gen_params, ret: gen_ret, effects: gen_effects } => {
+        TypeKind::Fn { params: gen_params, ret: gen_ret, effects: gen_effects, const_args: gen_const_args } => {
             // Recursively unify function types
-            if let TypeKind::Fn { params: conc_params, ret: conc_ret, effects: conc_effects } = concrete.kind() {
+            if let TypeKind::Fn { params: conc_params, ret: conc_ret, effects: conc_effects, const_args: conc_const_args } = concrete.kind() {
                 for (gp, cp) in gen_params.iter().zip(conc_params.iter()) {
                     unify_types(gp, cp, type_subst, const_subst);
                 }
@@ -409,6 +421,19 @@ fn unify_types(
                                 unify_types(gen_arg, conc_arg, type_subst, const_subst);
                             }
                         }
+                    }
+                }
+                // Unify const args - if concrete type has explicit const args, use them
+                // This handles the turbofish case: make_matrix::<3, 4>()
+                for (param_id, conc_val) in conc_const_args {
+                    const_subst.entry(*param_id).or_insert_with(|| conc_val.clone());
+                }
+                // If generic has const args but concrete doesn't, that's also valid (inference)
+                for (param_id, gen_val) in gen_const_args {
+                    if let hir::ConstValue::Param(_) = gen_val {
+                        // Skip - this will be resolved later
+                    } else {
+                        const_subst.entry(*param_id).or_insert_with(|| gen_val.clone());
                     }
                 }
             }
@@ -2612,6 +2637,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         concrete_params: &[Type],
         concrete_ret: &Type,
     ) -> Option<inkwell::values::FunctionValue<'ctx>> {
+        self.monomorphize_function_with_const_args(generic_def_id, concrete_params, concrete_ret, &[])
+    }
+
+    /// Monomorphize a function with explicit const generic arguments.
+    /// This is used when const args are provided via turbofish syntax like `fn::<3, 4>()`.
+    pub fn monomorphize_function_with_const_args(
+        &mut self,
+        generic_def_id: DefId,
+        concrete_params: &[Type],
+        concrete_ret: &Type,
+        explicit_const_args: &[(hir::ConstParamId, hir::ConstValue)],
+    ) -> Option<inkwell::values::FunctionValue<'ctx>> {
         // Get the generic function's HIR definition first (needed for type inference)
         let (fn_def, _hir_body) = match self.generic_fn_defs.get(&generic_def_id) {
             Some(v) => v.clone(),
@@ -2621,12 +2658,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Infer type and const arguments by unifying generic signature with concrete types
         // This is needed for higher-order generics like `apply<T, R>(f: fn(T) -> R, x: T) -> R`
         // where concrete_params = [fn(i32) -> i32, i32] but we need type_args = [i32, i32]
-        let infer_result = infer_type_and_const_args(
+        let mut infer_result = infer_type_and_const_args(
             &fn_def.sig.inputs,
             concrete_params,
             &fn_def.sig.output,
             concrete_ret,
         );
+
+        // Merge explicit const args into the inferred const_subst.
+        // Explicit args from turbofish take precedence.
+        for (param_id, value) in explicit_const_args {
+            infer_result.const_subst.insert(*param_id, value.clone());
+        }
 
         // Build type args list from inferred substitution (in order of fn_def.sig.generics)
         let type_args: Vec<Type> = fn_def.sig.generics.iter()

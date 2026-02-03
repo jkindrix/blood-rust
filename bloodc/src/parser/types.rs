@@ -363,6 +363,14 @@ impl<'src> Parser<'src> {
             let arg = if self.check(TokenKind::Lifetime) {
                 self.advance();
                 TypeArg::Lifetime(self.spanned_lifetime_symbol())
+            } else if self.check(TokenKind::IntLit) || self.check(TokenKind::Minus) {
+                // Integer literal or negative integer for const generics
+                // Use parse_prefix_expr to avoid consuming `>` as comparison
+                TypeArg::Const(self.parse_prefix_expr())
+            } else if self.check(TokenKind::LBrace) {
+                // Block expression for const generics: ::<{ N + 1 }>
+                // Use parse_prefix_expr since block is a primary expression
+                TypeArg::Const(self.parse_prefix_expr())
             } else {
                 TypeArg::Type(self.parse_type())
             };

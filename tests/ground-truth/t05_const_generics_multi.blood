@@ -1,4 +1,4 @@
-// XFAIL: multiple const generic parameters not yet implemented
+// EXPECT: 12
 // Test: function with multiple const generic parameters
 fn make_matrix<const R: usize, const C: usize>() -> i32 {
     (R * C) as i32

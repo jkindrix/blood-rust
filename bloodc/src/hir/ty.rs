@@ -528,14 +528,19 @@ impl Type {
         Self::new(TypeKind::Tuple(elements))
     }
 
-    /// Create a function type (without effects).
+    /// Create a function type (without effects or const args).
     pub fn function(params: Vec<Type>, ret: Type) -> Self {
-        Self::new(TypeKind::Fn { params, ret, effects: Vec::new() })
+        Self::new(TypeKind::Fn { params, ret, effects: Vec::new(), const_args: Vec::new() })
     }
 
     /// Create a function type with effect annotations.
     pub fn function_with_effects(params: Vec<Type>, ret: Type, effects: Vec<FnEffect>) -> Self {
-        Self::new(TypeKind::Fn { params, ret, effects })
+        Self::new(TypeKind::Fn { params, ret, effects, const_args: Vec::new() })
+    }
+
+    /// Create a function type with explicit const generic arguments.
+    pub fn function_with_const_args(params: Vec<Type>, ret: Type, effects: Vec<FnEffect>, const_args: Vec<(ConstParamId, ConstValue)>) -> Self {
+        Self::new(TypeKind::Fn { params, ret, effects, const_args })
     }
 
     /// Create an ADT (struct/enum) type.
@@ -622,6 +627,9 @@ pub enum TypeKind {
         /// Effect annotations on this function type.
         /// Empty for pure functions.
         effects: Vec<FnEffect>,
+        /// Explicit const generic arguments (for turbofish syntax like `::<3, 4>`).
+        /// Empty when const args are inferred from argument types.
+        const_args: Vec<(ConstParamId, ConstValue)>,
     },
 
     /// A closure type.
@@ -739,7 +747,7 @@ impl fmt::Display for TypeKind {
             TypeKind::Ref { inner, mutable: true } => write!(f, "&mut {inner}"),
             TypeKind::Ptr { inner, mutable: false } => write!(f, "*const {inner}"),
             TypeKind::Ptr { inner, mutable: true } => write!(f, "*mut {inner}"),
-            TypeKind::Fn { params, ret, effects } => {
+            TypeKind::Fn { params, ret, effects, .. } => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
                     if i > 0 {

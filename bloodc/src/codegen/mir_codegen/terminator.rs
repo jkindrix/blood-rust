@@ -1691,7 +1691,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 } else {
                     // Function not found - this is likely a generic function.
                     // Try to monomorphize it on-demand with concrete types from the call.
-                    if let crate::hir::TypeKind::Fn { params, ret, .. } = ty.kind() {
+                    if let crate::hir::TypeKind::Fn { params, ret, const_args, .. } = ty.kind() {
                         // For const-generic functions, the function type may still have
                         // Param sizes in array types. Use actual argument types from the
                         // call operands which have concrete sizes.
@@ -1703,8 +1703,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Use destination type for concrete return if available
                         let concrete_ret = self.get_place_base_type(destination, body)
                             .unwrap_or_else(|_| ret.clone());
-                        // Attempt monomorphization
-                        if let Some(mono_fn) = self.monomorphize_function(*def_id, &concrete_params, &concrete_ret) {
+                        // Attempt monomorphization, passing explicit const args from turbofish
+                        if let Some(mono_fn) = self.monomorphize_function_with_const_args(*def_id, &concrete_params, &concrete_ret, const_args) {
                             self.builder.build_call(mono_fn, &arg_metas, "mono_call")
                                 .map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM call error: {}", e), span

@@ -1521,12 +1521,12 @@ pub trait ExprLowering {
                     .collect();
                 Type::tuple(new_elements)
             }
-            TypeKind::Fn { params, ret, effects } => {
+            TypeKind::Fn { params, ret, effects, const_args } => {
                 let new_params: Vec<Type> = params.iter()
                     .map(|p| self.substitute_type(p, subst))
                     .collect();
                 let new_ret = self.substitute_type(ret, subst);
-                Type::new(TypeKind::Fn { params: new_params, ret: new_ret, effects: effects.clone() })
+                Type::new(TypeKind::Fn { params: new_params, ret: new_ret, effects: effects.clone(), const_args: const_args.clone() })
             }
             TypeKind::Closure { def_id, params, ret } => {
                 let new_params: Vec<Type> = params.iter()
