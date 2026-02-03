@@ -722,6 +722,16 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Type checking passed. {} items.", hir_crate.items.len());
     }
 
+    // Check linearity (linear/affine type usage)
+    let linearity_errors = bloodc::typeck::linearity::check_crate_linearity(&hir_crate);
+    if !linearity_errors.is_empty() {
+        for error in &linearity_errors {
+            emitter.emit(&error.to_diagnostic());
+        }
+        eprintln!("Type checking failed: {} linearity error(s).", linearity_errors.len());
+        return ExitCode::from(1);
+    }
+
     println!("info: Type checking successful.");
     ExitCode::SUCCESS
 }
@@ -921,6 +931,16 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     if verbosity > 0 {
         eprintln!("Type checking passed. {} items.", hir_crate.items.len());
+    }
+
+    // Check linearity (linear/affine type usage)
+    let linearity_errors = bloodc::typeck::linearity::check_crate_linearity(&hir_crate);
+    if !linearity_errors.is_empty() {
+        for error in &linearity_errors {
+            emitter.emit(&error.to_diagnostic());
+        }
+        eprintln!("Build failed: linearity errors.");
+        return ExitCode::from(1);
     }
 
     // Expand macros in HIR before MIR lowering

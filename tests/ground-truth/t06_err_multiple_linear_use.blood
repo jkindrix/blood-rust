@@ -1,10 +1,9 @@
-// XFAIL: linear value tracking not yet enforced
+// COMPILE_FAIL: E0802
 // Test: using a linear value more than once should fail (E0802)
-fn consume(x: @linear i32) -> i32 { x }
-
+// The linear `x` is used twice - this is an error
 fn main() -> i32 {
-    let x: @linear i32 = 42;
-    let a: i32 = consume(x);
-    let b: i32 = consume(x);
-    a + b
+    let x: linear i32 = 42;
+    let a: linear i32 = x; // First use of x (consumes it)
+    let b: linear i32 = x; // ERROR: x already used (E0802)
+    0
 }
