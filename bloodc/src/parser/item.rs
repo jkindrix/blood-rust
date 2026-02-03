@@ -1325,13 +1325,14 @@ impl<'src> Parser<'src> {
             Spanned::new(String::new(), self.current.span)
         };
 
-        // Parse bridge name
+        // Parse bridge name (optional - auto-generate if not provided)
         let name = if self.check(TokenKind::Ident) || self.check(TokenKind::TypeIdent) {
             self.advance();
             self.spanned_symbol()
         } else {
-            self.error_expected("bridge name");
-            Spanned::new(self.intern(""), self.current.span)
+            // Auto-generate a unique name like extern blocks do
+            let name_str = format!("__bridge_{}_{}", start.start_line, start.start);
+            Spanned::new(self.intern(&name_str), start)
         };
 
         // Parse bridge body
