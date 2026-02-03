@@ -197,6 +197,12 @@ impl<'a> TypeContext<'a> {
             vec![u64_ty.clone()], i32_ty.clone(),
         );
 
+        // region_used(region_id: u64) -> u64 - get current used bytes in region
+        self.register_builtin_fn_aliased(
+            "region_used", "blood_region_used",
+            vec![u64_ty.clone()], u64_ty.clone(),
+        );
+
         // ptr_read_i32(ptr: u64) -> i32 - read i32 from memory address
         self.register_builtin_fn("ptr_read_i32", vec![u64_ty.clone()], i32_ty.clone());
 

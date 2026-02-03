@@ -3484,6 +3484,19 @@ pub extern "C" fn blood_region_is_pending_deallocation(region_id: u64) -> c_int 
     }
 }
 
+/// Get the current used bytes in a region.
+#[no_mangle]
+pub extern "C" fn blood_region_used(region_id: u64) -> usize {
+    let registry = get_region_registry();
+    let reg = registry.lock();
+
+    if let Some(region) = reg.get(&region_id) {
+        region.used()
+    } else {
+        0
+    }
+}
+
 // ============================================================================
 // Continuation Region Tracking
 // ============================================================================

@@ -3558,6 +3558,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // blood_region_is_pending_deallocation(region_id: i64) -> i32 (bool)
         self.module.add_function("blood_region_is_pending_deallocation", region_is_suspended_type, None);
 
+        // blood_region_used(region_id: i64) -> i64 (used bytes)
+        // Returns the current used bytes in a region
+        let region_used_type = i64_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_region_used", region_used_type, None);
+
         // blood_region_activate(region_id: i64) -> void
         // Activates a region for the current thread so String/Vec/Box allocations route to it
         let region_activate_type = void_type.fn_type(&[i64_type.into()], false);
