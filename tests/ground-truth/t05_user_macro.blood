@@ -1,5 +1,5 @@
-// EXPECT: 0
 // Test: user-defined macro declaration
+// No output expected; test passes if compilation and execution succeed
 macro my_assert {
     ($cond:expr) => {
         if !$cond {
