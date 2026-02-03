@@ -29,7 +29,8 @@ use parking_lot::Mutex;
 use crate::memory::{
     BloodPtr, PointerMetadata, generation, get_slot_generation, Region,
     size_class_for, slot_size_for_class, unregister_allocation, register_allocation,
-    register_allocation_with_region, get_slot_info,
+    register_allocation_with_region, get_slot_info, record_system_alloc, record_system_free,
+    system_alloc_stats, system_alloc_live_bytes,
 };
 use crate::continuation::{
     ContinuationRef, Continuation, EffectContext,
@@ -3207,16 +3208,50 @@ pub extern "C" fn blood_register_allocation(address: u64, size: u64) -> u32 {
     register_allocation(address, size as usize)
 }
 
-/// Get the number of entries in the slot registry.
+/// Get the number of entries in the slot registry (lock-free).
 ///
 /// This is useful for debugging and memory analysis to understand
-/// how many allocations are being tracked.
+/// how many allocations are being tracked. Uses an atomic counter
+/// so it doesn't contend with allocation/deallocation operations.
 ///
 /// # Returns
-/// The number of slots currently in the registry.
+/// The number of unique addresses ever registered in the slot registry.
 #[no_mangle]
 pub extern "C" fn blood_slot_registry_len() -> u64 {
     crate::memory::slot_registry().len() as u64
+}
+
+/// Get the current live bytes allocated via system allocator (non-region).
+///
+/// This is useful for debugging and memory analysis. Returns the difference
+/// between total allocated and total freed bytes.
+#[no_mangle]
+pub extern "C" fn blood_system_alloc_live_bytes() -> u64 {
+    system_alloc_live_bytes()
+}
+
+/// Get total bytes ever allocated via system allocator (non-region).
+#[no_mangle]
+pub extern "C" fn blood_system_alloc_total_bytes() -> u64 {
+    system_alloc_stats().0
+}
+
+/// Get total bytes ever freed via system allocator (non-region).
+#[no_mangle]
+pub extern "C" fn blood_system_free_total_bytes() -> u64 {
+    system_alloc_stats().1
+}
+
+/// Get total number of system allocations (non-region).
+#[no_mangle]
+pub extern "C" fn blood_system_alloc_count() -> u64 {
+    system_alloc_stats().2
+}
+
+/// Get total number of system frees (non-region).
+#[no_mangle]
+pub extern "C" fn blood_system_free_count() -> u64 {
+    system_alloc_stats().3
 }
 
 /// Unregister an allocation from the slot registry and add to region free list.
@@ -8003,6 +8038,55 @@ mod tests {
     }
 
     #[test]
+    fn test_system_alloc_header_roundtrip() {
+        use super::ALLOC_HEADER_SIZE;
+
+        // Allocate memory via system allocator (no active region)
+        let ptr = blood_alloc_simple(100);
+        assert!(ptr != 0, "Allocation should succeed");
+
+        // Verify we can read the size from the header
+        unsafe {
+            let header_ptr = (ptr as usize - ALLOC_HEADER_SIZE) as *const usize;
+            assert_eq!(*header_ptr, 100, "Header should contain allocation size");
+        }
+
+        // Realloc should preserve data and update header
+        let new_ptr = blood_realloc(ptr, 200);
+        assert!(new_ptr != 0, "Realloc should succeed");
+
+        unsafe {
+            let header_ptr = (new_ptr as usize - ALLOC_HEADER_SIZE) as *const usize;
+            assert_eq!(*header_ptr, 200, "Header should contain new size after realloc");
+        }
+
+        // Free should work correctly with header
+        blood_free_simple(new_ptr);
+    }
+
+    #[test]
+    fn test_system_alloc_statistics() {
+        use crate::memory::system_alloc_stats;
+
+        // Get baseline stats
+        let (alloc_before, free_before, count_before, free_count_before) = system_alloc_stats();
+
+        // Allocate and free
+        let ptr = blood_alloc_simple(256);
+        assert!(ptr != 0);
+
+        let (alloc_after, _, count_after, _) = system_alloc_stats();
+        assert!(alloc_after >= alloc_before + 256, "Alloc bytes should increase");
+        assert!(count_after >= count_before + 1, "Alloc count should increase");
+
+        blood_free_simple(ptr);
+
+        let (_, free_after, _, free_count_after) = system_alloc_stats();
+        assert!(free_after >= free_before + 256, "Free bytes should increase");
+        assert!(free_count_after >= free_count_before + 1, "Free count should increase");
+    }
+
+    #[test]
     fn test_continuation_suspended_regions() {
         let region_id = blood_region_create(1024, 1024 * 1024);
         let continuation_id = 12345u64; // Fake continuation ID
@@ -8275,6 +8359,11 @@ pub extern "C" fn print_i64(val: i64) {
 // Simple Memory Allocation (for Vec/collections)
 // ============================================================================
 
+/// Size of the header prepended to non-region allocations to store the size.
+/// This enables correct `Layout` reconstruction at deallocation time, which is
+/// required by Rust's `GlobalAlloc` contract.
+const ALLOC_HEADER_SIZE: usize = 8;
+
 /// Allocate memory of the given size with default alignment (8).
 ///
 /// This function is region-aware: if a region is active, it allocates from the region
@@ -8300,17 +8389,25 @@ pub extern "C" fn blood_alloc_simple(size: i64) -> i64 {
         return addr as i64;
     }
 
-    // No active region — use system allocator
-    // NOTE: We do NOT register non-region allocations in the slot registry.
-    // This saves significant memory overhead. The registry is only needed for
-    // region allocations (to route freed slots to the correct free list).
-    // In blood_free_simple, if an address is not in the registry, we assume
-    // it's a non-region allocation and free directly to the system allocator.
+    // No active region — use system allocator with inline size header.
+    // We prepend an 8-byte header containing the allocation size, which allows
+    // us to reconstruct the correct Layout at deallocation time (required by
+    // Rust's GlobalAlloc contract). This adds 8 bytes overhead per allocation,
+    // much less than the 72+ bytes per SlotEntry if we tracked in the registry.
     unsafe {
-        let layout = std::alloc::Layout::from_size_align(size_usize, 8)
+        let total_size = size_usize + ALLOC_HEADER_SIZE;
+        let layout = std::alloc::Layout::from_size_align(total_size, 8)
             .expect("blood_alloc_simple: invalid layout");
         let ptr = runtime_alloc(layout);
-        if ptr.is_null() { 0 } else { ptr as i64 }
+        if ptr.is_null() {
+            0
+        } else {
+            // Record allocation for statistics
+            record_system_alloc(size_usize);
+            // Store size in header, return pointer past header
+            *(ptr as *mut usize) = size_usize;
+            (ptr as usize + ALLOC_HEADER_SIZE) as i64
+        }
     }
 }
 
@@ -8363,14 +8460,30 @@ pub extern "C" fn blood_realloc(ptr: i64, new_size: i64) -> i64 {
             new_ptr
         }
         _ => {
-            // Non-region allocation or unknown: use system realloc
-            // NOTE: We do NOT register non-region allocations in the slot registry.
-            // This matches the behavior of blood_alloc_simple.
+            // Non-region allocation: read old size from header, allocate new, copy, free old.
+            // We can't use runtime_realloc directly because the pointer has a header offset.
             unsafe {
-                let old_layout = std::alloc::Layout::from_size_align(1, 8)
-                    .expect("blood_realloc: invalid old layout");
-                let new_ptr = runtime_realloc(ptr as *mut u8, old_layout, new_size_usize);
-                if new_ptr.is_null() { 0 } else { new_ptr as i64 }
+                let header_ptr = (ptr as usize - ALLOC_HEADER_SIZE) as *const usize;
+                let old_size = *header_ptr;
+
+                // Allocate new buffer (blood_alloc_simple handles the header)
+                let new_ptr = blood_alloc_simple(new_size);
+                if new_ptr == 0 {
+                    return 0;
+                }
+
+                // Copy old data to new buffer
+                let copy_size = old_size.min(new_size_usize);
+                std::ptr::copy_nonoverlapping(
+                    old_addr as *const u8,
+                    new_ptr as *mut u8,
+                    copy_size,
+                );
+
+                // Free old buffer (blood_free_simple handles the header)
+                blood_free_simple(ptr);
+
+                new_ptr
             }
         }
     }
@@ -8415,12 +8528,17 @@ pub extern "C" fn blood_free_simple(ptr: i64) {
         }
     }
 
-    // Non-region allocation: return to system allocator
-    // We use alignment 8 to match blood_alloc_simple
+    // Non-region allocation: read size from header and return to system allocator.
+    // The header is located 8 bytes before the user pointer.
     unsafe {
-        let layout = std::alloc::Layout::from_size_align(1, 8)
+        let header_ptr = (ptr as usize - ALLOC_HEADER_SIZE) as *mut u8;
+        let size = *(header_ptr as *const usize);
+        // Record free for statistics
+        record_system_free(size);
+        let total_size = size + ALLOC_HEADER_SIZE;
+        let layout = std::alloc::Layout::from_size_align(total_size, 8)
             .expect("blood_free_simple: invalid layout");
-        runtime_dealloc(ptr as *mut u8, layout);
+        runtime_dealloc(header_ptr, layout);
     }
 }
 

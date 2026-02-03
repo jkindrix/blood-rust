@@ -199,6 +199,9 @@ pub const fn slot_size_for_class(class: u8) -> usize {
 pub struct SlotRegistry {
     /// Map from allocation address to slot entry.
     slots: RwLock<HashMap<u64, SlotEntry>>,
+    /// Atomic count of entries for lock-free diagnostics.
+    /// This tracks the number of unique addresses ever registered.
+    count: AtomicUsize,
 }
 
 impl SlotRegistry {
@@ -206,6 +209,7 @@ impl SlotRegistry {
     pub fn new() -> Self {
         Self {
             slots: RwLock::new(HashMap::new()),
+            count: AtomicUsize::new(0),
         }
     }
 
@@ -231,6 +235,7 @@ impl SlotRegistry {
             let entry = SlotEntry::new(generation::FIRST, size);
             let gen = entry.generation;
             slots.insert(address, entry);
+            self.count.fetch_add(1, Ordering::Relaxed);
             gen
         }
     }
@@ -260,6 +265,7 @@ impl SlotRegistry {
             let entry = SlotEntry::new_in_region(generation::FIRST, size, region_id);
             let gen = entry.generation;
             slots.insert(address, entry);
+            self.count.fetch_add(1, Ordering::Relaxed);
             gen
         }
     }
@@ -373,20 +379,33 @@ impl SlotRegistry {
         }
     }
 
-    /// Get the number of tracked slots.
+    /// Get the number of tracked slots (lock-free).
+    ///
+    /// This returns the count of unique addresses ever registered, using an
+    /// atomic counter for lock-free access. This is suitable for diagnostics
+    /// and monitoring without risking contention with allocation operations.
     pub fn len(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Get the exact number of entries in the HashMap.
+    ///
+    /// **Note**: This acquires a read lock on the internal map. For most
+    /// diagnostic purposes, prefer `len()` which is lock-free.
+    pub fn len_exact(&self) -> usize {
         self.slots.read().len()
     }
 
-    /// Check if the registry is empty.
+    /// Check if the registry is empty (lock-free).
     pub fn is_empty(&self) -> bool {
-        self.slots.read().is_empty()
+        self.count.load(Ordering::Relaxed) == 0
     }
 
     /// Clear all slots (for testing).
     #[cfg(test)]
     pub fn clear(&self) {
         self.slots.write().clear();
+        self.count.store(0, Ordering::Relaxed);
     }
 }
 
@@ -415,6 +434,55 @@ static SLOT_REGISTRY: OnceLock<SlotRegistry> = OnceLock::new();
 /// Get the global slot registry.
 pub fn slot_registry() -> &'static SlotRegistry {
     SLOT_REGISTRY.get_or_init(SlotRegistry::new)
+}
+
+// ============================================================================
+// System Allocator Statistics (for non-region allocations)
+// ============================================================================
+
+/// Total bytes allocated via system allocator (non-region allocations).
+static SYSTEM_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Total bytes freed via system allocator (non-region allocations).
+static SYSTEM_FREE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of system allocations (non-region).
+static SYSTEM_ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Total number of system frees (non-region).
+static SYSTEM_FREE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Record a system allocation (non-region).
+#[inline]
+pub fn record_system_alloc(size: usize) {
+    SYSTEM_ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+    SYSTEM_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a system free (non-region).
+#[inline]
+pub fn record_system_free(size: usize) {
+    SYSTEM_FREE_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+    SYSTEM_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Get system allocator statistics.
+///
+/// Returns (allocated_bytes, freed_bytes, alloc_count, free_count).
+pub fn system_alloc_stats() -> (u64, u64, u64, u64) {
+    (
+        SYSTEM_ALLOC_BYTES.load(Ordering::Relaxed),
+        SYSTEM_FREE_BYTES.load(Ordering::Relaxed),
+        SYSTEM_ALLOC_COUNT.load(Ordering::Relaxed),
+        SYSTEM_FREE_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+/// Get current live system allocator bytes (allocated - freed).
+pub fn system_alloc_live_bytes() -> u64 {
+    let allocated = SYSTEM_ALLOC_BYTES.load(Ordering::Relaxed);
+    let freed = SYSTEM_FREE_BYTES.load(Ordering::Relaxed);
+    allocated.saturating_sub(freed)
 }
 
 /// Register an allocation in the global slot registry.
