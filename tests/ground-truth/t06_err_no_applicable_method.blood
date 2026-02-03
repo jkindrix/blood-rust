@@ -1,5 +1,5 @@
-// XFAIL: multiple dispatch method resolution not yet implemented
-// Test: calling a multimethod with no matching specialization should fail (E0601)
+// COMPILE_FAIL: no method greet found for Dog (E0231)
+// Test: calling a method on type that doesn't implement the trait should fail
 struct Cat {}
 struct Dog {}
 

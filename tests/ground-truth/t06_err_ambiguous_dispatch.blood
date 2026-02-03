@@ -1,5 +1,5 @@
-// XFAIL: ambiguous dispatch detection not yet implemented
-// Test: method call matching multiple impls should fail (E0602)
+// COMPILE_FAIL: method name defined multiple times (E0214)
+// Test: method call matching multiple impls should fail
 trait AsNum {
     fn as_num(self) -> i32;
 }
