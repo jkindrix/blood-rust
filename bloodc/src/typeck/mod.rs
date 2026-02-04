@@ -26,6 +26,7 @@
 //! - Generic instantiation
 
 pub mod ambiguity;
+pub mod borrow;
 pub mod const_eval;
 pub mod context;
 pub mod dispatch;
@@ -43,6 +44,7 @@ pub mod suggestion;
 pub mod unify;
 
 pub use ambiguity::{Ambiguity, AmbiguityChecker, AmbiguityCheckResult};
+pub use borrow::{BorrowChecker, check_crate_borrows};
 pub use context::TypeContext;
 pub use dispatch::{DispatchResolver, DispatchResult, MethodCandidate};
 pub use effect::EffectUnifier;
@@ -93,6 +95,14 @@ pub fn check_program(
     let linearity_errors = linearity::check_crate_linearity(&hir_crate);
     if !linearity_errors.is_empty() {
         return Err(linearity_errors.into_iter()
+            .map(|e| e.to_diagnostic())
+            .collect());
+    }
+
+    // Phase 5: Check borrows (mutable aliasing)
+    let borrow_errors = borrow::check_crate_borrows(&hir_crate);
+    if !borrow_errors.is_empty() {
+        return Err(borrow_errors.into_iter()
             .map(|e| e.to_diagnostic())
             .collect());
     }
