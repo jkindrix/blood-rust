@@ -735,16 +735,6 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // Check borrows (mutable aliasing)
-    let borrow_errors = bloodc::typeck::borrow::check_crate_borrows(&hir_crate);
-    if !borrow_errors.is_empty() {
-        for error in &borrow_errors {
-            emitter.emit(&error.to_diagnostic());
-        }
-        eprintln!("Type checking failed: {} borrow error(s).", borrow_errors.len());
-        return ExitCode::from(1);
-    }
-
     println!("info: Type checking successful.");
     ExitCode::SUCCESS
 }
@@ -956,16 +946,6 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             emitter.emit(&error.to_diagnostic());
         }
         eprintln!("Build failed: linearity errors.");
-        return ExitCode::from(1);
-    }
-
-    // Check borrows (mutable aliasing)
-    let borrow_errors = bloodc::typeck::borrow::check_crate_borrows(&hir_crate);
-    if !borrow_errors.is_empty() {
-        for error in &borrow_errors {
-            emitter.emit(&error.to_diagnostic());
-        }
-        eprintln!("Build failed: borrow errors.");
         return ExitCode::from(1);
     }
 

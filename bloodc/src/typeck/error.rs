@@ -370,19 +370,6 @@ impl TypeError {
                 format!("parse error in module: {message}"),
             ),
 
-            // Borrow checker errors (E04xx - Ownership)
-            TypeErrorKind::DoubleMutableBorrow { name, .. } => (
-                "E0402",
-                format!("cannot borrow `{name}` as mutable more than once at a time"),
-            ),
-            TypeErrorKind::MutableBorrowWhileImmutable { name, .. } => (
-                "E0403",
-                format!("cannot borrow `{name}` as mutable because it is also borrowed as immutable"),
-            ),
-            TypeErrorKind::ImmutableBorrowWhileMutable { name, .. } => (
-                "E0404",
-                format!("cannot borrow `{name}` as immutable because it is also borrowed as mutable"),
-            ),
         };
 
         let mut diag = Diagnostic::error(message, self.span).with_code(code);
@@ -712,26 +699,6 @@ pub enum TypeErrorKind {
     /// Parse error in module file.
     ParseError {
         message: String,
-    },
-
-    // Borrow checker errors (E04xx - Ownership)
-    /// Cannot borrow variable as mutable more than once at a time.
-    DoubleMutableBorrow {
-        name: String,
-        first_borrow: Span,
-        second_borrow: Span,
-    },
-    /// Cannot borrow variable as mutable while it is also borrowed as immutable.
-    MutableBorrowWhileImmutable {
-        name: String,
-        immutable_borrow: Span,
-        mutable_borrow: Span,
-    },
-    /// Cannot borrow variable as immutable while it is borrowed as mutable.
-    ImmutableBorrowWhileMutable {
-        name: String,
-        mutable_borrow: Span,
-        immutable_borrow: Span,
     },
 }
 
