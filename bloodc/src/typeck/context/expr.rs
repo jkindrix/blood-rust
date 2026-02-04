@@ -7700,8 +7700,8 @@ impl<'a> TypeContext<'a> {
 
     /// Helper: Infer for loop over an owned Vec (consuming iteration).
     ///
-    /// For now, this just errors - consuming iteration requires move semantics.
-    /// Users should use `&vec` or `&mut vec` instead.
+    /// For now, this just errors - iterating over an owned Vec would copy the
+    /// entire Vec under MVS. Users should use `&vec` or `&mut vec` instead.
     fn infer_for_vec_owned(
         &mut self,
         _pattern: &ast::Pattern,

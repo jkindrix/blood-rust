@@ -415,78 +415,53 @@ Test should fail with "cannot infer type" error.
 
 ---
 
-## Feature 9: Borrow Checker (HARD)
+## ~~Feature 9: Borrow Checker~~ (REMOVED)
 
-**Test:** `t06_err_double_mut_borrow.blood`
-**Effort:** ~16 hours
-**Files:** New module `bloodc/src/borrowck/`
+**Status:** REMOVED per ADR-001
 
-### Problem
-```blood
-let mut x: i32 = 10;
-let r1: &mut i32 = &mut x;
-let r2: &mut i32 = &mut x;  // Should fail: x already borrowed
-```
+Blood uses generational references for runtime memory safety instead of
+compile-time borrow checking. The test `t06_err_double_mut_borrow.blood`
+has been deleted as it tested Rust-style semantics that Blood explicitly
+does not implement.
 
-### Required Changes
-
-1. **Create borrow checking pass** that runs on MIR:
-   - Track which places are borrowed and how (shared/mutable)
-   - Detect conflicting borrows
-   - Track borrow lifetimes
-
-2. **Data structures**:
-   ```rust
-   struct BorrowChecker {
-       borrows: HashMap<Place, BorrowInfo>,
-   }
-
-   struct BorrowInfo {
-       kind: BorrowKind,  // Shared or Mutable
-       location: Location,
-       lifetime: LifetimeId,
-   }
-   ```
-
-3. **Rules to enforce**:
-   - No mutable borrow while any borrow exists
-   - No borrow of moved value
-   - Borrows must not outlive borrowed value
-
-4. **Error messages**:
-   ```rust
-   TypeErrorKind::DoubleMutableBorrow { place: String }
-   // E0XXX: cannot borrow `x` as mutable more than once
-   ```
-
-### Verification
-Test should fail with "cannot borrow mutably more than once" error.
+See: `docs/spec/DECISIONS.md` - ADR-001: Use Generational References Instead of Borrow Checking
 
 ---
 
-## Feature 10: Move Semantics Enforcement (HARD)
+## ~~Feature 10: Move Semantics Enforcement~~ (REMOVED)
 
-**Test:** `t06_err_use_after_move.blood`
-**Effort:** ~8 hours
-**Files:** `bloodc/src/typeck/` or new `bloodc/src/movecheck/`
+**Status:** REMOVED per ADR-014
 
-### Problem
-```blood
-let d: Data = Data { value: 42 };
-let a: i32 = consume(d);  // d is moved here
-let b: i32 = consume(d);  // Should fail: d already moved
-```
+Blood uses Mutable Value Semantics (MVS) with copy-by-default, not Rust-style
+move semantics. The test `t06_err_use_after_move.blood` has been deleted.
 
-### Required Changes
+For resource types requiring single-use semantics, Blood provides opt-in
+`linear` and `affine` type qualifiers (see E0801-E0805 linearity errors).
 
-1. **Track moved values** during type checking or as separate pass:
-   ```rust
-   struct MoveChecker {
-       moved: HashSet<LocalId>,
-   }
-   ```
+See: `docs/spec/DECISIONS.md` - ADR-014: Adopt Hybrid Mutable Value Semantics
 
-2. **Mark values as moved** when:
+---
+
+## NOTE: The following was the original Feature 10 content, preserved for reference:
+
+~~**Test:** `t06_err_use_after_move.blood`~~
+~~**Effort:** ~8 hours~~
+
+~~### Problem~~
+~~```blood~~
+~~let d: Data = Data { value: 42 };~~
+~~let a: i32 = consume(d);  // d is moved here~~
+~~let b: i32 = consume(d);  // Should fail: d already moved~~
+~~```~~
+
+Under Blood's MVS, `d` is COPIED into each call, so this code is valid.
+For linear semantics, use: `let d: linear Data = ...`
+
+---
+
+## DELETED Feature 10 Content (was: Move Semantics)
+
+The following content is preserved for historical reference only:
    - Passed by value to function
    - Used in move context (not `Copy` type)
 
@@ -568,12 +543,14 @@ Test should fail with FFI portability error for `usize`.
 ### Significant Effort (4-8 hours each)
 6. **Feature 4: Inline handler syntax** - Parser + lowering
 7. **Feature 6: Method overloading** - Resolution + mangling
-8. **Feature 10: Move semantics** - New pass
 
 ### Major Features (8+ hours each)
-9. **Feature 5: Higher-rank types** - Type system extension
-10. **Feature 9: Borrow checker** - New analysis pass
-11. **Feature 7: User macros** - Full macro system
+8. **Feature 5: Higher-rank types** - Type system extension
+9. **Feature 7: User macros** - Full macro system
+
+### REMOVED (per ADR-001 and ADR-014)
+- ~~Feature 9: Borrow checker~~ - Blood uses generational refs, not borrow checking
+- ~~Feature 10: Move semantics~~ - Blood uses MVS (copy by default), not move semantics
 
 ---
 
