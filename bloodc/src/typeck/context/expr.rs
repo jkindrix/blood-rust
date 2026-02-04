@@ -803,6 +803,11 @@ impl<'a> TypeContext<'a> {
         // Push the handled effect onto the stack
         self.handled_effects.push((effect_id, effect_type_args.clone()));
 
+        // Record the current local ID counter before entering the handler scope.
+        // Any local with ID >= this value was defined inside the handler.
+        // Locals with ID < this value are "captured" from outer scopes.
+        let outer_local_boundary = self.resolver.current_local_id_counter();
+
         // Push a handler scope for the body
         self.resolver.push_scope(ScopeKind::Handler, span);
 
@@ -837,6 +842,12 @@ impl<'a> TypeContext<'a> {
         self.handled_effects.pop();
 
         let body_expr = body_result?;
+
+        // Check for captured linear/affine variables in the handler body.
+        // Inline handlers are deep (multi-shot) by default, meaning the continuation
+        // can be resumed multiple times. Linear/affine values cannot be safely
+        // captured because they could be used multiple times across resumptions.
+        self.check_captured_linearity(&body_expr, outer_local_boundary, &effect_name, span)?;
 
         // Type-check each inline operation handler
         let mut hir_handlers = Vec::new();
@@ -1019,6 +1030,310 @@ impl<'a> TypeContext<'a> {
             .map(|(&var, ty)| (var, ty.clone()))
             .collect();
         self.substitute_type_vars(ty, &subst)
+    }
+
+    /// Check for captured linear/affine variables in a handler body.
+    ///
+    /// Deep (multi-shot) handlers can resume multiple times, which means any
+    /// captured linear or affine values would be used multiple times, violating
+    /// their ownership semantics.
+    ///
+    /// # Arguments
+    /// * `body` - The HIR expression for the handler body
+    /// * `outer_local_boundary` - Local IDs below this are "captured" from outer scopes
+    /// * `effect_name` - Name of the effect (for error messages)
+    /// * `span` - Span for error reporting
+    fn check_captured_linearity(
+        &self,
+        body: &hir::Expr,
+        outer_local_boundary: u32,
+        effect_name: &str,
+        span: Span,
+    ) -> Result<(), Box<TypeError>> {
+        // Collect all local variable references in the body
+        let mut captured_locals = Vec::new();
+        self.collect_local_refs(body, &mut captured_locals);
+
+        // Check each captured local
+        for (local_id, local_ty, local_span) in captured_locals {
+            // Only check locals that were defined before the handler (captured)
+            if local_id.index() < outer_local_boundary {
+                let resolved_ty = self.unifier.resolve(&local_ty);
+
+                if self.is_type_linear(&resolved_ty) {
+                    return Err(Box::new(TypeError::new(
+                        TypeErrorKind::LinearValueInMultiShotHandler {
+                            operation: effect_name.to_string(),
+                            field_name: format!("captured variable (local {})", local_id.index()),
+                            field_type: resolved_ty.to_string(),
+                        },
+                        local_span,
+                    ).with_help(
+                        "linear values must be used exactly once, but deep handlers can \
+                         resume multiple times. Consider restructuring to avoid capturing \
+                         linear values, or use a shallow handler."
+                    )));
+                }
+
+                if self.is_type_affine(&resolved_ty) {
+                    return Err(Box::new(TypeError::new(
+                        TypeErrorKind::AffineValueInMultiShotHandler {
+                            operation: effect_name.to_string(),
+                            field_name: format!("captured variable (local {})", local_id.index()),
+                            field_type: resolved_ty.to_string(),
+                        },
+                        local_span,
+                    ).with_help(
+                        "affine values may be used at most once, but deep handlers can \
+                         resume multiple times. Consider restructuring to avoid capturing \
+                         affine values, or use a shallow handler."
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Collect all local variable references in an HIR expression.
+    /// Returns a list of (LocalId, Type, Span) for each reference.
+    fn collect_local_refs(&self, expr: &hir::Expr, locals: &mut Vec<(hir::LocalId, Type, Span)>) {
+        use hir::ExprKind;
+
+        match &expr.kind {
+            ExprKind::Local(local_id) => {
+                locals.push((*local_id, expr.ty.clone(), expr.span));
+            }
+
+            // Compound expressions - recurse into children
+            ExprKind::Block { stmts, expr: tail } => {
+                for stmt in stmts {
+                    match stmt {
+                        hir::Stmt::Let { init: Some(init), .. } => self.collect_local_refs(init, locals),
+                        hir::Stmt::Let { init: None, .. } => {}
+                        hir::Stmt::Expr(e) => self.collect_local_refs(e, locals),
+                        hir::Stmt::Item(_) => {}
+                    }
+                }
+                if let Some(tail) = tail {
+                    self.collect_local_refs(tail, locals);
+                }
+            }
+
+            ExprKind::If { condition, then_branch, else_branch } => {
+                self.collect_local_refs(condition, locals);
+                self.collect_local_refs(then_branch, locals);
+                if let Some(else_br) = else_branch {
+                    self.collect_local_refs(else_br, locals);
+                }
+            }
+
+            ExprKind::Match { scrutinee, arms } => {
+                self.collect_local_refs(scrutinee, locals);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_local_refs(guard, locals);
+                    }
+                    self.collect_local_refs(&arm.body, locals);
+                }
+            }
+
+            ExprKind::Loop { body, .. } => {
+                self.collect_local_refs(body, locals);
+            }
+
+            ExprKind::While { condition, body, .. } => {
+                self.collect_local_refs(condition, locals);
+                self.collect_local_refs(body, locals);
+            }
+
+            ExprKind::Call { callee, args } => {
+                self.collect_local_refs(callee, locals);
+                for arg in args {
+                    self.collect_local_refs(arg, locals);
+                }
+            }
+
+            ExprKind::MethodCall { receiver, args, .. } => {
+                self.collect_local_refs(receiver, locals);
+                for arg in args {
+                    self.collect_local_refs(arg, locals);
+                }
+            }
+
+            ExprKind::Binary { left, right, .. } => {
+                self.collect_local_refs(left, locals);
+                self.collect_local_refs(right, locals);
+            }
+
+            ExprKind::Unary { operand, .. } => {
+                self.collect_local_refs(operand, locals);
+            }
+
+            ExprKind::Borrow { expr: inner, .. }
+            | ExprKind::AddrOf { expr: inner, .. }
+            | ExprKind::Deref(inner) => {
+                self.collect_local_refs(inner, locals);
+            }
+
+            ExprKind::Field { base, .. } => {
+                self.collect_local_refs(base, locals);
+            }
+
+            ExprKind::Index { base, index } => {
+                self.collect_local_refs(base, locals);
+                self.collect_local_refs(index, locals);
+            }
+
+            ExprKind::Cast { expr: inner, .. } => {
+                self.collect_local_refs(inner, locals);
+            }
+
+            ExprKind::Tuple(exprs) | ExprKind::Array(exprs) | ExprKind::VecLiteral(exprs) => {
+                for e in exprs {
+                    self.collect_local_refs(e, locals);
+                }
+            }
+
+            ExprKind::Repeat { value, .. } => {
+                self.collect_local_refs(value, locals);
+            }
+
+            ExprKind::VecRepeat { value, count } => {
+                self.collect_local_refs(value, locals);
+                self.collect_local_refs(count, locals);
+            }
+
+            ExprKind::Struct { fields, base, .. } => {
+                for field_expr in fields {
+                    self.collect_local_refs(&field_expr.value, locals);
+                }
+                if let Some(b) = base {
+                    self.collect_local_refs(b, locals);
+                }
+            }
+
+            ExprKind::Record { fields } => {
+                for field in fields {
+                    self.collect_local_refs(&field.value, locals);
+                }
+            }
+
+            ExprKind::Variant { fields, .. } => {
+                for e in fields {
+                    self.collect_local_refs(e, locals);
+                }
+            }
+
+            ExprKind::Range { start, end, .. } => {
+                if let Some(s) = start {
+                    self.collect_local_refs(s, locals);
+                }
+                if let Some(e) = end {
+                    self.collect_local_refs(e, locals);
+                }
+            }
+
+            ExprKind::Return(inner) => {
+                if let Some(e) = inner {
+                    self.collect_local_refs(e, locals);
+                }
+            }
+
+            ExprKind::Break { value, .. } => {
+                if let Some(v) = value {
+                    self.collect_local_refs(v, locals);
+                }
+            }
+
+            ExprKind::Assign { target, value } => {
+                self.collect_local_refs(target, locals);
+                self.collect_local_refs(value, locals);
+            }
+
+            ExprKind::Let { init, .. } => {
+                self.collect_local_refs(init, locals);
+            }
+
+            // Closures capture variables - but we can't inspect the body directly
+            // since it's stored separately via body_id. For now, skip closure bodies.
+            ExprKind::Closure { .. } => {}
+
+            ExprKind::Perform { args, .. } => {
+                for arg in args {
+                    self.collect_local_refs(arg, locals);
+                }
+            }
+
+            ExprKind::Resume { value } => {
+                if let Some(v) = value {
+                    self.collect_local_refs(v, locals);
+                }
+            }
+
+            ExprKind::Handle { body, handler_instance, .. } => {
+                self.collect_local_refs(body, locals);
+                self.collect_local_refs(handler_instance, locals);
+            }
+
+            ExprKind::InlineHandle { body, handlers } => {
+                self.collect_local_refs(body, locals);
+                for handler in handlers {
+                    self.collect_local_refs(&handler.body, locals);
+                }
+            }
+
+            ExprKind::Region { stmts, expr, .. } => {
+                for stmt in stmts {
+                    match stmt {
+                        hir::Stmt::Let { init: Some(init), .. } => self.collect_local_refs(init, locals),
+                        hir::Stmt::Let { init: None, .. } => {}
+                        hir::Stmt::Expr(e) => self.collect_local_refs(e, locals),
+                        hir::Stmt::Item(_) => {}
+                    }
+                }
+                if let Some(e) = expr {
+                    self.collect_local_refs(e, locals);
+                }
+            }
+
+            ExprKind::Unsafe(inner) | ExprKind::Dbg(inner) => {
+                self.collect_local_refs(inner, locals);
+            }
+
+            ExprKind::Assert { condition, message } => {
+                self.collect_local_refs(condition, locals);
+                if let Some(msg) = message {
+                    self.collect_local_refs(msg, locals);
+                }
+            }
+
+            ExprKind::MacroExpansion { args, named_args, .. } => {
+                for arg in args {
+                    self.collect_local_refs(arg, locals);
+                }
+                for (_, arg) in named_args {
+                    self.collect_local_refs(arg, locals);
+                }
+            }
+
+            ExprKind::SliceLen(inner) | ExprKind::VecLen(inner) => {
+                self.collect_local_refs(inner, locals);
+            }
+
+            ExprKind::ArrayToSlice { expr: inner, .. } => {
+                self.collect_local_refs(inner, locals);
+            }
+
+            // Leaf expressions - no recursion needed
+            ExprKind::Literal(_)
+            | ExprKind::Def(_)
+            | ExprKind::ConstParam(_)
+            | ExprKind::Continue { .. }
+            | ExprKind::Default
+            | ExprKind::MethodFamily { .. }
+            | ExprKind::Error => {}
+        }
     }
 
     /// Infer type of a perform expression.

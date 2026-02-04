@@ -1,5 +1,5 @@
-// XFAIL: affine value tracking in multi-shot handlers not yet enforced
-// Test: affine value captured in deep (multi-shot) handler should fail (E0310)
+// COMPILE_FAIL: E0310
+// Test: affine value captured in deep (multi-shot) handler should fail
 effect Choice {
     op choose() -> bool;
 }

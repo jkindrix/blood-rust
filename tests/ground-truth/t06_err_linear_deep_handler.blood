@@ -1,19 +1,15 @@
-// XFAIL: linear state in deep handlers not yet checked
-// Test: linear state captured in a deep handler should fail
+// COMPILE_FAIL: E0304
+// Test: linear value captured in a deep handler should fail
 effect Counter {
     op inc() -> ();
 }
 
 fn main() -> i32 {
-    let mut count: i32 = 0;
-    handle {
+    let x: @linear i32 = 42;
+    with Counter {
+        op inc() -> () { resume(()) }
+    } do {
         perform Counter.inc();
-        perform Counter.inc();
-        count
-    } with Counter {
-        op inc(resume) -> i32 {
-            count = count + 1;
-            resume(())
-        }
+        x
     }
 }

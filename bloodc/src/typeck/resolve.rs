@@ -165,6 +165,12 @@ impl<'a> Resolver<'a> {
         id
     }
 
+    /// Get the current local ID counter without incrementing.
+    /// This returns the index that the NEXT allocated local will have.
+    pub fn current_local_id_counter(&self) -> u32 {
+        self.next_local_id
+    }
+
     /// Reset local ID counter (for new function).
     pub fn reset_local_ids(&mut self) {
         self.next_local_id = 0;
