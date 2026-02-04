@@ -751,11 +751,22 @@ impl<'src> Parser<'src> {
                 }
             }
 
+            // Handle keyword: check for inline handle syntax `handle { body } with Effect { ops... }`
+            TokenKind::Handle => {
+                // If followed by `{`, this is inline handle syntax
+                if self.check_next(TokenKind::LBrace) {
+                    self.parse_inline_handle_expr()
+                } else {
+                    // Otherwise treat as identifier (e.g., variable named `handle`)
+                    self.parse_path_or_struct_expr()
+                }
+            }
+
             // Identifiers and paths (including contextual keywords usable as identifiers)
-            // Note: Default and Handle can be identifiers in names (fn default, field handle)
+            // Note: Default can be identifier in names (fn default, field default)
             // They are parsed as identifiers/paths first, not as special expressions.
             TokenKind::Ident | TokenKind::TypeIdent | TokenKind::SelfLower | TokenKind::SelfUpper
-            | TokenKind::Handle | TokenKind::Default => {
+            | TokenKind::Default => {
                 self.parse_path_or_struct_expr()
             }
 
@@ -852,7 +863,7 @@ impl<'src> Parser<'src> {
 
             // Effect expressions
             TokenKind::Try => self.parse_try_with_expr(),
-            TokenKind::With => self.parse_with_handle_expr(),
+            TokenKind::With => self.parse_with_expr(),
             TokenKind::Perform => self.parse_perform_expr(),
             TokenKind::Resume => {
                 self.advance();
@@ -1957,12 +1968,92 @@ impl<'src> Parser<'src> {
         params
     }
 
-    /// Parse a with-handle expression.
-    fn parse_with_handle_expr(&mut self) -> Expr {
+    /// Parse a with expression - either named handler or inline with-do.
+    ///
+    /// Two syntaxes:
+    /// - Named handler: `with handler_expr handle { body }`
+    /// - Inline with-do: `with Effect { op name() -> T { } } do { body }`
+    fn parse_with_expr(&mut self) -> Expr {
         let start = self.current.span;
         self.advance(); // consume 'with'
 
-        let handler = self.parse_expr();
+        // Lookahead to distinguish between named handler and inline with-do:
+        // - Inline with-do: `with TypePath { op ... } do { body }`
+        // - Named handler: `with expr handle { body }`
+        //
+        // If we see TypePath followed by `{` and then `op`, it's inline with-do.
+        // We'll parse as type path first, then check.
+
+        // Try parsing as type path
+        let type_path = self.parse_type_path();
+
+        // Check if this is inline with-do syntax:
+        // After type path, if we see `{` followed by `op` keyword, it's inline
+        if self.check(TokenKind::LBrace) && self.check_next(TokenKind::Op) {
+            // Inline with-do syntax: `with Effect { ops... } do { body }`
+            let operations = self.parse_inline_handler_ops();
+
+            // Expect 'do' keyword
+            self.expect(TokenKind::Do);
+
+            // Parse body
+            let body = if self.check(TokenKind::LBrace) {
+                let block = self.parse_block();
+                Expr {
+                    span: block.span,
+                    kind: ExprKind::Block(block),
+                }
+            } else {
+                self.parse_expr()
+            };
+
+            return Expr {
+                kind: ExprKind::InlineWithDo {
+                    effect: type_path,
+                    operations,
+                    body: Box::new(body),
+                },
+                span: start.merge(self.previous.span),
+            };
+        }
+
+        // Not inline with-do syntax, treat as named handler: `with handler_expr handle { body }`
+        // The type_path we parsed might be the start of an expression (e.g., a handler name).
+        // Convert the type path to an expression and continue parsing.
+        let handler_expr = if type_path.segments.is_empty() {
+            // No path was parsed, parse as expression
+            self.parse_expr()
+        } else {
+            // Convert type path to expression path
+            let expr_path = crate::ast::ExprPath {
+                segments: type_path.segments.iter().map(|seg| {
+                    crate::ast::ExprPathSegment {
+                        name: seg.name.clone(),
+                        args: seg.args.as_ref().map(|args| crate::ast::TypeArgs {
+                            args: args.args.clone(),
+                            span: args.span,
+                        }),
+                    }
+                }).collect(),
+                span: type_path.span,
+            };
+
+            // Start with the path as expression
+            let mut handler = Expr {
+                kind: ExprKind::Path(expr_path),
+                span: type_path.span,
+            };
+
+            // Continue parsing additional postfix operations (e.g., struct literals, calls)
+            // But for named handlers, we usually just have a simple path or call
+            // Check for struct literal syntax: `Handler { state: value }`
+            if self.check(TokenKind::LBrace) && !self.check_next(TokenKind::Op) {
+                // Could be a struct literal
+                handler = self.parse_struct_literal(Some(type_path));
+            }
+
+            handler
+        };
 
         self.expect(TokenKind::Handle);
 
@@ -1978,11 +2069,106 @@ impl<'src> Parser<'src> {
 
         Expr {
             kind: ExprKind::WithHandle {
-                handler: Box::new(handler),
+                handler: Box::new(handler_expr),
                 body: Box::new(body),
             },
             span: start.merge(self.previous.span),
         }
+    }
+
+    /// Parse an inline handle expression: `handle { body } with Effect { ops... }`
+    fn parse_inline_handle_expr(&mut self) -> Expr {
+        let start = self.current.span;
+        self.advance(); // consume 'handle'
+
+        // Parse the body block
+        let body = if self.check(TokenKind::LBrace) {
+            let block = self.parse_block();
+            Expr {
+                span: block.span,
+                kind: ExprKind::Block(block),
+            }
+        } else {
+            self.parse_expr()
+        };
+
+        // Expect 'with'
+        self.expect(TokenKind::With);
+
+        // Parse effect path
+        let effect = self.parse_type_path();
+
+        // Parse inline handler operations
+        let operations = self.parse_inline_handler_ops();
+
+        Expr {
+            kind: ExprKind::InlineHandle {
+                body: Box::new(body),
+                effect,
+                operations,
+            },
+            span: start.merge(self.previous.span),
+        }
+    }
+
+    /// Parse inline handler operations: `{ op name(params) -> T { body }, ... }`
+    fn parse_inline_handler_ops(&mut self) -> Vec<crate::ast::InlineHandlerOp> {
+        let mut operations = Vec::new();
+
+        self.expect(TokenKind::LBrace);
+
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            let op_start = self.current.span;
+
+            // Expect 'op' keyword
+            self.expect(TokenKind::Op);
+
+            // Parse operation name
+            let name = if self.check_ident() || self.check(TokenKind::TypeIdent) {
+                self.advance();
+                self.spanned_symbol()
+            } else {
+                self.error_expected("operation name");
+                Spanned::new(self.intern(""), self.current.span)
+            };
+
+            // Parse parameters
+            self.expect(TokenKind::LParen);
+            let mut params = Vec::new();
+            while !self.check(TokenKind::RParen) && !self.is_at_end() {
+                params.push(self.parse_pattern());
+                if !self.try_consume(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen);
+
+            // Parse optional return type
+            let return_type = if self.try_consume(TokenKind::Arrow) {
+                Some(self.parse_type())
+            } else {
+                None
+            };
+
+            // Parse body block
+            let body = self.parse_block();
+
+            operations.push(crate::ast::InlineHandlerOp {
+                name,
+                params,
+                return_type,
+                body,
+                span: op_start.merge(self.previous.span),
+            });
+
+            // Consume optional comma/semicolon between operations
+            self.try_consume(TokenKind::Comma);
+            self.try_consume(TokenKind::Semi);
+        }
+
+        self.expect(TokenKind::RBrace);
+
+        operations
     }
 
     /// Parse a try-with expression: `try { body } with { handlers }`

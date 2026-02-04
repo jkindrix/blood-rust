@@ -10,8 +10,8 @@ impl<'src> Parser<'src> {
     pub fn parse_type(&mut self) -> Type {
         let start = self.current.span;
 
-        // Check for ownership qualifiers
-        if self.try_consume(TokenKind::Linear) {
+        // Check for ownership qualifiers (both with and without @ prefix)
+        if self.try_consume(TokenKind::Linear) || self.try_consume(TokenKind::AtLinear) {
             let inner = self.parse_type();
             return Type {
                 kind: TypeKind::Ownership {
@@ -22,7 +22,7 @@ impl<'src> Parser<'src> {
             };
         }
 
-        if self.try_consume(TokenKind::Affine) {
+        if self.try_consume(TokenKind::Affine) || self.try_consume(TokenKind::AtAffine) {
             let inner = self.parse_type();
             return Type {
                 kind: TypeKind::Ownership {

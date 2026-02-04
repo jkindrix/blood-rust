@@ -224,6 +224,13 @@ impl<'a> TypeContext<'a> {
             ast::ExprKind::MacroCall { path, kind } => {
                 self.infer_macro_call(path, kind, expr.span)
             }
+            ast::ExprKind::InlineHandle { body, effect, operations } => {
+                self.infer_inline_handle(body, effect, operations, expr.span)
+            }
+            ast::ExprKind::InlineWithDo { effect, operations, body } => {
+                // InlineWithDo is semantically equivalent to InlineHandle, just different syntax
+                self.infer_inline_handle(body, effect, operations, expr.span)
+            }
         }
     }
 
@@ -696,6 +703,299 @@ impl<'a> TypeContext<'a> {
                 params: param_locals,
                 param_types: param_type_vec,
                 return_type,
+                body: handler_body,
+            });
+        }
+
+        let resolved_ty = self.unifier.resolve(&expected);
+
+        Ok(hir::Expr {
+            kind: hir::ExprKind::InlineHandle {
+                body: Box::new(body_expr),
+                handlers: hir_handlers,
+            },
+            ty: resolved_ty,
+            span,
+        })
+    }
+
+    /// Infer type of an inline handle expression.
+    ///
+    /// Two syntaxes are supported:
+    /// - `handle { body } with Effect { op name(params) -> T { handler_body } }`
+    /// - `with Effect { op name(params) -> T { handler_body } } do { body }`
+    fn infer_inline_handle(
+        &mut self,
+        body: &ast::Expr,
+        effect_path: &ast::TypePath,
+        operations: &[ast::InlineHandlerOp],
+        span: Span,
+    ) -> Result<hir::Expr, Box<TypeError>> {
+        // Resolve the effect from the path
+        let effect_name = if let Some(first_seg) = effect_path.segments.first() {
+            self.symbol_to_string(first_seg.name.node)
+        } else {
+            return Err(Box::new(TypeError::new(
+                TypeErrorKind::UnsupportedFeature {
+                    feature: "Effect path must have at least one segment".into(),
+                },
+                span,
+            )));
+        };
+
+        // Look up the effect definition
+        let effect_id = self.effect_defs.iter()
+            .find(|(_, info)| info.name == effect_name)
+            .map(|(def_id, _)| *def_id);
+
+        let effect_id = match effect_id {
+            Some(id) => id,
+            None => {
+                return Err(Box::new(TypeError::new(
+                    TypeErrorKind::NotAnEffect { name: effect_name },
+                    span,
+                )));
+            }
+        };
+
+        let effect_info = match self.effect_defs.get(&effect_id).cloned() {
+            Some(info) => info,
+            None => {
+                return Err(Box::new(TypeError::new(
+                    TypeErrorKind::NotAnEffect { name: effect_name },
+                    span,
+                )));
+            }
+        };
+
+        // Extract type arguments from the effect, or create fresh inference variables
+        let effect_type_args: Vec<Type> = if let Some(first_seg) = effect_path.segments.first() {
+            if let Some(ref args) = first_seg.args {
+                let explicit_args: Vec<Type> = args.args.iter()
+                    .filter_map(|arg| {
+                        if let ast::TypeArg::Type(ty) = arg {
+                            self.ast_type_to_hir_type(ty).ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !explicit_args.is_empty() {
+                    explicit_args
+                } else if !effect_info.generics.is_empty() {
+                    effect_info.generics.iter()
+                        .map(|_| self.unifier.fresh_var())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else if !effect_info.generics.is_empty() {
+                effect_info.generics.iter()
+                    .map(|_| self.unifier.fresh_var())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Push the handled effect onto the stack
+        self.handled_effects.push((effect_id, effect_type_args.clone()));
+
+        // Push a handler scope for the body
+        self.resolver.push_scope(ScopeKind::Handler, span);
+
+        // Register the handled effect's operations in this scope
+        for op_info in &effect_info.operations {
+            self.resolver.current_scope_mut()
+                .bindings
+                .insert(op_info.name.clone(), Binding::Def(op_info.def_id));
+        }
+
+        // Type-check the body
+        let expected = self.unifier.fresh_var();
+        let body_block = match &body.kind {
+            ast::ExprKind::Block(block) => block,
+            _ => {
+                self.resolver.pop_scope();
+                self.handled_effects.pop();
+                return Err(Box::new(TypeError::new(
+                    TypeErrorKind::UnsupportedFeature {
+                        feature: "Handle body must be a block".into(),
+                    },
+                    body.span,
+                )));
+            }
+        };
+        let body_result = self.check_block(body_block, &expected);
+
+        // Pop handler scope
+        self.resolver.pop_scope();
+
+        // Pop handled effect
+        self.handled_effects.pop();
+
+        let body_expr = body_result?;
+
+        // Type-check each inline operation handler
+        let mut hir_handlers = Vec::new();
+
+        for op in operations {
+            let op_name_str = self.symbol_to_string(op.name.node);
+
+            // Find this operation in the effect
+            let op_info = match effect_info.operations.iter().find(|o| o.name == op_name_str) {
+                Some(info) => info.clone(),
+                None => {
+                    return Err(Box::new(TypeError::new(
+                        TypeErrorKind::UnsupportedFeature {
+                            feature: format!("Unknown operation `{}` on effect `{}`", op_name_str, effect_name),
+                        },
+                        op.name.span,
+                    )));
+                }
+            };
+
+            // Substitute type parameters in the operation's types
+            let param_types: Vec<Type> = op_info.params.iter()
+                .map(|ty| {
+                    if !effect_type_args.is_empty() {
+                        self.substitute_effect_type_args(ty, &effect_info.generics, &effect_type_args)
+                    } else {
+                        ty.clone()
+                    }
+                })
+                .collect();
+
+            // The effect operation's return type (used for resume's parameter)
+            let effect_op_return_type = if !effect_type_args.is_empty() {
+                self.substitute_effect_type_args(&op_info.return_ty, &effect_info.generics, &effect_type_args)
+            } else {
+                op_info.return_ty.clone()
+            };
+
+            // The inline handler can declare an explicit return type for documentation/checking
+            // but this doesn't override the effect operation's return type for resume purposes
+            let _handler_declared_return_type = if let Some(ref ret_ty) = op.return_type {
+                Some(self.ast_type_to_hir_type(ret_ty)?)
+            } else {
+                None
+            };
+
+            // Create scope for the handler
+            self.resolver.push_scope(ScopeKind::Handler, op.span);
+
+            // Bind operation parameters
+            let mut param_locals = Vec::new();
+            let mut param_type_vec = Vec::new();
+
+            for (idx, pattern) in op.params.iter().enumerate() {
+                match &pattern.kind {
+                    ast::PatternKind::Ident { name, .. } => {
+                        let local_name = self.symbol_to_string(name.node);
+
+                        // Check if this is the `resume` parameter
+                        if local_name == "resume" {
+                            // `resume` is special - it's a continuation, not a regular parameter
+                            // We bind it in scope for resolution but don't add to param_locals
+                            // The resume type is based on the effect operation's return type
+                            let resume_id = self.resolver.next_local_id();
+                            let resume_ty = Type::new(hir::TypeKind::Fn {
+                                params: vec![effect_op_return_type.clone()],
+                                ret: expected.clone(),
+                                effects: Vec::new(),
+                                const_args: Vec::new(),
+                            });
+                            self.locals.push(hir::Local {
+                                id: resume_id,
+                                name: Some(local_name.clone()),
+                                ty: resume_ty.clone(),
+                                mutable: false,
+                                span: pattern.span,
+                            });
+                            self.resolver.current_scope_mut()
+                                .bindings
+                                .insert(local_name, Binding::Local {
+                                    local_id: resume_id,
+                                    ty: resume_ty,
+                                    mutable: false,
+                                    span: pattern.span,
+                                });
+                        } else {
+                            // Regular parameter
+                            let param_ty = param_types.get(idx).cloned()
+                                .unwrap_or_else(|| self.unifier.fresh_var());
+                            let local_id = self.resolver.next_local_id();
+                            self.locals.push(hir::Local {
+                                id: local_id,
+                                name: Some(local_name.clone()),
+                                ty: param_ty.clone(),
+                                mutable: false,
+                                span: pattern.span,
+                            });
+                            self.resolver.current_scope_mut()
+                                .bindings
+                                .insert(local_name, Binding::Local {
+                                    local_id,
+                                    ty: param_ty.clone(),
+                                    mutable: false,
+                                    span: pattern.span,
+                                });
+                            param_locals.push(local_id);
+                            param_type_vec.push(param_ty);
+                        }
+                    }
+                    ast::PatternKind::Wildcard => {
+                        let param_ty = param_types.get(idx).cloned()
+                            .unwrap_or_else(|| self.unifier.fresh_var());
+                        let local_id = self.resolver.next_local_id();
+                        self.locals.push(hir::Local {
+                            id: local_id,
+                            name: Some(format!("_param_{}", idx)),
+                            ty: param_ty.clone(),
+                            mutable: false,
+                            span: pattern.span,
+                        });
+                        param_locals.push(local_id);
+                        param_type_vec.push(param_ty);
+                    }
+                    _ => {
+                        self.resolver.pop_scope();
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::UnsupportedFeature {
+                                feature: format!(
+                                    "pattern kind {:?} in inline handler parameters",
+                                    std::mem::discriminant(&pattern.kind)
+                                ),
+                            },
+                            pattern.span,
+                        )));
+                    }
+                }
+            }
+
+            // Set up resume type for this handler (from effect operation's return type)
+            let prev_resume_type = self.current_resume_type.take();
+            self.current_resume_type = Some(effect_op_return_type.clone());
+
+            // Type-check the handler body
+            let handler_body_result = self.check_block(&op.body, &expected);
+
+            // Restore resume type
+            self.current_resume_type = prev_resume_type;
+
+            // Pop handler scope
+            self.resolver.pop_scope();
+
+            let handler_body = handler_body_result?;
+
+            hir_handlers.push(hir::InlineOpHandler {
+                effect_id,
+                op_name: op_name_str,
+                params: param_locals,
+                param_types: param_type_vec,
+                return_type: effect_op_return_type,
                 body: handler_body,
             });
         }

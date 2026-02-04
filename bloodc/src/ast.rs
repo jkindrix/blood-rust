@@ -446,6 +446,22 @@ pub struct TryWithHandler {
     pub span: Span,
 }
 
+/// Inline handler operation definition.
+/// Used in inline handler expressions like `handle { } with Effect { op name(resume) -> T { } }`
+/// Example: `op choose() -> bool { resume(true) }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineHandlerOp {
+    /// The operation name (e.g., `choose`)
+    pub name: Spanned<Symbol>,
+    /// Parameter patterns including optional `resume` parameter
+    pub params: Vec<Pattern>,
+    /// Optional explicit return type
+    pub return_type: Option<Type>,
+    /// The operation body
+    pub body: Block,
+    pub span: Span,
+}
+
 // ============================================================
 // Trait and Implementation
 // ============================================================
@@ -1130,6 +1146,28 @@ pub enum ExprKind {
     TryWith {
         body: Block,
         handlers: Vec<TryWithHandler>,
+    },
+
+    /// Inline handle expression: `handle { body } with Effect { ops... }`
+    /// Provides inline handler definitions without a named handler declaration.
+    InlineHandle {
+        /// The body expression to execute with the handler
+        body: Box<Expr>,
+        /// The effect being handled
+        effect: TypePath,
+        /// Inline operation definitions
+        operations: Vec<InlineHandlerOp>,
+    },
+
+    /// Inline with-do expression: `with Effect { ops... } do { body }`
+    /// Alternative syntax for inline handlers with effect first.
+    InlineWithDo {
+        /// The effect being handled
+        effect: TypePath,
+        /// Inline operation definitions
+        operations: Vec<InlineHandlerOp>,
+        /// The body expression to execute with the handler
+        body: Box<Expr>,
     },
 
     /// Unsafe block: `@unsafe { }`

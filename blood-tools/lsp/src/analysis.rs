@@ -683,6 +683,18 @@ impl SemanticAnalyzer {
                     self.collect_block_symbols(&handler.body, source, interner, symbols, symbol_at_offset);
                 }
             }
+            ExprKind::InlineHandle { body, operations, .. } => {
+                self.collect_expr_symbols(body, source, interner, symbols, symbol_at_offset);
+                for op in operations {
+                    self.collect_block_symbols(&op.body, source, interner, symbols, symbol_at_offset);
+                }
+            }
+            ExprKind::InlineWithDo { body, operations, .. } => {
+                self.collect_expr_symbols(body, source, interner, symbols, symbol_at_offset);
+                for op in operations {
+                    self.collect_block_symbols(&op.body, source, interner, symbols, symbol_at_offset);
+                }
+            }
             ExprKind::Binary { left, right, .. } => {
                 self.collect_expr_symbols(left, source, interner, symbols, symbol_at_offset);
                 self.collect_expr_symbols(right, source, interner, symbols, symbol_at_offset);

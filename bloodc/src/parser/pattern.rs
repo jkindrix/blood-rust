@@ -216,8 +216,9 @@ impl<'src> Parser<'src> {
 
             // Identifier, path, struct, or tuple struct pattern
             // Also include contextual keywords that can be used as identifiers
+            // Note: Resume is allowed as an identifier in handler operation parameters
             TokenKind::Ident | TokenKind::TypeIdent | TokenKind::SelfLower | TokenKind::SelfUpper
-            | TokenKind::Default | TokenKind::Handle => {
+            | TokenKind::Default | TokenKind::Handle | TokenKind::Resume => {
                 self.parse_ident_or_path_pattern()
             }
 

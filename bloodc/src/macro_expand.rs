@@ -391,6 +391,18 @@ impl MacroExpander {
                     self.expand_block(&mut handler.body);
                 }
             }
+            ExprKind::InlineHandle { body, operations, .. } => {
+                self.expand_expr(body);
+                for op in operations {
+                    self.expand_block(&mut op.body);
+                }
+            }
+            ExprKind::InlineWithDo { body, operations, .. } => {
+                self.expand_expr(body);
+                for op in operations {
+                    self.expand_block(&mut op.body);
+                }
+            }
             ExprKind::Record { fields, base, .. } => {
                 for field in fields {
                     if let Some(ref mut value) = field.value {
