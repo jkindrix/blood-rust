@@ -361,6 +361,78 @@ impl<'a> Resolver<'a> {
         Ok(def_id)
     }
 
+    /// Define an associated function (method) in the current scope, supporting multiple dispatch.
+    ///
+    /// Like `define_function`, this allows multiple methods with the same qualified name
+    /// but different signatures. The signature check happens at the call site in collect.rs.
+    pub fn define_assoc_function(
+        &mut self,
+        name: String,
+        span: Span,
+        visibility: Visibility,
+    ) -> Result<DefId, Box<TypeError>> {
+        let def_id = self.next_def_id();
+
+        self.def_info.insert(def_id, DefInfo {
+            kind: DefKind::AssocFn,
+            name: name.clone(),
+            span,
+            ty: None,
+            parent: None,
+            visibility,
+        });
+
+        // Check if a binding with this name already exists
+        if let Some(existing) = self.current_scope().bindings.get(&name).cloned() {
+            match existing {
+                Binding::Def(existing_def_id) => {
+                    // Check if the existing definition is an associated function
+                    if let Some(info) = self.def_info.get(&existing_def_id) {
+                        if info.kind == DefKind::AssocFn {
+                            // Convert to method family with both functions
+                            self.current_scope_mut()
+                                .bindings
+                                .insert(name.clone(), Binding::Methods(vec![existing_def_id, def_id]));
+                        } else {
+                            // Non-function with same name - error
+                            return Err(Box::new(TypeError::new(
+                                TypeErrorKind::DuplicateDefinition { name },
+                                span,
+                            )));
+                        }
+                    } else {
+                        // Shouldn't happen - def_id without info
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::DuplicateDefinition { name },
+                            span,
+                        )));
+                    }
+                }
+                Binding::Methods(mut methods) => {
+                    // Already a method family, add to it
+                    methods.push(def_id);
+                    self.current_scope_mut()
+                        .bindings
+                        .insert(name.clone(), Binding::Methods(methods));
+                }
+                Binding::Local { .. } => {
+                    // Can't define function with same name as local
+                    return Err(Box::new(TypeError::new(
+                        TypeErrorKind::DuplicateDefinition { name },
+                        span,
+                    )));
+                }
+            }
+        } else {
+            // No existing binding - create new single definition
+            self.current_scope_mut()
+                .bindings
+                .insert(name.clone(), Binding::Def(def_id));
+        }
+
+        Ok(def_id)
+    }
+
     /// Define a type in the current scope.
     pub fn define_type(
         &mut self,

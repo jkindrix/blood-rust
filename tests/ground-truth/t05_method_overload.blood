@@ -1,4 +1,3 @@
-// XFAIL: method overloading not yet implemented
 // Test: multiple dispatch and method overloading
 struct Printer {}
 

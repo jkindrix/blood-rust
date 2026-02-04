@@ -510,6 +510,68 @@ impl<'a> TypeContext<'a> {
         }
     }
 
+    /// Check if two types are compatible for method overload resolution.
+    ///
+    /// This is used to distinguish between overloaded methods with the same name
+    /// but different parameter types. It's more lenient than exact equality
+    /// (allows inference variables) but stricter than unification (doesn't modify state).
+    ///
+    /// Returns true if `arg_ty` could match `param_ty` for overload selection.
+    pub(crate) fn types_compatible_for_overload(&self, arg_ty: &Type, param_ty: &Type) -> bool {
+        // Resolve any inference variables to their current bindings
+        let arg_resolved = self.unifier.resolve(arg_ty);
+        let param_resolved = self.unifier.resolve(param_ty);
+
+        // If either is an unresolved inference variable, consider it compatible
+        // (it could potentially unify with anything)
+        if matches!(arg_resolved.kind(), TypeKind::Infer(_)) {
+            return true;
+        }
+        if matches!(param_resolved.kind(), TypeKind::Infer(_)) {
+            return true;
+        }
+
+        // Type parameters are compatible (generics can match anything)
+        if matches!(param_resolved.kind(), TypeKind::Param(_)) {
+            return true;
+        }
+
+        // For concrete types, check structural compatibility
+        match (arg_resolved.kind(), param_resolved.kind()) {
+            // Primitives must match exactly
+            (TypeKind::Primitive(a), TypeKind::Primitive(b)) => a == b,
+
+            // ADTs must have the same def_id (type args are checked separately during unification)
+            (TypeKind::Adt { def_id: a_id, .. }, TypeKind::Adt { def_id: b_id, .. }) => a_id == b_id,
+
+            // References: check inner type compatibility
+            (TypeKind::Ref { inner: a_inner, .. }, TypeKind::Ref { inner: b_inner, .. }) => {
+                self.types_compatible_for_overload(a_inner, b_inner)
+            }
+
+            // Tuples: check element compatibility
+            (TypeKind::Tuple(a_elems), TypeKind::Tuple(b_elems)) => {
+                a_elems.len() == b_elems.len()
+                    && a_elems.iter().zip(b_elems.iter()).all(|(a, b)| {
+                        self.types_compatible_for_overload(a, b)
+                    })
+            }
+
+            // Function types
+            (TypeKind::Fn { params: a_params, ret: a_ret, .. },
+             TypeKind::Fn { params: b_params, ret: b_ret, .. }) => {
+                a_params.len() == b_params.len()
+                    && a_params.iter().zip(b_params.iter()).all(|(a, b)| {
+                        self.types_compatible_for_overload(a, b)
+                    })
+                    && self.types_compatible_for_overload(a_ret, b_ret)
+            }
+
+            // Other type kinds must match exactly for now
+            _ => arg_resolved.kind() == param_resolved.kind(),
+        }
+    }
+
     /// Check if a type implements Fn (callable by shared reference).
     ///
     /// Fn types:

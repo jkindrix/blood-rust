@@ -18,6 +18,7 @@ use super::{
 };
 use super::super::error::{TypeError, TypeErrorKind};
 use super::super::resolve::{Binding, ScopeKind};
+use crate::ast::Visibility;
 use crate::typeck::const_eval;
 
 impl<'a> TypeContext<'a> {
@@ -2249,11 +2250,11 @@ impl<'a> TypeContext<'a> {
                     // Create a qualified name for the method: Type::method_name
                     let qualified_name = format!("{}::{}", self.type_to_string(&self_ty), method_name);
 
-                    // Register the method as an associated function
-                    let method_def_id = self.resolver.define_item(
+                    // Register the method as an associated function, supporting method overloading
+                    let method_def_id = self.resolver.define_assoc_function(
                         qualified_name.clone(),
-                        hir::DefKind::AssocFn,
                         func.span,
+                        Visibility::Public,
                     )?;
 
                     // Check if this is a static method (no self parameter)
@@ -2320,6 +2321,28 @@ impl<'a> TypeContext<'a> {
                     };
 
                     self.fn_sigs.insert(method_def_id, sig);
+
+                    // Check for duplicate method signatures (same name AND same parameter types).
+                    // Multiple dispatch allows same-name methods with different signatures,
+                    // but identical signatures are an error.
+                    if let Some(Binding::Methods(ref method_ids)) = self.resolver.current_scope().bindings.get(&qualified_name) {
+                        for &other_id in method_ids {
+                            if other_id == method_def_id {
+                                continue;
+                            }
+                            if let Some(other_sig) = self.fn_sigs.get(&other_id) {
+                                let current_sig = &self.fn_sigs[&method_def_id];
+                                if other_sig.inputs.len() == current_sig.inputs.len()
+                                    && other_sig.inputs.iter().zip(current_sig.inputs.iter()).all(|(a, b)| a == b)
+                                {
+                                    return Err(Box::new(TypeError::new(
+                                        TypeErrorKind::DuplicateDefinition { name: qualified_name },
+                                        func.span,
+                                    )));
+                                }
+                            }
+                        }
+                    }
 
                     // Queue method body for type-checking
                     // Include module context if this impl is inside a module

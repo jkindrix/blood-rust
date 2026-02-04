@@ -3229,11 +3229,11 @@ impl<'a> TypeContext<'a> {
         &mut self,
         receiver_ty: &Type,
         method_name: &str,
-        _args: &[hir::Expr],
+        args: &[hir::Expr],
         span: Span,
     ) -> Result<MethodResolution, Box<TypeError>> {
         // Try to find the method on the receiver type directly
-        if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(receiver_ty, method_name) {
+        if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(receiver_ty, method_name, args) {
             // Check if we need to auto-ref the receiver
             let needs_auto_ref = if let Some(ref param_ty) = first_param {
                 // If first param is a reference and receiver is not, we need auto-ref
@@ -3248,7 +3248,7 @@ impl<'a> TypeContext<'a> {
         let mut deref_ty = receiver_ty.clone();
         while let TypeKind::Ref { inner, .. } = deref_ty.kind() {
             let inner_resolved = self.unifier.resolve(inner);
-            if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(&inner_resolved, method_name) {
+            if let Some((def_id, ret_ty, first_param, impl_generics, method_generics)) = self.find_method_for_type(&inner_resolved, method_name, args) {
                 // When auto-deref is used, we don't need auto-ref
                 return Ok((def_id, ret_ty, first_param, impl_generics, method_generics, false));
             }
@@ -3261,7 +3261,8 @@ impl<'a> TypeContext<'a> {
 
     /// Find a method for a specific type by searching impl blocks.
     /// Returns (method_def_id, substituted return type, substituted first param type, impl generics, method generics).
-    pub(crate) fn find_method_for_type(&self, ty: &Type, method_name: &str) -> MethodLookup {
+    /// Supports method overloading by matching argument types when multiple methods share the same name.
+    pub(crate) fn find_method_for_type(&self, ty: &Type, method_name: &str, args: &[hir::Expr]) -> MethodLookup {
         // First, look for inherent impl methods (impl blocks without trait_ref)
         for impl_block in &self.impl_blocks {
             if impl_block.trait_ref.is_some() {
@@ -3281,12 +3282,56 @@ impl<'a> TypeContext<'a> {
                 }
             };
 
-            for method in &impl_block.methods {
-                if method.name == method_name {
-                    if let Some(sig) = self.fn_sigs.get(&method.def_id) {
-                        // Apply substitution to return type
+            // Collect all methods with matching name for overload resolution
+            let matching_methods: Vec<_> = impl_block.methods.iter()
+                .filter(|m| m.name == method_name)
+                .collect();
+
+            // If only one method, return it (no overload resolution needed)
+            if matching_methods.len() == 1 {
+                let method = matching_methods[0];
+                if let Some(sig) = self.fn_sigs.get(&method.def_id) {
+                    let subst_output = self.substitute_type_vars(&sig.output, &subst);
+                    let first_param = sig.inputs.first().map(|p| self.substitute_type_vars(p, &subst));
+                    return Some((
+                        method.def_id,
+                        subst_output,
+                        first_param,
+                        impl_block.generics.clone(),
+                        sig.generics.clone(),
+                    ));
+                }
+            }
+
+            // Multiple methods with same name - perform overload resolution
+            for method in &matching_methods {
+                if let Some(sig) = self.fn_sigs.get(&method.def_id) {
+                    // Apply substitution to parameter types
+                    let subst_inputs: Vec<Type> = sig.inputs.iter()
+                        .map(|t| self.substitute_type_vars(t, &subst))
+                        .collect();
+
+                    // Check if argument count matches (params[1..] are the non-receiver args)
+                    let param_count = subst_inputs.len().saturating_sub(1); // exclude receiver
+                    if args.len() != param_count {
+                        continue;
+                    }
+
+                    // Check if argument types are compatible
+                    let mut matches = true;
+                    for (i, arg) in args.iter().enumerate() {
+                        if let Some(param_ty) = subst_inputs.get(i + 1) {
+                            // For overload resolution, check structural compatibility
+                            // This handles cases like i32 vs bool without full unification
+                            if !self.types_compatible_for_overload(&arg.ty, param_ty) {
+                                matches = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if matches {
                         let subst_output = self.substitute_type_vars(&sig.output, &subst);
-                        // Get the first parameter type (receiver) and apply substitution
                         let first_param = sig.inputs.first().map(|p| self.substitute_type_vars(p, &subst));
                         return Some((
                             method.def_id,
