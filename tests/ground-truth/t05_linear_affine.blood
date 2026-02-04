@@ -1,6 +1,6 @@
-// Test: linear and affine type qualifiers
+// Test: passing structs to functions (demonstrates MVS copy semantics)
 // EXPECT: 42
-// Linear types must be used exactly once; affine at most once
+// Note: For true linear semantics, use explicit `linear` qualifier (see t06_err_* tests)
 struct LinearToken {
     value: i32,
 }
@@ -15,6 +15,6 @@ fn main() -> i32 {
     println_int(result); // 42
     if result != 42 { return 1; }
 
-    // tok is consumed, cannot be used again (linear semantics)
+    // Under Blood's MVS, tok was copied into consume_token (not moved)
     0
 }

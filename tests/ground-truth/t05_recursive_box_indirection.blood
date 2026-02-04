@@ -27,7 +27,7 @@ fn main() -> i32 {
     println_int(s); // 6
     if s != 6 { return 1; }
 
-    // Rebuild to test len (lst was consumed by sum_list)
+    // Create a separate list for len_list test
     let lst2: List = List::Cons(10, Box::new(List::Cons(20, Box::new(List::Cons(30, Box::new(List::Nil))))));
     let n: i32 = len_list(lst2);
     println_int(n); // 3

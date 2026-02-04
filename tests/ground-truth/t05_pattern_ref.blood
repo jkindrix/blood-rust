@@ -3,7 +3,7 @@
 fn main() -> i32 {
     let x: i32 = 42;
 
-    // Match with ref pattern to borrow rather than move
+    // Match with ref pattern to borrow (creates reference instead of copying)
     let r: &i32 = match x {
         ref val => val,
     };
