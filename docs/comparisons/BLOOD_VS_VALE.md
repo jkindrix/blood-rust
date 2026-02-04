@@ -138,7 +138,7 @@ Blood uses escape analysis instead of explicit regions:
 fn process_in_scope(data: &Data) -> String {
     // Compiler analyzes escape behavior
     let result = format!("processed: {}", data.value);
-    result  // Ownership transferred out
+    result  // Value returned (copied under MVS)
 }
 
 fn batch_process(items: Vec<Item>) -> Vec<Result> {

@@ -655,7 +655,7 @@ pub type Projection = Vec<PlaceElem>;
 pub enum Operand {
     /// Copy from a place (for Copy types).
     Copy(Place),
-    /// Move from a place (transfers ownership).
+    /// Move from a place (used for `move` closures and linear types).
     Move(Place),
     /// A constant value.
     Constant(Constant),

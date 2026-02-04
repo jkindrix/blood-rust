@@ -7,8 +7,8 @@ use crate::cell::UnsafeCell;
 
 /// A mutual exclusion lock
 ///
-/// Mutex provides interior mutability with runtime borrow checking
-/// and thread safety.
+/// Mutex provides interior mutability with runtime exclusive access
+/// enforcement and thread safety.
 pub struct Mutex<T: ?Sized> {
     locked: AtomicBool,
     data: UnsafeCell<T>,
