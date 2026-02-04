@@ -757,36 +757,76 @@ impl<'ctx, 'a> MirPlaceCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
                             IndexKind::PtrToElements => {
                                 // Pointer to elements (e.g., Vec<T>.data which is *T)
                                 // current_ptr is **T (pointer to the pointer field)
-                                // Need to load the pointer value, then single-index GEP
+                                // Need to load the pointer value, then index into it
+                                //
+                                // FIX: Use explicit byte offset calculation instead of relying on
+                                // typed pointer GEP. This fixes offset miscalculation for structs
+                                // accessed through Vec fields of `self` (e.g., self.vec[i].field).
                                 let data_ptr = self.builder.build_load(current_ptr, "data_ptr")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM load error: {}", e), body.span
                                     )])?.into_pointer_value();
 
-                                // Cast to typed pointer for correct GEP calculation.
-                                // This ensures LLVM uses sizeof(element) for index calculation.
+                                // Get element type and size for explicit byte offset calculation
                                 let elem_llvm_ty = self.lower_type(&current_ty);
+                                let elem_size = self.get_type_size_in_bytes(elem_llvm_ty);
 
                                 // Debug: print GEP type/size for enum types
                                 if std::env::var("BLOOD_DEBUG_VEC_SIZE").is_ok() {
-                                    let gep_size = self.get_type_size_in_bytes(elem_llvm_ty);
-                                    eprintln!("[GEP PtrToElements] HIR type: {:?}, LLVM type: {:?}, size: {}",
-                                        current_ty, elem_llvm_ty, gep_size);
+                                    let llvm_str = elem_llvm_ty.print_to_string().to_string();
+                                    eprintln!("[GEP PtrToElements] HIR: {:?}, LLVM: {}, size: {}",
+                                        current_ty, llvm_str, elem_size);
                                 }
 
-                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
-                                let typed_data_ptr = self.builder.build_pointer_cast(data_ptr, elem_ptr_ty, "ptr_typed_data_ptr")
+                                // Calculate: byte_offset = index * elem_size
+                                // Ensure index is i64 for consistent arithmetic
+                                let idx_int = idx_val.into_int_value();
+                                let i64_type = self.context.i64_type();
+                                let idx_i64 = if idx_int.get_type().get_bit_width() < 64 {
+                                    self.builder.build_int_z_extend(idx_int, i64_type, "idx_i64")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM zext error: {}", e), body.span
+                                        )])?
+                                } else if idx_int.get_type().get_bit_width() > 64 {
+                                    self.builder.build_int_truncate(idx_int, i64_type, "idx_i64")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM trunc error: {}", e), body.span
+                                        )])?
+                                } else {
+                                    idx_int
+                                };
+
+                                let elem_size_val = i64_type.const_int(elem_size, false);
+                                let byte_offset = self.builder.build_int_mul(
+                                    idx_i64,
+                                    elem_size_val,
+                                    "byte_offset"
+                                ).map_err(|e| vec![Diagnostic::error(
+                                    format!("LLVM mul error: {}", e), body.span
+                                )])?;
+
+                                // Cast data_ptr to i8* for byte-level addressing
+                                let i8_ptr_ty = self.context.i8_type().ptr_type(inkwell::AddressSpace::default());
+                                let data_ptr_i8 = self.builder.build_pointer_cast(data_ptr, i8_ptr_ty, "data_ptr_i8")
                                     .map_err(|e| vec![Diagnostic::error(
                                         format!("LLVM pointer cast error: {}", e), body.span
                                     )])?;
 
-                                self.builder.build_in_bounds_gep(
-                                    typed_data_ptr,
-                                    &[idx_val.into_int_value()],
-                                    "ptr_idx_gep"
+                                // GEP with byte offset (i8* + byte_offset gives exact address)
+                                let elem_ptr_i8 = self.builder.build_in_bounds_gep(
+                                    data_ptr_i8,
+                                    &[byte_offset],
+                                    "elem_ptr_i8"
                                 ).map_err(|e| vec![Diagnostic::error(
                                     format!("LLVM GEP error: {}", e), body.span
-                                )])?
+                                )])?;
+
+                                // Cast back to element type pointer
+                                let elem_ptr_ty = elem_llvm_ty.ptr_type(inkwell::AddressSpace::default());
+                                self.builder.build_pointer_cast(elem_ptr_i8, elem_ptr_ty, "ptr_elem_ptr")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM pointer cast error: {}", e), body.span
+                                    )])?
                             }
                             IndexKind::VecIndex => {
                                 // Vec<T> direct indexing: current_ptr is Vec*, need to:
