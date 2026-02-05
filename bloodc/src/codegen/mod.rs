@@ -178,6 +178,50 @@ fn optimize_module(module: &Module, opt_level: BloodOptLevel) {
     mpm.run_on(module);
 }
 
+/// Run optimization passes one at a time, returning the IR after each pass.
+/// This is used to bisect which optimization pass causes miscompilation
+/// (e.g., BUG-008 if-expression branch elimination).
+///
+/// Each pass is run incrementally on the module (pass 1, then pass 2 on top, etc.)
+/// and the IR is captured after each step. Compare consecutive snapshots to see
+/// which pass introduces the problem.
+///
+/// Returns a Vec of (pass_name, ir_after_pass) pairs.
+pub fn optimize_module_bisect(module: &Module) -> Vec<(String, String)> {
+    let passes: Vec<(&str, Box<dyn Fn(&PassManager<Module>)>)> = vec![
+        ("promote_memory_to_register", Box::new(|pm| pm.add_promote_memory_to_register_pass())),
+        ("reassociate", Box::new(|pm| pm.add_reassociate_pass())),
+        ("basic_alias_analysis", Box::new(|pm| pm.add_basic_alias_analysis_pass())),
+        ("type_based_alias_analysis", Box::new(|pm| pm.add_type_based_alias_analysis_pass())),
+        ("sccp", Box::new(|pm| pm.add_sccp_pass())),
+        ("aggressive_dce", Box::new(|pm| pm.add_aggressive_dce_pass())),
+        ("dead_store_elimination", Box::new(|pm| pm.add_dead_store_elimination_pass())),
+        ("cfg_simplification_1", Box::new(|pm| pm.add_cfg_simplification_pass())),
+        ("licm", Box::new(|pm| pm.add_licm_pass())),
+        ("ind_var_simplify", Box::new(|pm| pm.add_ind_var_simplify_pass())),
+        ("function_inlining", Box::new(|pm| pm.add_function_inlining_pass())),
+        ("always_inliner", Box::new(|pm| pm.add_always_inliner_pass())),
+        ("global_dce", Box::new(|pm| pm.add_global_dce_pass())),
+        ("global_optimizer", Box::new(|pm| pm.add_global_optimizer_pass())),
+        ("constant_merge", Box::new(|pm| pm.add_constant_merge_pass())),
+        ("cfg_simplification_2", Box::new(|pm| pm.add_cfg_simplification_pass())),
+        ("jump_threading", Box::new(|pm| pm.add_jump_threading_pass())),
+        ("strip_dead_prototypes", Box::new(|pm| pm.add_strip_dead_prototypes_pass())),
+    ];
+
+    let mut results = Vec::new();
+
+    for (name, add_pass) in &passes {
+        let mpm: PassManager<Module> = PassManager::create(());
+        add_pass(&mpm);
+        mpm.run_on(module);
+        let ir = module.print_to_string().to_string();
+        results.push((name.to_string(), ir));
+    }
+
+    results
+}
+
 /// Get a target machine for the native platform with specified optimization level.
 fn get_native_target_machine_with_opt(opt_level: BloodOptLevel) -> Result<TargetMachine, String> {
     Target::initialize_native(&InitializationConfig::default())
