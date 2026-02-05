@@ -102,155 +102,24 @@ impl BloodOptLevel {
     }
 }
 
-/// Run LLVM optimization passes on the module.
-///
-/// This function applies a comprehensive set of LLVM optimization passes
-/// to the generated IR, similar to what clang does with -O2 or -O3.
-///
-/// # Optimization Strategy
-///
-/// The passes are applied in a specific order to maximize effectiveness:
-/// 1. **Canonicalization**: mem2reg, instcombine - normalize IR
-/// 2. **Analysis**: basic alias analysis - enable other optimizations
-/// 3. **Scalar optimizations**: GVN, SCCP, DCE - simplify code
-/// 4. **Loop optimizations**: LICM, unroll, rotate - optimize loops
-/// 5. **Interprocedural**: inlining, global opts - cross-function opts
-/// 6. **Cleanup**: CFG simplification, dead store elimination
-fn optimize_module(module: &Module, opt_level: BloodOptLevel) {
-    if opt_level == BloodOptLevel::None {
-        return;
-    }
-
-    // Create a module pass manager
-    let mpm: PassManager<Module> = PassManager::create(());
-
-    // === Phase 1: Canonicalization ===
-    // These passes normalize the IR into a canonical form that later passes expect
-
-    // Promote allocas to registers - fundamental for SSA form
-    mpm.add_promote_memory_to_register_pass();
-
-    // Combine instructions into simpler forms
-    mpm.add_instruction_combining_pass();
-
-    // Reassociate expressions to enable better constant folding
-    mpm.add_reassociate_pass();
-
-    // === Phase 2: Analysis Setup ===
-    // Set up alias analysis for memory optimization passes
-
-    mpm.add_basic_alias_analysis_pass();
-    mpm.add_type_based_alias_analysis_pass();
-
-    // === Phase 3: Scalar Optimizations ===
-    // These work on individual values and expressions
-
-    // Global Value Numbering - eliminate redundant computations
-    mpm.add_gvn_pass();
-
-    // Sparse Conditional Constant Propagation
-    mpm.add_sccp_pass();
-
-    // Aggressive dead code elimination
-    mpm.add_aggressive_dce_pass();
-
-    // Dead store elimination
-    mpm.add_dead_store_elimination_pass();
-
-    // Simplify the control flow graph
-    mpm.add_cfg_simplification_pass();
-
-    // === Phase 4: Loop Optimizations ===
-    // These optimize loop constructs
-
-    // Loop-invariant code motion (hoist invariants out of loops)
-    mpm.add_licm_pass();
-
-    // Induction variable simplification
-    mpm.add_ind_var_simplify_pass();
-
-    // Loop rotation (for better analysis)
-    mpm.add_loop_rotate_pass();
-
-    // Loop deletion (remove empty/dead loops)
-    mpm.add_loop_deletion_pass();
-
-    if opt_level == BloodOptLevel::Aggressive {
-        // More aggressive loop opts for -O3 equivalent
-        mpm.add_loop_unroll_pass();
-        mpm.add_loop_idiom_pass();
-    }
-
-    // === Phase 5: Interprocedural Optimizations ===
-    // These work across function boundaries
-
-    // Function inlining
-    mpm.add_function_inlining_pass();
-
-    // Always inline functions marked inline
-    mpm.add_always_inliner_pass();
-
-    // Global dead code elimination
-    mpm.add_global_dce_pass();
-
-    // Global optimizer (constant propagation across globals)
-    mpm.add_global_optimizer_pass();
-
-    // Constant merge (deduplicate global constants)
-    mpm.add_constant_merge_pass();
-
-    if opt_level == BloodOptLevel::Aggressive {
-        // Merge identical functions
-        mpm.add_merge_functions_pass();
-
-        // Argument promotion (pass-by-value when beneficial)
-        mpm.add_argument_promotion_pass();
-
-        // Tail call elimination
-        mpm.add_tail_call_elimination_pass();
-    }
-
-    // === Phase 6: Vectorization ===
-    // SLP and loop vectorization for SIMD
-
-    if opt_level == BloodOptLevel::Aggressive {
-        mpm.add_slp_vectorize_pass();
-        mpm.add_loop_vectorize_pass();
-    }
-
-    // === Phase 7: Final Cleanup ===
-    // Clean up after all transformations
-
-    // Another round of instruction combining
-    mpm.add_instruction_combining_pass();
-
-    // Final CFG simplification
-    mpm.add_cfg_simplification_pass();
-
-    // Jump threading
-    mpm.add_jump_threading_pass();
-
-    // Memcpy optimization
-    mpm.add_memcpy_optimize_pass();
-
-    // Strip dead prototypes
-    mpm.add_strip_dead_prototypes_pass();
-
-    // Run all passes on the module
-    mpm.run_on(module);
-}
-
 /// Run LLVM optimization passes excluding those that cause miscompilation.
 ///
 /// This is a workaround for LLVM bugs that cause incorrect code generation
-/// when certain optimization passes (particularly GVN and aggressive SROA)
+/// when certain optimization passes (particularly GVN and instruction combining)
 /// are applied to code patterns involving Vec element access with nested
 /// struct field projections.
 ///
 /// The excluded passes that cause issues:
 /// - GVN (Global Value Numbering) - incorrectly merges GEP operations
-/// - Aggressive loop optimizations - can trigger the same issue
-fn optimize_module_safe(module: &Module) {
+/// - Instruction combining - incorrectly combines GEP operations,
+///   causing wrong field indices in nested struct access through Vec elements
+/// - Memcpy optimize - converts struct load/store to memcpy with wrong
+///   size when struct has nested structs (copies inner struct size, not total)
+fn optimize_module(module: &Module, opt_level: BloodOptLevel) {
+    if opt_level == BloodOptLevel::None {
+        return;
+    }
+
     let mpm: PassManager<Module> = PassManager::create(());
 
     // Safe optimization passes that avoid LLVM miscompilation bugs.
@@ -261,32 +130,49 @@ fn optimize_module_safe(module: &Module) {
     // - GVN - similar issues with value numbering
     // - memcpy_optimize_pass - converts struct load/store to memcpy with wrong
     //   size when struct has nested structs (copies inner struct size, not total)
-    //
+
+    // === Phase 1: Canonicalization ===
     // mem2reg is essential for SSA form
     mpm.add_promote_memory_to_register_pass();
     mpm.add_reassociate_pass();
 
-    // Alias analysis for other passes
+    // === Phase 2: Analysis Setup ===
     mpm.add_basic_alias_analysis_pass();
     mpm.add_type_based_alias_analysis_pass();
 
-    // Safe scalar optimizations
+    // === Phase 3: Scalar Optimizations ===
+    // (GVN excluded — causes miscompilation)
     mpm.add_sccp_pass();
+    mpm.add_aggressive_dce_pass();
     mpm.add_dead_store_elimination_pass();
+    mpm.add_cfg_simplification_pass();
 
-    // Loop optimizations
+    // === Phase 4: Loop Optimizations ===
     mpm.add_licm_pass();
     mpm.add_ind_var_simplify_pass();
 
-    // Function-level optimizations
+    if opt_level == BloodOptLevel::Aggressive {
+        mpm.add_loop_rotate_pass();
+        mpm.add_loop_deletion_pass();
+    }
+
+    // === Phase 5: Interprocedural Optimizations ===
     mpm.add_function_inlining_pass();
+    mpm.add_always_inliner_pass();
     mpm.add_global_dce_pass();
     mpm.add_global_optimizer_pass();
+    mpm.add_constant_merge_pass();
 
-    // Basic cleanup
-    mpm.add_aggressive_dce_pass();
+    if opt_level == BloodOptLevel::Aggressive {
+        mpm.add_merge_functions_pass();
+        mpm.add_tail_call_elimination_pass();
+    }
+
+    // === Phase 6: Final Cleanup ===
+    // (instruction combining excluded — causes miscompilation)
     mpm.add_cfg_simplification_pass();
-    // NOTE: memcpy_optimize_pass excluded - see above
+    mpm.add_jump_threading_pass();
+    // (memcpy optimize excluded — causes miscompilation)
     mpm.add_strip_dead_prototypes_pass();
 
     mpm.run_on(module);
@@ -666,7 +552,7 @@ pub fn compile_definition_to_object(
     // due to LLVM miscompilation bug with nested struct field access through Vec.
     let use_opt = std::env::var("BLOOD_DEBUG_NO_OPT").is_err();
     if use_opt {
-        optimize_module_safe(&module);
+        optimize_module(&module, BloodOptLevel::Default);
     }
 
     // Dump IR after optimization if requested
