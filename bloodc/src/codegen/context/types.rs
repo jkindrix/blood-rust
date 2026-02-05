@@ -123,7 +123,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                      consider using indirection (e.g., Box<{}>)",
                                     type_name, type_name
                                 ),
-                                crate::span::Span::dummy(),
+                                self.current_span(),
                             )
                         );
                         return self.context.i8_type().ptr_type(AddressSpace::default()).into();
@@ -248,13 +248,41 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Never type - use i8 as placeholder (will never actually be used)
                 self.context.i8_type().into()
             }
-            TypeKind::Infer(_) | TypeKind::Error => {
-                // Error/unresolved types - use i8 placeholder
+            TypeKind::Infer(id) => {
+                // Unresolved inference variable reached codegen — type inference
+                // should have resolved this. Report the bug but return a placeholder
+                // to allow continued error collection.
+                self.type_lowering_errors.borrow_mut().push(
+                    crate::diagnostics::Diagnostic::error(
+                        format!(
+                            "unresolved inference variable {:?} reached codegen; \
+                             type inference should have resolved this",
+                            id
+                        ),
+                        self.current_span(),
+                    )
+                );
                 self.context.i8_type().into()
             }
-            TypeKind::Param(_) => {
-                // Generic parameters should be monomorphized before codegen
-                // Use pointer as placeholder for now
+            TypeKind::Error => {
+                // Error recovery placeholder — type checking already reported
+                // the original error, so just emit a placeholder type.
+                self.context.i8_type().into()
+            }
+            TypeKind::Param(id) => {
+                // Unsubstituted type parameter reached codegen — this is a
+                // monomorphization bug. Report it instead of silently emitting i8*.
+                self.type_lowering_errors.borrow_mut().push(
+                    crate::diagnostics::Diagnostic::error(
+                        format!(
+                            "unsubstituted type parameter {:?} reached codegen; \
+                             monomorphization should have replaced this",
+                            id
+                        ),
+                        self.current_span(),
+                    )
+                );
+                // Return i8* as placeholder to allow continued error collection
                 self.context.i8_type().ptr_type(AddressSpace::default()).into()
             }
             TypeKind::Closure { .. } => {
