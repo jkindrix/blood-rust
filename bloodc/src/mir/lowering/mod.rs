@@ -173,7 +173,13 @@ impl<'hir> MirLowering<'hir> {
                     }
                 }
                 _ => {
-                    // Skip non-function items for now
+                    // Skip non-function items:
+                    // - Struct/Enum/Union: Type declarations with no runtime code
+                    // - Const/Static: Initializers are evaluated by codegen's evaluate_const_expr(),
+                    //   not lowered to MIR. Static items become global variables, not functions.
+                    // - TypeAlias/Impl/Module: Resolved during type checking
+                    // - ExternFn/Bridge: FFI declarations handled separately in codegen
+                    // - Handler/Effect: Effect system items have special codegen paths
                 }
             }
         }

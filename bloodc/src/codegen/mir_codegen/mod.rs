@@ -191,13 +191,28 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         body: &MirBody,
         escape_results: Option<&EscapeResults>,
     ) -> Result<(), Vec<Diagnostic>> {
-        // Check if this function was declared. Generic functions are skipped during declaration
-        // and will be monomorphized on-demand at call sites (not yet implemented).
+        // DEFENSIVE CHECK: Skip if this DefId is a static item.
+        // Static items are compiled as global variables by compile_static_items(),
+        // not as functions. MIR lowering should never create bodies for static items,
+        // but this check prevents catastrophic failure if one somehow ends up here.
+        // If a static DefId is processed as a function, it would create a dummy
+        // function (define void @... { ret void }) instead of the global variable,
+        // causing segmentation faults when the static is assigned to at runtime.
+        if self.static_globals.contains_key(&def_id) {
+            // This is a static item - it should NOT have a MIR body to compile.
+            // The static's initializer is evaluated by compile_static_items().
+            return Ok(());
+        }
+
+        // Check if this function was declared. Functions may not be declared if:
+        // - It's a generic function (will be monomorphized on-demand at call sites)
+        // - It's a const/static item (handled separately)
+        // - Declaration was skipped for some other reason
         let fn_value = match self.functions.get(&def_id) {
             Some(&fv) => fv,
             None => {
-                // Function not declared - this is a generic function.
-                // Skip compiling its body. It will be monomorphized when called.
+                // Function not declared - skip compiling its body.
+                // This is typically a generic function awaiting monomorphization.
                 return Ok(());
             }
         };
