@@ -110,3 +110,4 @@ proofs/theories/Makefile.coq.conf
 proofs/theories/.Makefile.coq.d
 proofs/theories/.coqdeps.d
 proofs/theories/.lia.cache
+proofs/.lia.cache
