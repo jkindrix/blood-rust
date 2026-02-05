@@ -60,6 +60,7 @@ pub mod ptr;
 pub mod snapshot;
 pub mod static_evidence;
 pub mod types;
+pub mod validate;
 pub mod visitor;
 
 pub use body::{MirBody, MirLocal, LocalKind};

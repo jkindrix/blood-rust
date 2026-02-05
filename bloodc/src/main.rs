@@ -749,9 +749,8 @@ fn cmd_check(args: &FileArgs, verbosity: u8) -> ExitCode {
     let macro_errors = macro_expander.expand_program(&mut program);
     if !macro_errors.is_empty() {
         for error in &macro_errors {
-            eprintln!("Macro expansion error: {}", error);
+            emitter.emit(error);
         }
-        eprintln!("Macro expansion failed with {} error(s).", macro_errors.len());
         return ExitCode::from(1);
     }
 
@@ -977,9 +976,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
     let macro_errors = macro_expander.expand_program(&mut program);
     if !macro_errors.is_empty() {
         for error in &macro_errors {
-            eprintln!("Macro expansion error: {}", error);
+            emitter.emit(error);
         }
-        eprintln!("Build failed: macro expansion errors.");
         return ExitCode::from(1);
     }
 
@@ -1284,6 +1282,20 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
                     return ExitCode::SUCCESS;
                 }
             }
+
+            // Validate MIR well-formedness
+            let t = Instant::now();
+            let validation = mir::validate::validate_mir_bodies(&mir_bodies);
+            for warning in &validation.warnings {
+                emitter.emit(warning);
+            }
+            if !validation.errors.is_empty() {
+                for error in &validation.errors {
+                    emitter.emit(error);
+                }
+                return ExitCode::from(1);
+            }
+            phase_timings.push(("MIR validation", t.elapsed()));
 
             // Run escape analysis on MIR bodies
             let t = Instant::now();
