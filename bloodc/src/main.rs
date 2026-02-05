@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::time::Instant;
 
 use bloodc::attr::{AttrHelper, TestInfo, TestRegistry};
 use bloodc::diagnostics::DiagnosticEmitter;
@@ -70,6 +71,10 @@ struct Cli {
     /// Control when to use colored output
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto, global = true)]
     color: ColorChoice,
+
+    /// Print per-phase compilation timing
+    #[arg(long, global = true)]
+    timings: bool,
 }
 
 #[derive(Subcommand)]
@@ -142,6 +147,10 @@ struct FileArgs {
     /// Build in release mode with whole-module compilation for inlining
     #[arg(long)]
     release: bool,
+
+    /// Emit intermediate representation(s) instead of building
+    #[arg(long, value_enum, value_delimiter = ',')]
+    emit: Vec<EmitKind>,
 }
 
 #[derive(Args)]
@@ -183,6 +192,10 @@ struct BuildArgs {
     /// Build in release mode with optimizations
     #[arg(long)]
     release: bool,
+
+    /// Emit intermediate representation(s) instead of building
+    #[arg(long, value_enum, value_delimiter = ',')]
+    emit: Vec<EmitKind>,
 }
 
 #[derive(Args)]
@@ -255,6 +268,21 @@ impl ColorChoice {
     }
 }
 
+/// Intermediate representation to emit
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum EmitKind {
+    /// Abstract Syntax Tree (stops after parsing)
+    Ast,
+    /// High-level IR (stops after type checking)
+    Hir,
+    /// Mid-level IR (stops after MIR lowering)
+    Mir,
+    /// Optimized LLVM IR (does not link)
+    LlvmIr,
+    /// Unoptimized LLVM IR (does not link)
+    LlvmIrUnopt,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -264,14 +292,16 @@ fn main() -> ExitCode {
     // Create verbosity level
     let verbosity = if cli.quiet { 0 } else { cli.verbose + 1 };
 
+    let timings = cli.timings;
+
     match cli.command {
         Commands::New(args) => cmd_new(&args, verbosity),
         Commands::Init(args) => cmd_init(&args, verbosity),
         Commands::Lex(args) => cmd_lex(&args, verbosity),
         Commands::Parse(args) => cmd_parse(&args, verbosity),
         Commands::Check(args) => cmd_check_project(&args, verbosity),
-        Commands::Build(args) => cmd_build_project(&args, verbosity),
-        Commands::Run(args) => cmd_run(&args, verbosity),
+        Commands::Build(args) => cmd_build_project(&args, verbosity, timings),
+        Commands::Run(args) => cmd_run(&args, verbosity, timings),
         Commands::Test(args) => cmd_test(&args, verbosity),
     }
 }
@@ -442,6 +472,7 @@ fn cmd_check_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
             no_std: args.no_std,
             stdlib_path: args.stdlib_path.clone(),
             release: false, // Check command doesn't use release mode
+            emit: Vec::new(),
         };
         return cmd_check(&file_args, verbosity);
     }
@@ -486,6 +517,7 @@ fn cmd_check_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
                 no_std: args.no_std,
                 stdlib_path: args.stdlib_path.clone(),
                 release: false, // Check command doesn't use release mode
+                emit: Vec::new(),
             };
             cmd_check(&file_args, verbosity)
         }
@@ -497,7 +529,7 @@ fn cmd_check_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
 }
 
 /// Build command with project support - compile source or project
-fn cmd_build_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
+fn cmd_build_project(args: &BuildArgs, verbosity: u8, timings: bool) -> ExitCode {
     // If a file is specified, use single-file mode
     if let Some(ref file) = args.file {
         let file_args = FileArgs {
@@ -506,8 +538,9 @@ fn cmd_build_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
             no_std: args.no_std,
             stdlib_path: args.stdlib_path.clone(),
             release: args.release,
+            emit: args.emit.clone(),
         };
-        return cmd_build(&file_args, verbosity);
+        return cmd_build(&file_args, verbosity, timings);
     }
 
     // Otherwise, try to find a project
@@ -552,9 +585,10 @@ fn cmd_build_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
                     no_std: args.no_std,
                     stdlib_path: args.stdlib_path.clone(),
                     release: args.release,
+                    emit: args.emit.clone(),
                 };
 
-                let result = cmd_build(&file_args, verbosity);
+                let result = cmd_build(&file_args, verbosity, timings);
                 if result != ExitCode::SUCCESS {
                     success = false;
                 }
@@ -889,7 +923,11 @@ fn find_rust_runtime() -> Option<PathBuf> {
 }
 
 /// Build command - compile to executable
-fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
+fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
+    let build_start = Instant::now();
+    let mut phase_timings: Vec<(&str, std::time::Duration)> = Vec::new();
+    let emit_set = &args.emit;
+
     let source = match read_source(&args.file) {
         Ok(s) => s,
         Err(code) => return code,
@@ -903,6 +941,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     let emitter = DiagnosticEmitter::new(&path_str, &source);
 
     // Parse
+    let t = Instant::now();
     let mut parser = bloodc::Parser::new(&source);
     let mut program = match parser.parse_program() {
         Ok(p) => p,
@@ -917,12 +956,23 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Take interner from parser for type checking
     let interner = parser.take_interner();
+    phase_timings.push(("Parse", t.elapsed()));
 
     if verbosity > 0 {
         eprintln!("Parsed {} declarations.", program.declarations.len());
     }
 
+    // Emit AST if requested
+    if emit_set.contains(&EmitKind::Ast) {
+        println!("{:#?}", program);
+        if !emit_set.iter().any(|e| !matches!(e, EmitKind::Ast)) {
+            if timings { print_timings(&phase_timings, build_start.elapsed()); }
+            return ExitCode::SUCCESS;
+        }
+    }
+
     // Expand user-defined macros before type checking
+    let t = Instant::now();
     let mut macro_expander = macro_expand::MacroExpander::with_source(interner, &source);
     let macro_errors = macro_expander.expand_program(&mut program);
     if !macro_errors.is_empty() {
@@ -935,12 +985,14 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     // Get the interner back from the expander (it may have new symbols from re-parsing)
     let interner = macro_expander.into_interner();
+    phase_timings.push(("Macro expand", t.elapsed()));
 
     if verbosity > 1 {
         eprintln!("User-defined macro expansion passed.");
     }
 
     // Type check and lower to HIR
+    let t = Instant::now();
     let ctx = bloodc::typeck::TypeContext::new(&source, interner)
         .with_source_path(&args.file)
         .with_no_std(args.no_std);
@@ -980,18 +1032,31 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Build failed: type errors.");
         return ExitCode::from(1);
     }
+    phase_timings.push(("Type check", t.elapsed()));
 
     // Get builtin type DefIds before consuming the context
     let builtin_def_ids = ctx.get_builtin_def_ids();
 
     // Generate HIR
+    let t = Instant::now();
     let mut hir_crate = ctx.into_hir();
+    phase_timings.push(("HIR generation", t.elapsed()));
 
     if verbosity > 0 {
         eprintln!("Type checking passed. {} items.", hir_crate.items.len());
     }
 
+    // Emit HIR if requested
+    if emit_set.contains(&EmitKind::Hir) {
+        println!("{:#?}", hir_crate);
+        if !emit_set.iter().any(|e| matches!(e, EmitKind::Mir | EmitKind::LlvmIr | EmitKind::LlvmIrUnopt)) {
+            if timings { print_timings(&phase_timings, build_start.elapsed()); }
+            return ExitCode::SUCCESS;
+        }
+    }
+
     // Check linearity (linear/affine type usage)
+    let t = Instant::now();
     let linearity_errors = bloodc::typeck::linearity::check_crate_linearity(&hir_crate);
     if !linearity_errors.is_empty() {
         for error in &linearity_errors {
@@ -1000,8 +1065,10 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Build failed: linearity errors.");
         return ExitCode::from(1);
     }
+    phase_timings.push(("Linearity", t.elapsed()));
 
     // Expand macros in HIR before MIR lowering
+    let t = Instant::now();
     if let Err(errors) = expand::expand_macros(&mut hir_crate) {
         let emitter = DiagnosticEmitter::new(&path_str, &source);
         for error in &errors {
@@ -1010,10 +1077,14 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         eprintln!("Build failed: macro expansion errors.");
         return ExitCode::from(1);
     }
+    phase_timings.push(("HIR macros", t.elapsed()));
 
     if verbosity > 1 {
         eprintln!("Macro expansion passed.");
     }
+
+    // Content hashing
+    let t = Instant::now();
 
     // Initialize build cache for incremental compilation
     let mut build_cache = BuildCache::new();
@@ -1187,17 +1258,35 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     if verbosity > 1 {
         eprintln!("VFT populated: {} function entries", vft.len());
     }
+    phase_timings.push(("Content hash", t.elapsed()));
 
     // Lower to MIR (Phase 3 integration point)
+    let t = Instant::now();
     let mut mir_lowering = mir::MirLowering::new(&hir_crate);
     let mir_result = match mir_lowering.lower_crate() {
         Ok((mir_bodies, inline_handler_bodies)) => {
+            phase_timings.push(("MIR lowering", t.elapsed()));
+
             if verbosity > 1 {
                 eprintln!("MIR lowering passed. {} function bodies, {} inline handlers.",
                     mir_bodies.len(), inline_handler_bodies.len());
             }
 
+            // Emit MIR if requested
+            if emit_set.contains(&EmitKind::Mir) {
+                for (&def_id, body) in &mir_bodies {
+                    println!("// MIR for {:?}", def_id);
+                    println!("{:#?}", body);
+                    println!();
+                }
+                if !emit_set.iter().any(|e| matches!(e, EmitKind::LlvmIr | EmitKind::LlvmIrUnopt)) {
+                    if timings { print_timings(&phase_timings, build_start.elapsed()); }
+                    return ExitCode::SUCCESS;
+                }
+            }
+
             // Run escape analysis on MIR bodies
+            let t = Instant::now();
             // Create ADT field lookup closure for Copy detection
             let adt_fields = |def_id: bloodc::hir::DefId| -> Option<Vec<bloodc::hir::Type>> {
                 let item = hir_crate.items.get(&def_id)?;
@@ -1247,8 +1336,10 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             if verbosity > 2 {
                 eprintln!("{}", escape_stats.format_report());
             }
+            phase_timings.push(("Escape analysis", t.elapsed()));
 
             // Run closure analysis to identify inline optimization candidates
+            let t = Instant::now();
             let closure_analysis = mir::ClosureAnalyzer::new().analyze_bodies(&mir_bodies);
             if verbosity > 1 {
                 eprintln!("Closure analysis: {} closures, {} inline candidates ({:.0}%)",
@@ -1263,6 +1354,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
                     eprintln!("{}", closure_analysis.summary());
                 }
             }
+            phase_timings.push(("Closure analysis", t.elapsed()));
 
             // Return MIR bodies, escape analysis, inline handler bodies, and closure analysis for codegen
             Some((mir_bodies, escape_results, inline_handler_bodies, closure_analysis))
@@ -1295,7 +1387,42 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
     let (ref mir_bodies, ref escape_map, ref inline_handler_bodies, ref closure_analysis) = mir_result
         .expect("MIR result should be present (errors return early)");
 
+    // Emit LLVM IR if requested (before object code generation)
+    if emit_set.contains(&EmitKind::LlvmIr) || emit_set.contains(&EmitKind::LlvmIrUnopt) {
+        if emit_set.contains(&EmitKind::LlvmIr) {
+            match codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids) {
+                Ok(ir) => println!("{}", ir),
+                Err(errors) => {
+                    for error in &errors {
+                        emitter.emit(error);
+                    }
+                    eprintln!("Failed to generate optimized LLVM IR.");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        if emit_set.contains(&EmitKind::LlvmIrUnopt) {
+            match codegen::compile_mir_to_ir_with_opt(
+                &hir_crate, mir_bodies, escape_map,
+                codegen::BloodOptLevel::None, builtin_def_ids,
+            ) {
+                Ok(ir) => println!("{}", ir),
+                Err(errors) => {
+                    for error in &errors {
+                        emitter.emit(error);
+                    }
+                    eprintln!("Failed to generate unoptimized LLVM IR.");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        // Don't continue to object generation and linking
+        if timings { print_timings(&phase_timings, build_start.elapsed()); }
+        return ExitCode::SUCCESS;
+    }
+
     // Track object files for linking
+    let t = Instant::now();
     let mut object_files: Vec<std::path::PathBuf> = Vec::new();
     let mut compile_errors: Vec<bloodc::diagnostics::Diagnostic> = Vec::new();
 
@@ -1543,8 +1670,10 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
         }
         object_files.push(handler_reg_path);
     }
+    phase_timings.push(("Codegen", t.elapsed()));
 
     // Link with runtimes (for both cached and freshly compiled objects)
+    let t = Instant::now();
     // C runtime is required (provides main entry point and string utilities)
     // Rust runtime provides all other FFI functions (memory, effects, dispatch, etc.)
     let (c_runtime, rust_runtime) = find_runtime_paths();
@@ -1650,6 +1779,8 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
 
     let status = link_cmd.status();
 
+    phase_timings.push(("Linking", t.elapsed()));
+
     match status {
         Ok(s) if s.success() => {
             // Save cache index on successful build for incremental compilation
@@ -1664,24 +1795,40 @@ fn cmd_build(args: &FileArgs, verbosity: u8) -> ExitCode {
             if verbosity > 0 {
                 eprintln!("Linked executable: {}", output_exe.display());
             }
+            if timings { print_timings(&phase_timings, build_start.elapsed()); }
             println!("Build successful: {}", output_exe.display());
             ExitCode::SUCCESS
         }
         Ok(_) => {
+            if timings { print_timings(&phase_timings, build_start.elapsed()); }
             eprintln!("Linking failed.");
             ExitCode::from(1)
         }
         Err(e) => {
+            if timings { print_timings(&phase_timings, build_start.elapsed()); }
             eprintln!("Failed to run linker: {}", e);
             ExitCode::from(1)
         }
     }
 }
 
+/// Print a timing table to stderr.
+fn print_timings(phases: &[(&str, std::time::Duration)], total: std::time::Duration) {
+    eprintln!();
+    eprintln!("Timings:");
+    for (name, dur) in phases {
+        let ms = dur.as_secs_f64() * 1000.0;
+        eprintln!("  {:<20} {:>7.0}ms", name, ms);
+    }
+    let total_ms = total.as_secs_f64() * 1000.0;
+    eprintln!("  {}", "\u{2500}".repeat(30));
+    eprintln!("  {:<20} {:>7.0}ms", "Total", total_ms);
+}
+
 /// Run command - compile and execute
-fn cmd_run(args: &FileArgs, verbosity: u8) -> ExitCode {
+fn cmd_run(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
     // First build
-    let build_result = cmd_build(args, verbosity);
+    let build_result = cmd_build(args, verbosity, timings);
     if build_result != ExitCode::SUCCESS {
         return build_result;
     }
@@ -2100,11 +2247,12 @@ fn run_single_test(
         no_std: args.no_std,
         stdlib_path: args.stdlib_path.clone(),
         release: false,
+        emit: Vec::new(),
     };
 
     // Suppress build output unless verbose
     let build_verbosity = if verbosity > 1 { verbosity } else { 0 };
-    let build_result = cmd_build(&build_args, build_verbosity);
+    let build_result = cmd_build(&build_args, build_verbosity, false);
 
     // Clean up harness source
     let _ = fs::remove_file(&harness_file);
