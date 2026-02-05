@@ -136,11 +136,7 @@ fn check_type_resolved(
             ));
         }
         TypeKind::Infer(id) => {
-            // Warning, not error: effect handler codegen paths currently leave
-            // some inference variables unresolved. The i8 placeholder in codegen
-            // produces working code. This should become a hard error once the
-            // type inference gap for effect handlers is fixed.
-            warnings.push(Diagnostic::warning(
+            errors.push(Diagnostic::error(
                 format!(
                     "MIR body for {:?}: unresolved inference variable {:?} \
                      found in local type; type inference incomplete",

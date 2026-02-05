@@ -2098,6 +2098,23 @@ impl<'a> TypeContext<'a> {
         // Restore generic params
         self.generic_params = saved_generic_params;
 
+        // Create inference variables early so they're available at handle sites
+        // (which are type-checked before handler bodies in Phase 5 vs Phase 6).
+        let continuation_result_ty = match handler.kind {
+            crate::ast::HandlerKind::Deep => Some(self.unifier.fresh_var()),
+            crate::ast::HandlerKind::Shallow => None,
+        };
+        let return_clause_input_ty = if handler.return_clause.is_some() {
+            Some(self.unifier.fresh_var())
+        } else {
+            None
+        };
+        let return_clause_output_ty = if handler.return_clause.is_some() {
+            Some(self.unifier.fresh_var())
+        } else {
+            None
+        };
+
         // Store handler with empty operations initially - bodies will be type-checked later
         self.handler_defs.insert(def_id, super::HandlerInfo {
             name,
@@ -2108,6 +2125,9 @@ impl<'a> TypeContext<'a> {
             generics: generics_vec,
             fields,
             return_clause_body_id: None, // Will be populated during body type-checking
+            continuation_result_ty,
+            return_clause_input_ty,
+            return_clause_output_ty,
         });
 
         // Queue handler for body type-checking

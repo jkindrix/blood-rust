@@ -250,13 +250,9 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
             TypeKind::Infer(id) => {
                 // Unresolved inference variable reached codegen — type inference
-                // should have resolved this. Emit a warning (not error) because
-                // effect handler codegen paths currently leave some inference
-                // variables unresolved, and the i8 placeholder produces working
-                // code in those cases. This should become a hard error once the
-                // type inference gap for effect handlers is fixed.
+                // should have resolved this. This is a hard error.
                 self.type_lowering_errors.borrow_mut().push(
-                    crate::diagnostics::Diagnostic::warning(
+                    crate::diagnostics::Diagnostic::error(
                         format!(
                             "unresolved inference variable {:?} reached codegen; \
                              type inference should have resolved this",

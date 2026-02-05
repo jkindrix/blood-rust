@@ -303,13 +303,9 @@ pub fn compile_mir_to_object(
 
     // Drain any errors collected during type lowering (lower_type takes &self,
     // so errors are stored in a RefCell and drained here).
-    // Only treat actual errors as fatal; warnings (e.g. unresolved inference
-    // variables in effect handler paths) are non-fatal.
     {
         let mut type_diags = codegen.type_lowering_errors.borrow_mut();
-        let type_errors: Vec<Diagnostic> = type_diags.drain(..)
-            .filter(|d| d.kind == crate::diagnostics::DiagnosticKind::Error)
-            .collect();
+        let type_errors: Vec<Diagnostic> = type_diags.drain(..).collect();
         if !type_errors.is_empty() {
             return Err(type_errors);
         }
@@ -400,13 +396,9 @@ pub fn compile_mir_to_object_with_opt(
 
     // Drain any errors collected during type lowering (lower_type takes &self,
     // so errors are stored in a RefCell and drained here).
-    // Only treat actual errors as fatal; warnings (e.g. unresolved inference
-    // variables in effect handler paths) are non-fatal.
     {
         let mut type_diags = codegen.type_lowering_errors.borrow_mut();
-        let type_errors: Vec<Diagnostic> = type_diags.drain(..)
-            .filter(|d| d.kind == crate::diagnostics::DiagnosticKind::Error)
-            .collect();
+        let type_errors: Vec<Diagnostic> = type_diags.drain(..).collect();
         if !type_errors.is_empty() {
             return Err(type_errors);
         }
@@ -532,12 +524,9 @@ pub fn compile_definition_to_object(
     }
 
     // Drain any errors collected during type lowering.
-    // Only treat actual errors as fatal; warnings are non-fatal.
     {
         let mut type_diags = codegen.type_lowering_errors.borrow_mut();
-        let type_errors: Vec<Diagnostic> = type_diags.drain(..)
-            .filter(|d| d.kind == crate::diagnostics::DiagnosticKind::Error)
-            .collect();
+        let type_errors: Vec<Diagnostic> = type_diags.drain(..).collect();
         if !type_errors.is_empty() {
             return Err(type_errors);
         }

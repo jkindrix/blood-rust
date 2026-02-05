@@ -301,6 +301,16 @@ pub struct HandlerInfo {
     pub fields: Vec<FieldInfo>,
     /// Return clause body ID, if present.
     pub return_clause_body_id: Option<hir::BodyId>,
+    /// For deep handlers: the inference variable representing what `resume()` returns.
+    /// Created during handler body type-checking; unified at the handle site with the
+    /// body's result type. None for shallow handlers.
+    pub continuation_result_ty: Option<Type>,
+    /// Return clause parameter type: what the handled computation produces.
+    /// Unified at the handle site with the handle body's type.
+    pub return_clause_input_ty: Option<Type>,
+    /// Return clause result type: what the return clause body produces.
+    /// Unified at the handle site with the overall handle expression's type.
+    pub return_clause_output_ty: Option<Type>,
 }
 
 /// A reference to an effect with type arguments.

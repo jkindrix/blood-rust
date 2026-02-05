@@ -610,6 +610,11 @@ impl<'a> TypeContext<'a> {
         // Collect operation body IDs
         let mut operation_body_ids: Vec<(String, hir::BodyId)> = Vec::new();
 
+        // For deep handlers, use the pre-created inference variable for the
+        // continuation result type. This was created during collection so it's
+        // available at handle sites (which are type-checked before handler bodies).
+        let handler_continuation_ty = handler_info.continuation_result_ty.clone();
+
         // Type-check each operation body
         for op_impl in &handler.operations {
             let op_name = self.symbol_to_string(op_impl.name.node);
@@ -701,9 +706,10 @@ impl<'a> TypeContext<'a> {
             // For shallow handlers, resume is tail-position only and returns unit.
             let (resume_result_ty, op_body_expected_ty) = match handler_info.kind {
                 ast::HandlerKind::Deep => {
-                    // Deep handler: resume returns a fresh type variable
-                    // This represents the result of running the continuation
-                    let continuation_result_ty = self.unifier.fresh_var();
+                    // Deep handler: resume returns the shared continuation result type.
+                    // All operations share this variable so it can be unified at the
+                    // handle site with the body's result type.
+                    let continuation_result_ty = handler_continuation_ty.clone().unwrap();
                     (continuation_result_ty.clone(), continuation_result_ty)
                 }
                 ast::HandlerKind::Shallow => {
@@ -815,6 +821,10 @@ impl<'a> TypeContext<'a> {
             self.resume_count_in_current_op = 0;
         }
 
+        // Use the pre-created inference variables from HandlerInfo (created during collection)
+        let return_clause_input_ty_holder: Option<Type> = handler_info.return_clause_input_ty.clone();
+        let return_clause_output_ty_holder: Option<Type> = handler_info.return_clause_output_ty.clone();
+
         // Type-check return clause if present
         let return_clause_body_id = if let Some(ret_clause) = &handler.return_clause {
             self.resolver.push_scope(ScopeKind::Function, ret_clause.span);
@@ -823,12 +833,12 @@ impl<'a> TypeContext<'a> {
             self.locals.clear();
 
             // Return clause input parameter type: the type of the handled computation's result.
-            // Since handlers can be used with any compatible computation, we use a fresh type var.
-            // This will be constrained when the handler is applied to a specific expression.
-            let input_ty = self.unifier.fresh_var();
+            // Use the pre-created inference variable from collection phase so it's
+            // available at handle sites for unification.
+            let input_ty = return_clause_input_ty_holder.clone().unwrap();
 
-            // Add return place with inferred type (will be determined by body)
-            let return_ty = self.unifier.fresh_var();
+            // Add return place — use the pre-created output inference variable.
+            let return_ty = return_clause_output_ty_holder.clone().unwrap();
             self.locals.push(hir::Local {
                 id: LocalId::RETURN_PLACE,
                 ty: return_ty.clone(),
@@ -876,6 +886,8 @@ impl<'a> TypeContext<'a> {
             // Infer the return clause body type (instead of checking against hardcoded type)
             // Use a fresh type var which will unify with the actual body type
             let expected_body_ty = self.unifier.fresh_var();
+            // Connect return_ty (return place) with expected_body_ty (what the body actually produces)
+            self.unifier.unify(&return_ty, &expected_body_ty, ret_clause.span)?;
             let body_expr = self.check_block(&ret_clause.body, &expected_body_ty)?;
 
             let body_id = hir::BodyId::new(self.next_body_id);
@@ -897,10 +909,13 @@ impl<'a> TypeContext<'a> {
             None
         };
 
-        // Update handler info with body IDs
+        // Update handler info with body IDs and stored inference variables
         if let Some(info) = self.handler_defs.get_mut(&handler_def_id) {
             info.operations = operation_body_ids;
             info.return_clause_body_id = return_clause_body_id;
+            info.continuation_result_ty = handler_continuation_ty;
+            info.return_clause_input_ty = return_clause_input_ty_holder;
+            info.return_clause_output_ty = return_clause_output_ty_holder;
         }
 
         Ok(())

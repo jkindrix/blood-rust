@@ -350,6 +350,32 @@ impl<'a> TypeContext<'a> {
 
         // Wrap the body in a Handle expression
         let body_expr = result?;
+
+        // Unify handler's stored inference variables with concrete types from this handle site.
+        // The handler body was type-checked in isolation; now we connect the inference variables
+        // created there with the actual types from this use site.
+        if let Some(handler_info) = self.handler_defs.get(&handler_id) {
+            let body_ty = self.unifier.resolve(&expected);
+
+            // continuation_result_ty: what resume() returns in deep handlers.
+            // At the handle site, this must equal the body's result type.
+            if let Some(ref cont_ty) = handler_info.continuation_result_ty {
+                self.unifier.unify(cont_ty, &body_ty, span)?;
+            }
+
+            // return_clause_input_ty: what the handled computation produces.
+            // At the handle site, this must equal the body's result type.
+            if let Some(ref input_ty) = handler_info.return_clause_input_ty {
+                self.unifier.unify(input_ty, &body_ty, span)?;
+            }
+
+            // return_clause_output_ty: what the return clause body produces.
+            // At the handle site, this must equal the overall handle expression's type.
+            if let Some(ref output_ty) = handler_info.return_clause_output_ty {
+                self.unifier.unify(output_ty, &body_ty, span)?;
+            }
+        }
+
         // Resolve the expected type to get the concrete type (not an inference variable)
         let resolved_ty = self.unifier.resolve(&expected);
         Ok(hir::Expr {
@@ -682,15 +708,18 @@ impl<'a> TypeContext<'a> {
                 }
             }
 
-            // Set up resume type for this handler
+            // Set up resume type and resume result type for this handler
             let prev_resume_type = self.current_resume_type.take();
+            let prev_resume_result = self.current_resume_result_type.take();
             self.current_resume_type = Some(return_type.clone());
+            self.current_resume_result_type = Some(expected.clone());
 
             // Type-check the handler body (should return unit)
             let handler_body_result = self.check_block(&handler.body, &Type::unit());
 
-            // Restore resume type
+            // Restore resume type and resume result type
             self.current_resume_type = prev_resume_type;
+            self.current_resume_result_type = prev_resume_result;
 
             // Pop handler clause scope
             self.resolver.pop_scope();
