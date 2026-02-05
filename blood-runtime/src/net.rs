@@ -156,6 +156,40 @@ impl Default for ResolverConfig {
     }
 }
 
+impl ResolverConfig {
+    /// Create a resolver config from the global runtime configuration.
+    ///
+    /// Uses the configured network timeout if available.
+    pub fn from_runtime_config() -> Self {
+        if let Some(config) = crate::runtime_config() {
+            Self {
+                timeout: config.timeout.network_timeout,
+                ..Default::default()
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// Get the configured network timeout from the runtime configuration.
+///
+/// Returns the default (60 seconds) if no runtime config is available.
+pub fn configured_network_timeout() -> Duration {
+    crate::runtime_config()
+        .map(|c| c.timeout.network_timeout)
+        .unwrap_or_else(|| Duration::from_secs(60))
+}
+
+/// Get the configured I/O timeout from the runtime configuration.
+///
+/// Returns the default (30 seconds) if no runtime config is available.
+pub fn configured_io_timeout() -> Duration {
+    crate::runtime_config()
+        .map(|c| c.timeout.io_timeout)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
+
 /// Look up IP addresses for a hostname.
 ///
 /// This performs DNS resolution and returns all resolved addresses.
@@ -293,6 +327,53 @@ impl TcpStream {
             read_timeout: None,
             write_timeout: None,
         })
+    }
+
+    /// Open a TCP connection using the configured network timeout.
+    ///
+    /// Uses `config.timeout.network_timeout` from the runtime configuration,
+    /// falling back to 60 seconds if no configuration is available.
+    pub fn connect_with_configured_timeout(addr: &SocketAddr) -> Result<Self> {
+        Self::connect_timeout(addr, configured_network_timeout())
+    }
+
+    /// Open a TCP connection with both configured timeout and cancellation support.
+    ///
+    /// Uses `config.timeout.network_timeout` from the runtime configuration.
+    /// The connection attempt will be cancelled if the token is cancelled or
+    /// if the configured timeout elapses.
+    pub fn connect_with_configured_timeout_and_cancellation(
+        addr: &SocketAddr,
+        token: CancellationToken,
+    ) -> Result<Self> {
+        // Check cancellation before starting
+        if token.is_cancelled() {
+            return Err(NetError::Cancelled);
+        }
+
+        let timeout = configured_network_timeout();
+        let inner = StdTcpStream::connect_timeout(addr, timeout)?;
+
+        // Check cancellation after connect
+        if token.is_cancelled() {
+            return Err(NetError::Cancelled);
+        }
+
+        Ok(Self {
+            inner,
+            read_timeout: None,
+            write_timeout: None,
+        })
+    }
+
+    /// Apply the configured I/O timeouts to this stream.
+    ///
+    /// Sets both read and write timeouts from `config.timeout.io_timeout`.
+    pub fn apply_configured_timeouts(&mut self) -> Result<()> {
+        let timeout = configured_io_timeout();
+        self.set_read_timeout(Some(timeout))?;
+        self.set_write_timeout(Some(timeout))?;
+        Ok(())
     }
 
     /// Returns the socket address of the remote peer.
@@ -507,6 +588,101 @@ impl TcpListener {
         Ok(Self { inner })
     }
 
+    /// Accept a connection with a timeout.
+    ///
+    /// Returns the connected TcpStream and the address of the remote peer,
+    /// or a timeout error if no connection is received within the timeout.
+    pub fn accept_timeout(&self, timeout: Duration) -> Result<(TcpStream, SocketAddr)> {
+        self.inner.set_nonblocking(true)?;
+        let start = std::time::Instant::now();
+
+        loop {
+            match self.inner.accept() {
+                Ok((stream, addr)) => {
+                    self.inner.set_nonblocking(false)?;
+                    stream.set_nonblocking(false)?;
+                    return Ok((
+                        TcpStream {
+                            inner: stream,
+                            read_timeout: None,
+                            write_timeout: None,
+                        },
+                        addr,
+                    ));
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if start.elapsed() >= timeout {
+                        self.inner.set_nonblocking(false)?;
+                        return Err(NetError::TimedOut);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    self.inner.set_nonblocking(false)?;
+                    return Err(NetError::from(e));
+                }
+            }
+        }
+    }
+
+    /// Accept a connection using the configured network timeout.
+    ///
+    /// Uses `config.timeout.network_timeout` from the runtime configuration,
+    /// falling back to 60 seconds if no configuration is available.
+    pub fn accept_with_configured_timeout(&self) -> Result<(TcpStream, SocketAddr)> {
+        self.accept_timeout(configured_network_timeout())
+    }
+
+    /// Accept a connection with configured timeout and cancellation support.
+    ///
+    /// Uses `config.timeout.network_timeout` from the runtime configuration.
+    /// The accept will be cancelled if the token is cancelled or if the
+    /// configured timeout elapses.
+    pub fn accept_with_configured_timeout_and_cancellation(
+        &self,
+        token: CancellationToken,
+    ) -> Result<(TcpStream, SocketAddr)> {
+        if token.is_cancelled() {
+            return Err(NetError::Cancelled);
+        }
+
+        let timeout = configured_network_timeout();
+        self.inner.set_nonblocking(true)?;
+        let start = std::time::Instant::now();
+
+        loop {
+            match self.inner.accept() {
+                Ok((stream, addr)) => {
+                    self.inner.set_nonblocking(false)?;
+                    stream.set_nonblocking(false)?;
+                    return Ok((
+                        TcpStream {
+                            inner: stream,
+                            read_timeout: None,
+                            write_timeout: None,
+                        },
+                        addr,
+                    ));
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if token.is_cancelled() {
+                        self.inner.set_nonblocking(false)?;
+                        return Err(NetError::Cancelled);
+                    }
+                    if start.elapsed() >= timeout {
+                        self.inner.set_nonblocking(false)?;
+                        return Err(NetError::TimedOut);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    self.inner.set_nonblocking(false)?;
+                    return Err(NetError::from(e));
+                }
+            }
+        }
+    }
+
     /// Get a reference to the underlying std::StdTcpListener.
     pub fn as_raw(&self) -> &StdTcpListener {
         &self.inner
@@ -682,6 +858,16 @@ impl UdpSocket {
     pub fn try_clone(&self) -> Result<Self> {
         let inner = self.inner.try_clone()?;
         Ok(Self { inner })
+    }
+
+    /// Apply the configured I/O timeouts to this socket.
+    ///
+    /// Sets both read and write timeouts from `config.timeout.io_timeout`.
+    pub fn apply_configured_timeouts(&self) -> Result<()> {
+        let timeout = configured_io_timeout();
+        self.set_read_timeout(Some(timeout))?;
+        self.set_write_timeout(Some(timeout))?;
+        Ok(())
     }
 
     /// Get a reference to the underlying std::StdUdpSocket.
@@ -1011,5 +1197,78 @@ mod tests {
         assert!(!ka.enabled);
         assert_eq!(ka.interval, Duration::from_secs(60));
         assert_eq!(ka.retries, 9);
+    }
+
+    #[test]
+    fn test_configured_network_timeout() {
+        // Without runtime config, should return default 60 seconds
+        let timeout = configured_network_timeout();
+        assert_eq!(timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_configured_io_timeout() {
+        // Without runtime config, should return default 30 seconds
+        let timeout = configured_io_timeout();
+        assert_eq!(timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_resolver_config_from_runtime() {
+        // Without runtime config, should use defaults
+        let config = ResolverConfig::from_runtime_config();
+        assert_eq!(config.timeout, Duration::from_secs(5));
+        assert_eq!(config.retries, 3);
+    }
+
+    #[test]
+    fn test_tcp_stream_connect_with_configured_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = thread::spawn(move || {
+            let _ = listener.accept().unwrap();
+        });
+
+        // This should use the configured timeout (60s default)
+        let stream = TcpStream::connect_with_configured_timeout(&addr).unwrap();
+        assert!(stream.peer_addr().is_ok());
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_tcp_stream_apply_configured_timeouts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = thread::spawn(move || {
+            let _ = listener.accept().unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.apply_configured_timeouts().unwrap();
+
+        // Should have timeouts set now (30s default)
+        assert_eq!(stream.read_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(stream.write_timeout(), Some(Duration::from_secs(30)));
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_tcp_listener_accept_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+
+        // Try to accept with a very short timeout - should timeout
+        let result = listener.accept_timeout(Duration::from_millis(50));
+        assert!(matches!(result, Err(NetError::TimedOut)));
+    }
+
+    #[test]
+    fn test_udp_socket_apply_configured_timeouts() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.apply_configured_timeouts().unwrap();
+        // Just verify it doesn't panic
     }
 }

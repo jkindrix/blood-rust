@@ -43,6 +43,16 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitStatus, Stdio as StdStdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Get the configured compute timeout from the runtime configuration.
+///
+/// Returns the default (30 seconds) if no runtime config is available.
+pub fn configured_compute_timeout() -> Duration {
+    crate::runtime_config()
+        .map(|c| c.timeout.compute_timeout)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
 
 /// Counter for generating unique process IDs.
 static PROCESS_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -342,6 +352,66 @@ impl Child {
             stdout: output.stdout,
             stderr: output.stderr,
         })
+    }
+
+    /// Wait for the child to exit with a timeout.
+    ///
+    /// Returns `Ok(None)` if the timeout elapsed before the child exited.
+    /// Returns `Ok(Some(status))` if the child exited within the timeout.
+    ///
+    /// Note: If the timeout elapses, the child process is still running.
+    /// Call `kill()` if you want to terminate it.
+    pub fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<ProcessStatus>> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(10);
+
+        loop {
+            // Check if child has exited
+            if let Some(status) = self.try_wait()? {
+                return Ok(Some(status));
+            }
+
+            // Check if timeout has elapsed
+            if start.elapsed() >= timeout {
+                return Ok(None);
+            }
+
+            // Sleep for a short interval before checking again
+            std::thread::sleep(poll_interval);
+        }
+    }
+
+    /// Wait for the child to exit using the configured compute timeout.
+    ///
+    /// Uses `config.timeout.compute_timeout` from the runtime configuration,
+    /// falling back to 30 seconds if no configuration is available.
+    ///
+    /// Returns `Ok(None)` if the timeout elapsed before the child exited.
+    /// Returns `Ok(Some(status))` if the child exited within the timeout.
+    pub fn wait_with_configured_timeout(&mut self) -> io::Result<Option<ProcessStatus>> {
+        self.wait_timeout(configured_compute_timeout())
+    }
+
+    /// Wait for the child to exit with timeout, killing it if timeout elapses.
+    ///
+    /// Unlike `wait_timeout`, this method will kill the child process if it
+    /// doesn't exit within the timeout, then wait for it to actually terminate.
+    pub fn wait_timeout_or_kill(&mut self, timeout: Duration) -> io::Result<ProcessStatus> {
+        match self.wait_timeout(timeout)? {
+            Some(status) => Ok(status),
+            None => {
+                // Kill the child and wait for it to terminate
+                self.kill()?;
+                self.wait()
+            }
+        }
+    }
+
+    /// Wait with configured timeout, killing the child if timeout elapses.
+    ///
+    /// Uses `config.timeout.compute_timeout` from the runtime configuration.
+    pub fn wait_with_configured_timeout_or_kill(&mut self) -> io::Result<ProcessStatus> {
+        self.wait_timeout_or_kill(configured_compute_timeout())
     }
 }
 
@@ -797,5 +867,74 @@ mod tests {
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"hello");
+    }
+
+    #[test]
+    fn test_configured_compute_timeout() {
+        // Without runtime config, should return default 30 seconds
+        let timeout = configured_compute_timeout();
+        assert_eq!(timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_wait_timeout_immediate_exit() {
+        if which("true").is_none() {
+            return;
+        }
+
+        let mut child = Command::new("true").spawn().unwrap();
+        // 'true' exits immediately, so this should succeed
+        let result = child.wait_timeout(Duration::from_secs(5));
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(status.is_some());
+        assert!(status.unwrap().success());
+    }
+
+    #[test]
+    fn test_wait_timeout_expires() {
+        if which("sleep").is_none() {
+            return;
+        }
+
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        // Wait with a very short timeout - should timeout
+        let result = child.wait_timeout(Duration::from_millis(50));
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        // Should have timed out, so status is None
+        assert!(status.is_none());
+        // Kill the child to clean up
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn test_wait_timeout_or_kill() {
+        if which("sleep").is_none() {
+            return;
+        }
+
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
+        // Wait with a short timeout - should kill the process
+        let result = child.wait_timeout_or_kill(Duration::from_millis(100));
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        // Process was killed, so should not have exit code 0
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn test_wait_with_configured_timeout() {
+        if which("true").is_none() {
+            return;
+        }
+
+        let mut child = Command::new("true").spawn().unwrap();
+        // This should succeed with the default 30s timeout
+        let result = child.wait_with_configured_timeout();
+        assert!(result.is_ok());
+        let status = result.unwrap();
+        assert!(status.is_some());
+        assert!(status.unwrap().success());
     }
 }
