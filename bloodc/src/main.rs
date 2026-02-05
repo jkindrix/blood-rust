@@ -1808,7 +1808,9 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
                 eprintln!("Linked executable: {}", output_exe.display());
             }
             if timings { print_timings(&phase_timings, build_start.elapsed()); }
-            println!("Build successful: {}", output_exe.display());
+            if verbosity > 0 {
+                eprintln!("Build successful: {}", output_exe.display());
+            }
             ExitCode::SUCCESS
         }
         Ok(_) => {
