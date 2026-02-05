@@ -29,9 +29,18 @@ Lemma canonical_forms_arrow :
     exists body, v = E_Lam A body.
 Proof.
   intros Sigma v A B eff Htype Hval.
-  (* By case analysis on the typing derivation.
-     A closed value of arrow type must be a lambda. *)
-Admitted.
+  remember [] as Gamma.
+  remember [] as Delta.
+  remember (Ty_Arrow A B eff) as T.
+  induction Htype; subst.
+  all: try discriminate.
+  all: try (simpl in Hval; discriminate).
+  all: try (unfold typeof_const in *; destruct c; discriminate).
+  (* T_Lam *)
+  - injection HeqT as HA HB Heff. subst. eexists. reflexivity.
+  (* T_Sub *)
+  - apply IHHtype; auto.
+Qed.
 
 Lemma canonical_forms_record :
   forall Sigma v fields,
@@ -42,8 +51,18 @@ Lemma canonical_forms_record :
       forallb (fun '(_, e) => is_value e) vfields = true.
 Proof.
   intros Sigma v fields Htype Hval.
-  (* A closed value of record type must be a record value. *)
-Admitted.
+  remember [] as Gamma.
+  remember [] as Delta.
+  remember (Ty_Record fields) as T.
+  induction Htype; subst.
+  all: try discriminate.
+  all: try (simpl in Hval; discriminate).
+  all: try (unfold typeof_const in *; destruct c; discriminate).
+  (* T_Record *)
+  - exists fields0. split; auto.
+  (* T_Sub *)
+  - apply IHHtype; auto.
+Qed.
 
 Lemma canonical_forms_base :
   forall Sigma v b,
@@ -52,8 +71,17 @@ Lemma canonical_forms_base :
     exists c, v = E_Const c /\ typeof_const c = Ty_Base b.
 Proof.
   intros Sigma v b Htype Hval.
-  (* A closed value of base type must be a constant of that type. *)
-Admitted.
+  remember [] as Gamma.
+  remember [] as Delta.
+  remember (Ty_Base b) as T.
+  induction Htype; subst.
+  all: try discriminate.
+  all: try (simpl in Hval; discriminate).
+  (* T_Const *)
+  - exists c. split; auto.
+  (* T_Sub *)
+  - apply IHHtype; auto.
+Qed.
 
 (** ** Progress Theorem
 

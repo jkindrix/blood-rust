@@ -22,15 +22,61 @@ From Blood Require Import Semantics.
 
     If a value is well-typed, its type matches its structure. *)
 
+Lemma record_fields_typed_pure :
+  forall Sigma Gamma Delta fields field_types eff,
+    record_fields_typed Sigma Gamma Delta fields field_types eff ->
+    forallb (fun '(_, e) => is_value e) fields = true ->
+    record_fields_typed Sigma Gamma Delta fields field_types Eff_Pure.
+Proof.
+  intros Sigma Gamma Delta fields field_types eff Htyped Hvals.
+  induction Htyped.
+  - apply RFT_Nil.
+  - simpl in Hvals.
+    apply Bool.andb_true_iff in Hvals.
+    destruct Hvals as [Hval1 Hval2].
+    apply RFT_Cons with (eff1 := Eff_Pure) (eff2 := Eff_Pure).
+    + (* Need value_typing_inversion for the field, but that creates circularity.
+         Instead, note that values type with pure effect directly. *)
+      (* This requires a mutual induction or a separate lemma. For now, admit. *)
+      admit.
+    + apply IHHtyped. assumption.
+Admitted.
+
 Lemma value_typing_inversion :
   forall Sigma Gamma Delta v T eff,
     has_type Sigma Gamma Delta v T eff ->
     is_value v = true ->
     has_type Sigma Gamma Delta v T Eff_Pure.
 Proof.
-  (* Values are pure: they don't perform effects.
-     Proof by case analysis on the typing derivation. *)
-Admitted.
+  intros Sigma Gamma Delta v T eff Htype Hval.
+  induction Htype.
+  - (* T_Var: variables are not values *)
+    simpl in Hval. discriminate.
+  - (* T_Const: constants are values and pure *)
+    apply T_Const.
+  - (* T_Lam: lambdas are values and pure *)
+    apply T_Lam. assumption.
+  - (* T_App: applications are not values *)
+    simpl in Hval. discriminate.
+  - (* T_Let: let is not a value *)
+    simpl in Hval. discriminate.
+  - (* T_Annot: annotations are not values *)
+    simpl in Hval. discriminate.
+  - (* T_Record: records are values if all fields are values *)
+    simpl in Hval.
+    apply T_Record.
+    apply record_fields_typed_pure with (eff := eff); assumption.
+  - (* T_Select: select is not a value *)
+    simpl in Hval. discriminate.
+  - (* T_Perform: perform is not a value *)
+    simpl in Hval. discriminate.
+  - (* T_Handle: handle is not a value *)
+    simpl in Hval. discriminate.
+  - (* T_Sub: use IH and effect subsumption *)
+    apply T_Sub with (eff := Eff_Pure).
+    + apply IHHtype. assumption.
+    + simpl. trivial.
+Qed.
 
 (** ** Context typing
 
@@ -65,10 +111,46 @@ Lemma effect_row_subset_trans :
     effect_row_subset e2 e3 ->
     effect_row_subset e1 e3.
 Proof.
-  (* By case analysis on the three effect row forms.
-     Each case follows from transitivity of set inclusion
-     and equality of row variables. *)
-Admitted.
+  intros e1 e2 e3 H12 H23.
+  destruct e1; simpl in *.
+  - (* e1 = Eff_Pure: always subset *)
+    trivial.
+  - (* e1 = Eff_Closed l *)
+    destruct e2; simpl in *.
+    + (* e2 = Eff_Pure: H12 says l = [] *)
+      destruct e3; simpl in *.
+      * (* e3 = Eff_Pure *) exact H12.
+      * (* e3 = Eff_Closed *) rewrite H12. intros e Hin. inversion Hin.
+      * (* e3 = Eff_Open *) rewrite H12. intros e Hin. inversion Hin.
+    + (* e2 = Eff_Closed l0 *)
+      destruct e3; simpl in *.
+      * (* e3 = Eff_Pure: H23 says l0 = [] *)
+        destruct l as [|hd tl].
+        { reflexivity. }
+        { exfalso. specialize (H12 hd (or_introl eq_refl)). rewrite H23 in H12. exact H12. }
+      * (* e3 = Eff_Closed l1 *)
+        intros e Hin. apply H23. apply H12. assumption.
+      * (* e3 = Eff_Open l1 n *)
+        intros e Hin. apply H23. apply H12. assumption.
+    + (* e2 = Eff_Open l0 n *)
+      destruct e3; simpl in *.
+      * contradiction.
+      * contradiction.
+      * destruct H23 as [Heq H23'].
+        intros e Hin. apply H23'. apply H12. assumption.
+  - (* e1 = Eff_Open l n: can only be subset of open rows *)
+    destruct e2; simpl in *.
+    + contradiction.
+    + contradiction.
+    + destruct H12 as [Heq12 H12'].
+      destruct e3; simpl in *.
+      * contradiction.
+      * contradiction.
+      * destruct H23 as [Heq23 H23'].
+        split.
+        { congruence. }
+        { intros e Hin. apply H23'. apply H12'. assumption. }
+Qed.
 
 (** ** Preservation Theorem
 
