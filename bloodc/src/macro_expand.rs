@@ -19,6 +19,7 @@ use crate::ast::{
     MacroDelimiter, MacroExpansion, MacroExpansionPart, MacroPattern, MacroPatternPart,
     MacroToken, Program, RepetitionKind, Statement, TokenStream, TokenTree,
 };
+use crate::diagnostics::Diagnostic;
 use crate::lexer::TokenKind;
 use crate::span::Span;
 
@@ -52,7 +53,7 @@ pub struct MacroExpander {
     /// Current expansion depth.
     depth: u32,
     /// Collected errors during expansion.
-    errors: Vec<String>,
+    errors: Vec<Diagnostic>,
 }
 
 impl MacroExpander {
@@ -98,7 +99,7 @@ impl MacroExpander {
     ///
     /// This modifies the program in place, replacing macro calls with their
     /// expanded forms. Returns any errors encountered during expansion.
-    pub fn expand_program(&mut self, program: &mut Program) -> Vec<String> {
+    pub fn expand_program(&mut self, program: &mut Program) -> Vec<Diagnostic> {
         // First collect all macros
         self.collect_macros(program);
 
@@ -226,16 +227,19 @@ impl MacroExpander {
                                     }
                                     Err(parse_errors) => {
                                         for err in parse_errors {
-                                            self.errors.push(format!(
-                                                "parse error in macro expansion: {}",
-                                                err.message
+                                            self.errors.push(Diagnostic::error(
+                                                format!(
+                                                    "parse error in macro expansion: {}",
+                                                    err.message
+                                                ),
+                                                expr.span,
                                             ));
                                         }
                                     }
                                 }
                             }
                             Err(e) => {
-                                self.errors.push(e);
+                                self.errors.push(Diagnostic::error(e, expr.span));
                             }
                         }
                     }
