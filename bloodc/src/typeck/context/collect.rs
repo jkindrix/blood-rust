@@ -492,10 +492,12 @@ impl<'a> TypeContext<'a> {
             )));
         }
 
-        // For `pub use` re-exports, add this item to the current module's exports
-        // This makes the imported item visible to external modules
+        // For `pub use` re-exports, add this item to the current module's exports.
+        // For private `use` imports, track them so they're visible inside the module.
         if matches!(visibility, ast::Visibility::Public | ast::Visibility::PublicCrate) {
             self.register_reexport(local_name, def_id, visibility, span);
+        } else {
+            self.register_private_import(local_name, def_id);
         }
 
         Ok(())
@@ -541,9 +543,12 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // For `pub use` re-exports, add this item to the current module's exports
+                // For `pub use` re-exports, add this item to the current module's exports.
+                // For private `use` imports, track them so they're visible inside the module.
                 if matches!(visibility, ast::Visibility::Public | ast::Visibility::PublicCrate) {
                     self.register_reexport(local_name, def_id, visibility, span);
+                } else {
+                    self.register_private_import(local_name, def_id);
                 }
             } else {
                 return Err(Box::new(TypeError::new(
@@ -598,9 +603,12 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // For `pub use *` re-exports, add all items to the current module's exports
+                // For `pub use *` re-exports, add all items to the current module's exports.
+                // For private `use *` imports, track them so they're visible inside the module.
                 if matches!(visibility, ast::Visibility::Public | ast::Visibility::PublicCrate) {
                     self.register_reexport(name, def_id, visibility, span);
+                } else {
+                    self.register_private_import(name, def_id);
                 }
             }
         }
@@ -632,6 +640,20 @@ impl<'a> TypeContext<'a> {
             self.current_module_reexports.push((name, def_id, visibility));
         }
         // For top-level re-exports (not inside a module), the item is already
+        // in global scope from the import, so no additional action needed.
+    }
+
+    /// Register a private import in the current module.
+    ///
+    /// When `use path::item;` (without `pub`) is used inside a module, the imported
+    /// item must be visible to function bodies within that module, even though it's
+    /// not exported to external modules. Private imports are tracked separately and
+    /// injected into scope during body checking via `inject_module_bindings`.
+    fn register_private_import(&mut self, name: String, def_id: DefId) {
+        if self.current_module.is_some() {
+            self.current_module_private_imports.push((name, def_id));
+        }
+        // For top-level private imports (not inside a module), the item is already
         // in global scope from the import, so no additional action needed.
     }
 
@@ -2843,6 +2865,7 @@ impl<'a> TypeContext<'a> {
                 // same-named items to shadow each other during inject_module_bindings.
                 let saved_module_items = std::mem::take(&mut self.current_module_items);
                 let saved_module_reexports = std::mem::take(&mut self.current_module_reexports);
+                let saved_module_private_imports = std::mem::take(&mut self.current_module_private_imports);
 
                 // Phase 1: Pre-register all type names so forward references work within the module
                 for decl in declarations {
@@ -2858,14 +2881,16 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Get the items and reexports collected for THIS module only (not submodules)
+                // Get the items, reexports, and private imports collected for THIS module only
                 let item_def_ids = std::mem::take(&mut self.current_module_items);
                 let reexports = std::mem::take(&mut self.current_module_reexports);
+                let private_imports = std::mem::take(&mut self.current_module_private_imports);
 
-                // Restore previous module context, items, and reexports
+                // Restore previous module context, items, reexports, and private imports
                 self.current_module = saved_module;
                 self.current_module_items = saved_module_items;
                 self.current_module_reexports = saved_module_reexports;
+                self.current_module_private_imports = saved_module_private_imports;
                 self.resolver.pop_scope();
 
                 // Store module info
@@ -2877,6 +2902,7 @@ impl<'a> TypeContext<'a> {
                     source_path: None,
                     source_content: None,
                     reexports,
+                    private_imports,
                 });
             }
             None => {
@@ -2988,6 +3014,7 @@ impl<'a> TypeContext<'a> {
                             source_path: existing_info.source_path,
                             source_content: existing_info.source_content,
                             reexports: existing_info.reexports,
+                            private_imports: existing_info.private_imports,
                         });
                         return Ok(());
                     }
@@ -3047,6 +3074,7 @@ impl<'a> TypeContext<'a> {
                 // same-named items to shadow each other during inject_module_bindings.
                 let saved_module_items = std::mem::take(&mut self.current_module_items);
                 let saved_module_reexports = std::mem::take(&mut self.current_module_reexports);
+                let saved_module_private_imports = std::mem::take(&mut self.current_module_private_imports);
 
                 // Phase 1: Pre-register all type names so forward references work within the module
                 for decl in &module_ast.declarations {
@@ -3065,15 +3093,17 @@ impl<'a> TypeContext<'a> {
                     }
                 }
 
-                // Get the items and reexports collected for THIS module only (not submodules)
+                // Get the items, reexports, and private imports collected for THIS module only
                 let item_def_ids = std::mem::take(&mut self.current_module_items);
                 let reexports = std::mem::take(&mut self.current_module_reexports);
+                let private_imports = std::mem::take(&mut self.current_module_private_imports);
 
-                // Restore previous module context, source path, items, and reexports
+                // Restore previous module context, source path, items, reexports, and private imports
                 self.source_path = saved_source_path;
                 self.current_module = saved_module;
                 self.current_module_items = saved_module_items;
                 self.current_module_reexports = saved_module_reexports;
+                self.current_module_private_imports = saved_module_private_imports;
                 self.resolver.pop_scope();
 
                 // Store module info with source for error reporting
@@ -3085,6 +3115,7 @@ impl<'a> TypeContext<'a> {
                     source_path: Some(module_path),
                     source_content: Some(module_source),
                     reexports,
+                    private_imports,
                 });
 
                 // Cache this module by canonical path for future diamond dependency detection

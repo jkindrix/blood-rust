@@ -182,6 +182,10 @@ pub struct TypeContext<'a> {
     /// Each entry is (local_name, original_def_id, visibility).
     /// Used by `pub use` re-exports.
     pub(crate) current_module_reexports: Vec<(String, DefId, crate::ast::Visibility)>,
+    /// Private imports for the current module being collected.
+    /// Each entry is (local_name, def_id). These are non-pub `use` imports
+    /// that must be visible inside the module but not exported.
+    pub(crate) current_module_private_imports: Vec<(String, DefId)>,
     /// DefId for the built-in Option<T> type.
     pub(crate) option_def_id: Option<DefId>,
     /// DefId for the built-in Result<T, E> type.
@@ -681,6 +685,9 @@ pub struct ModuleInfo {
     /// Re-exported items via `pub use`.
     /// Each entry is (local_name, original_def_id, visibility).
     pub reexports: Vec<(String, DefId, crate::ast::Visibility)>,
+    /// Private imports via `use` (non-pub). These are invisible outside the module
+    /// but must be available to function bodies within the module.
+    pub private_imports: Vec<(String, DefId)>,
 }
 
 impl<'a> TypeContext<'a> {
@@ -749,6 +756,7 @@ impl<'a> TypeContext<'a> {
             pending_derives: Vec::new(),
             current_module_items: Vec::new(),
             current_module_reexports: Vec::new(),
+            current_module_private_imports: Vec::new(),
             option_def_id: None,
             result_def_id: None,
             vec_def_id: None,

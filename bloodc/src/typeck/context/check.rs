@@ -161,6 +161,35 @@ impl<'a> TypeContext<'a> {
                     }
                 }
             }
+
+            // Inject private imports (non-pub `use` statements)
+            // These are invisible outside the module but must be available
+            // to function bodies within the module.
+            for (name, import_def_id) in &module_info.private_imports {
+                if let Some(def_info) = self.resolver.def_info.get(import_def_id) {
+                    let kind = def_info.kind;
+
+                    // Skip enum variants
+                    if kind == DefKind::Variant {
+                        continue;
+                    }
+
+                    // Add value binding
+                    self.resolver.current_scope_mut()
+                        .bindings
+                        .insert(name.clone(), Binding::Def(*import_def_id));
+
+                    // Add type binding for type-defining items
+                    match kind {
+                        DefKind::Struct | DefKind::Enum | DefKind::TypeAlias => {
+                            self.resolver.current_scope_mut()
+                                .type_bindings
+                                .insert(name.clone(), *import_def_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
