@@ -15,6 +15,7 @@
 //!   check  Type-check source file or project
 //!   build  Compile to executable
 //!   run    Compile and run source file
+//!   test   Run tests in source file or project
 //!
 //! Options:
 //!   -v, --verbose  Increase verbosity (can be repeated)
@@ -30,6 +31,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use bloodc::attr::{AttrHelper, TestInfo, TestRegistry};
 use bloodc::diagnostics::DiagnosticEmitter;
 use bloodc::{Lexer, TokenKind};
 use bloodc::codegen;
@@ -111,6 +113,12 @@ enum Commands {
     ///
     /// Compiles the source file and immediately runs the resulting executable.
     Run(FileArgs),
+
+    /// Run tests in source file or project
+    ///
+    /// Discovers functions marked with #[test] and runs them, reporting
+    /// results. Supports #[ignore] and #[should_panic] attributes.
+    Test(TestArgs),
 }
 
 #[derive(Args)]
@@ -177,6 +185,49 @@ struct BuildArgs {
     release: bool,
 }
 
+#[derive(Args)]
+struct TestArgs {
+    /// Source file or directory to test (optional - if not provided, looks for Blood.toml)
+    #[arg(value_name = "FILE")]
+    file: Option<PathBuf>,
+
+    /// Filter tests by name pattern (substring match)
+    #[arg(long, short = 'F', value_name = "PATTERN")]
+    filter: Option<String>,
+
+    /// Run ignored tests as well
+    #[arg(long)]
+    include_ignored: bool,
+
+    /// Only run ignored tests
+    #[arg(long)]
+    ignored: bool,
+
+    /// Disable automatic standard library import
+    #[arg(long)]
+    no_std: bool,
+
+    /// Path to the standard library (defaults to built-in)
+    #[arg(long, value_name = "PATH")]
+    stdlib_path: Option<PathBuf>,
+
+    /// Show stdout/stderr from passing tests
+    #[arg(long)]
+    show_output: bool,
+
+    /// Stop running tests after first failure
+    #[arg(long)]
+    fail_fast: bool,
+
+    /// List tests without running them
+    #[arg(long)]
+    list: bool,
+
+    /// Number of test threads (default: number of CPUs)
+    #[arg(long, short = 'j', value_name = "N")]
+    jobs: Option<usize>,
+}
+
 /// When to use colored output
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum ColorChoice {
@@ -221,6 +272,7 @@ fn main() -> ExitCode {
         Commands::Check(args) => cmd_check_project(&args, verbosity),
         Commands::Build(args) => cmd_build_project(&args, verbosity),
         Commands::Run(args) => cmd_run(&args, verbosity),
+        Commands::Test(args) => cmd_test(&args, verbosity),
     }
 }
 
@@ -1664,4 +1716,510 @@ fn cmd_run(args: &FileArgs, verbosity: u8) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Test command - discover and run tests
+fn cmd_test(args: &TestArgs, verbosity: u8) -> ExitCode {
+    // Determine file(s) to test
+    let test_files = match determine_test_files(args) {
+        Ok(files) => files,
+        Err(code) => return code,
+    };
+
+    if test_files.is_empty() {
+        eprintln!("No test files found.");
+        return ExitCode::from(1);
+    }
+
+    if verbosity > 0 {
+        eprintln!("Discovering tests in {} file(s)...", test_files.len());
+    }
+
+    // Discover tests in all files
+    let mut all_tests = TestRegistry::new();
+    let mut discovery_errors = false;
+
+    for file_path in &test_files {
+        match discover_tests_in_file(file_path, args, verbosity) {
+            Ok(tests) => {
+                for test in tests {
+                    all_tests.register(test);
+                }
+            }
+            Err(_) => {
+                discovery_errors = true;
+            }
+        }
+    }
+
+    if discovery_errors && all_tests.is_empty() {
+        eprintln!("Test discovery failed with errors.");
+        return ExitCode::from(1);
+    }
+
+    // Apply filters
+    let filtered_tests: Vec<&TestInfo> = all_tests
+        .tests()
+        .iter()
+        .filter(|t| {
+            // Apply name filter
+            if let Some(ref pattern) = args.filter {
+                if !t.full_path.contains(pattern) && !t.name.contains(pattern) {
+                    return false;
+                }
+            }
+            // Apply ignored filter
+            if args.ignored {
+                return t.config.ignore;
+            }
+            if !args.include_ignored && t.config.ignore {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    // Handle --list option
+    if args.list {
+        println!();
+        for test in &filtered_tests {
+            let suffix = if test.config.ignore {
+                " (ignored)"
+            } else if test.config.should_panic {
+                " (should panic)"
+            } else {
+                ""
+            };
+            println!("  {}{}", test.full_path, suffix);
+        }
+        println!();
+        println!("{} tests", filtered_tests.len());
+        return ExitCode::SUCCESS;
+    }
+
+    if filtered_tests.is_empty() {
+        if args.filter.is_some() {
+            eprintln!("No tests matched the filter.");
+        } else {
+            eprintln!("No tests to run.");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    // Run tests
+    let results = run_tests(&filtered_tests, &test_files, args, verbosity);
+
+    // Print summary
+    print_test_summary(&results);
+
+    if results.failed > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Determine which files to test
+fn determine_test_files(args: &TestArgs) -> Result<Vec<PathBuf>, ExitCode> {
+    if let Some(ref file) = args.file {
+        if file.is_file() {
+            return Ok(vec![file.clone()]);
+        } else if file.is_dir() {
+            // Find all .blood files in directory
+            return find_blood_files(file);
+        } else {
+            eprintln!("Error: '{}' is not a file or directory", file.display());
+            return Err(ExitCode::from(1));
+        }
+    }
+
+    // No file specified - look for project
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error getting current directory: {}", e);
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    match project::discover_project_root(&cwd) {
+        Some(project_root) => {
+            // Find all .blood files in src/
+            let src_dir = project_root.join("src");
+            if src_dir.exists() {
+                find_blood_files(&src_dir)
+            } else {
+                find_blood_files(&project_root)
+            }
+        }
+        None => {
+            eprintln!("Error: no Blood.toml found. Specify a file or run from a project directory.");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// Recursively find all .blood files in a directory
+fn find_blood_files(dir: &PathBuf) -> Result<Vec<PathBuf>, ExitCode> {
+    let mut files = Vec::new();
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Error reading directory '{}': {}", dir.display(), e);
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error reading directory entry: {}", e);
+                continue;
+            }
+        };
+
+        let path = entry.path();
+        if path.is_dir() {
+            // Recurse into subdirectories
+            match find_blood_files(&path) {
+                Ok(mut subfiles) => files.append(&mut subfiles),
+                Err(_) => continue, // Skip directories we can't read
+            }
+        } else if path.extension().map(|e| e == "blood").unwrap_or(false) {
+            files.push(path);
+        }
+    }
+
+    Ok(files)
+}
+
+/// Discover tests in a single file
+fn discover_tests_in_file(
+    file_path: &PathBuf,
+    _args: &TestArgs,
+    verbosity: u8,
+) -> Result<Vec<TestInfo>, ExitCode> {
+    let source = match read_source(file_path) {
+        Ok(s) => s,
+        Err(code) => return Err(code),
+    };
+
+    let path_str = file_path.to_string_lossy();
+    let emitter = DiagnosticEmitter::new(&path_str, &source);
+
+    // Parse the file
+    let mut parser = bloodc::Parser::new(&source);
+    let program = match parser.parse_program() {
+        Ok(p) => p,
+        Err(errors) => {
+            for error in &errors {
+                emitter.emit(error);
+            }
+            if verbosity > 0 {
+                eprintln!("Failed to parse '{}' for test discovery.", file_path.display());
+            }
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    // Get interner for attribute processing
+    let interner = parser.take_interner();
+    let attr_helper = AttrHelper::new(&interner);
+
+    // Discover test functions
+    let mut tests = Vec::new();
+
+    // Calculate module path from file path
+    let module_path = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    for decl in &program.declarations {
+        if let bloodc::ast::Declaration::Function(fn_decl) = decl {
+            let test_config = attr_helper.extract_test_config(&fn_decl.attrs);
+
+            if test_config.is_test {
+                // Get function name from interner
+                let fn_name = interner
+                    .resolve(fn_decl.name.node)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+
+                let test_info = TestInfo::new(
+                    fn_name,
+                    module_path.clone(),
+                    test_config,
+                    fn_decl.name.span,
+                );
+
+                tests.push(test_info);
+            }
+        }
+    }
+
+    if verbosity > 1 && !tests.is_empty() {
+        eprintln!("  Found {} test(s) in '{}'", tests.len(), file_path.display());
+    }
+
+    Ok(tests)
+}
+
+/// Results from running tests
+struct TestResults {
+    passed: usize,
+    failed: usize,
+    ignored: usize,
+    failures: Vec<TestFailure>,
+}
+
+/// Information about a failed test
+struct TestFailure {
+    name: String,
+    message: String,
+}
+
+/// Run all discovered tests
+fn run_tests(
+    tests: &[&TestInfo],
+    test_files: &[PathBuf],
+    args: &TestArgs,
+    verbosity: u8,
+) -> TestResults {
+    let mut results = TestResults {
+        passed: 0,
+        failed: 0,
+        ignored: 0,
+        failures: Vec::new(),
+    };
+
+    println!();
+    println!("running {} test(s)", tests.len());
+
+    for test in tests {
+        // Handle ignored tests
+        if test.config.ignore && !args.include_ignored && !args.ignored {
+            results.ignored += 1;
+            println!("test {} ... ignored", test.full_path);
+            continue;
+        }
+
+        // Run the test
+        let result = run_single_test(test, test_files, args, verbosity);
+
+        match result {
+            TestOutcome::Passed => {
+                results.passed += 1;
+                println!("test {} ... ok", test.full_path);
+            }
+            TestOutcome::Failed(msg) => {
+                results.failed += 1;
+                println!("test {} ... FAILED", test.full_path);
+                results.failures.push(TestFailure {
+                    name: test.full_path.clone(),
+                    message: msg,
+                });
+
+                if args.fail_fast {
+                    break;
+                }
+            }
+            TestOutcome::Ignored => {
+                results.ignored += 1;
+                println!("test {} ... ignored", test.full_path);
+            }
+        }
+    }
+
+    results
+}
+
+/// Outcome of a single test
+enum TestOutcome {
+    Passed,
+    Failed(String),
+    #[allow(dead_code)]
+    Ignored,
+}
+
+/// Run a single test
+fn run_single_test(
+    test: &TestInfo,
+    test_files: &[PathBuf],
+    args: &TestArgs,
+    verbosity: u8,
+) -> TestOutcome {
+    // Find the file containing this test
+    let test_file = test_files
+        .iter()
+        .find(|f| {
+            f.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s == test.module_path || test.module_path.is_empty())
+                .unwrap_or(false)
+        })
+        .or_else(|| test_files.first());
+
+    let test_file = match test_file {
+        Some(f) => f,
+        None => {
+            return TestOutcome::Failed("Could not find test file".to_string());
+        }
+    };
+
+    // Generate a test harness that calls the test function
+    let harness_source = generate_test_harness(test);
+
+    // Create a temporary file for the harness
+    let temp_dir = std::env::temp_dir();
+    let harness_file = temp_dir.join(format!("blood_test_{}.blood", test.name));
+    let harness_exe = temp_dir.join(format!("blood_test_{}", test.name));
+
+    // Write harness - include original source and harness
+    let original_source = match read_source(test_file) {
+        Ok(s) => s,
+        Err(_) => return TestOutcome::Failed("Could not read test file".to_string()),
+    };
+
+    let combined_source = format!(
+        "// Original source\n{}\n\n// Test harness\n{}",
+        original_source, harness_source
+    );
+
+    if let Err(e) = fs::write(&harness_file, &combined_source) {
+        return TestOutcome::Failed(format!("Failed to write test harness: {}", e));
+    }
+
+    // Build the test harness
+    let build_args = FileArgs {
+        file: harness_file.clone(),
+        debug: false,
+        no_std: args.no_std,
+        stdlib_path: args.stdlib_path.clone(),
+        release: false,
+    };
+
+    // Suppress build output unless verbose
+    let build_verbosity = if verbosity > 1 { verbosity } else { 0 };
+    let build_result = cmd_build(&build_args, build_verbosity);
+
+    // Clean up harness source
+    let _ = fs::remove_file(&harness_file);
+
+    if build_result != ExitCode::SUCCESS {
+        // Clean up build artifacts
+        let _ = fs::remove_file(&harness_exe);
+        let _ = fs::remove_dir_all(harness_file.with_extension("blood_objs"));
+        return TestOutcome::Failed("Test compilation failed".to_string());
+    }
+
+    // Run the test
+    let output = std::process::Command::new(&harness_exe)
+        .output();
+
+    // Clean up executable and object directory
+    let _ = fs::remove_file(&harness_exe);
+    let _ = fs::remove_dir_all(harness_file.with_extension("blood_objs"));
+
+    match output {
+        Ok(output) => {
+            let exited_successfully = output.status.success();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // Show output if requested
+            if args.show_output && (!stdout.is_empty() || !stderr.is_empty()) {
+                if !stdout.is_empty() {
+                    println!("---- {} stdout ----", test.name);
+                    println!("{}", stdout);
+                }
+                if !stderr.is_empty() {
+                    println!("---- {} stderr ----", test.name);
+                    println!("{}", stderr);
+                }
+            }
+
+            // Check for expected panic
+            if test.config.should_panic {
+                if exited_successfully {
+                    return TestOutcome::Failed("Test should have panicked but didn't".to_string());
+                }
+
+                // If there's an expected message, check for it
+                if let Some(ref expected) = test.config.expected_panic {
+                    let combined_output = format!("{}{}", stdout, stderr);
+                    if !combined_output.contains(expected) {
+                        return TestOutcome::Failed(format!(
+                            "Panic message '{}' not found in output",
+                            expected
+                        ));
+                    }
+                }
+
+                return TestOutcome::Passed;
+            }
+
+            if exited_successfully {
+                TestOutcome::Passed
+            } else {
+                let mut message = format!("Test exited with code {:?}", output.status.code());
+                if !stderr.is_empty() {
+                    message.push_str(&format!("\nstderr:\n{}", stderr));
+                }
+                TestOutcome::Failed(message)
+            }
+        }
+        Err(e) => TestOutcome::Failed(format!("Failed to run test: {}", e)),
+    }
+}
+
+/// Generate a test harness that calls the test function
+fn generate_test_harness(test: &TestInfo) -> String {
+    // The harness just needs to call the test function from main
+    // The test function is already in scope from the original source
+    format!(
+        r#"
+// Generated test harness for {}
+fn main() {{
+    {}();
+}}
+"#,
+        test.name, test.name
+    )
+}
+
+/// Print test summary
+fn print_test_summary(results: &TestResults) {
+    println!();
+
+    // Print failures
+    if !results.failures.is_empty() {
+        println!("failures:");
+        println!();
+        for failure in &results.failures {
+            println!("---- {} ----", failure.name);
+            println!("{}", failure.message);
+            println!();
+        }
+        println!("failures:");
+        for failure in &results.failures {
+            println!("    {}", failure.name);
+        }
+        println!();
+    }
+
+    // Print summary line
+    let status = if results.failed > 0 {
+        "FAILED"
+    } else {
+        "ok"
+    };
+
+    println!(
+        "test result: {}. {} passed; {} failed; {} ignored",
+        status, results.passed, results.failed, results.ignored
+    );
 }

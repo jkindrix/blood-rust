@@ -93,6 +93,7 @@
 
 pub mod arena;
 pub mod ast;
+pub mod attr;
 pub mod codegen;
 pub mod content;
 pub mod derive;
