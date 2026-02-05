@@ -26,6 +26,8 @@ use crossbeam_channel::{
     TrySendError as CcTrySendError,
 };
 
+use crate::cancellation::CancellationToken;
+
 /// Unique channel identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelId(pub u64);
@@ -155,6 +157,68 @@ impl fmt::Display for RecvTimeoutError {
 
 impl std::error::Error for RecvTimeoutError {}
 
+/// Error returned when send is cancelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendCancelledError<T> {
+    /// The operation was cancelled.
+    Cancelled(T),
+    /// The channel is closed.
+    Disconnected(T),
+}
+
+impl<T> fmt::Display for SendCancelledError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SendCancelledError::Cancelled(_) => write!(f, "send operation cancelled"),
+            SendCancelledError::Disconnected(_) => write!(f, "sending on a closed channel"),
+        }
+    }
+}
+
+impl<T: fmt::Debug> std::error::Error for SendCancelledError<T> {}
+
+impl<T> SendCancelledError<T> {
+    /// Extract the value from the error.
+    pub fn into_inner(self) -> T {
+        match self {
+            SendCancelledError::Cancelled(v) => v,
+            SendCancelledError::Disconnected(v) => v,
+        }
+    }
+
+    /// Check if the error is due to cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, SendCancelledError::Cancelled(_))
+    }
+}
+
+/// Error returned when recv is cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvCancelledError {
+    /// The operation was cancelled.
+    Cancelled,
+    /// The channel is closed.
+    Disconnected,
+}
+
+impl fmt::Display for RecvCancelledError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecvCancelledError::Cancelled => write!(f, "recv operation cancelled"),
+            RecvCancelledError::Disconnected => write!(f, "receiving from a closed channel"),
+        }
+    }
+}
+
+impl std::error::Error for RecvCancelledError {}
+
+impl RecvCancelledError {
+    /// Check if the error is due to cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, RecvCancelledError::Cancelled)
+    }
+}
+
 /// The sending half of a channel.
 #[derive(Debug)]
 pub struct Sender<T> {
@@ -209,6 +273,87 @@ impl<T> Sender<T> {
     /// Get the channel capacity, or None for unbounded.
     pub fn capacity(&self) -> Option<usize> {
         self.inner.capacity()
+    }
+
+    /// Send a message with cancellation support.
+    ///
+    /// Polls the cancellation token while waiting for space in the channel.
+    /// Returns `Err(SendCancelledError::Cancelled)` if cancelled before sending.
+    pub fn send_cancellable(
+        &self,
+        msg: T,
+        token: &CancellationToken,
+    ) -> Result<(), SendCancelledError<T>> {
+        // Fast path: check if channel has space (for bounded) or is open
+        match self.inner.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(CcTrySendError::Disconnected(v)) => {
+                return Err(SendCancelledError::Disconnected(v));
+            }
+            Err(CcTrySendError::Full(v)) => {
+                // Need to wait for space, with cancellation checking
+                let mut value = v;
+                loop {
+                    // Check for cancellation
+                    if token.is_cancelled() {
+                        return Err(SendCancelledError::Cancelled(value));
+                    }
+
+                    // Try to send with short timeout
+                    match self.inner.send_timeout(value, Duration::from_millis(10)) {
+                        Ok(()) => return Ok(()),
+                        Err(CcSendTimeoutError::Disconnected(v)) => {
+                            return Err(SendCancelledError::Disconnected(v));
+                        }
+                        Err(CcSendTimeoutError::Timeout(v)) => {
+                            value = v;
+                            // Continue loop, will check cancellation again
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send a message with both cancellation and timeout support.
+    ///
+    /// Returns error if cancelled, timeout expires, or channel disconnected.
+    pub fn send_cancellable_timeout(
+        &self,
+        msg: T,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<(), SendCancelledError<T>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut value = msg;
+
+        loop {
+            // Check for cancellation
+            if token.is_cancelled() {
+                return Err(SendCancelledError::Cancelled(value));
+            }
+
+            // Check for timeout
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(SendCancelledError::Cancelled(value));
+            }
+
+            // Calculate remaining time with minimum poll interval
+            let remaining = deadline.saturating_duration_since(now);
+            let poll_timeout = remaining.min(Duration::from_millis(10));
+
+            match self.inner.send_timeout(value, poll_timeout) {
+                Ok(()) => return Ok(()),
+                Err(CcSendTimeoutError::Disconnected(v)) => {
+                    return Err(SendCancelledError::Disconnected(v));
+                }
+                Err(CcSendTimeoutError::Timeout(v)) => {
+                    value = v;
+                    // Continue loop
+                }
+            }
+        }
     }
 }
 
@@ -285,6 +430,78 @@ impl<T> Receiver<T> {
     /// Create a try-iterator over received messages.
     pub fn try_iter(&self) -> impl Iterator<Item = T> + '_ {
         self.inner.try_iter()
+    }
+
+    /// Receive a message with cancellation support.
+    ///
+    /// Polls the cancellation token while waiting for a message.
+    /// Returns `Err(RecvCancelledError::Cancelled)` if cancelled before receiving.
+    pub fn recv_cancellable(&self, token: &CancellationToken) -> Result<T, RecvCancelledError> {
+        // Fast path: check if message available
+        match self.inner.try_recv() {
+            Ok(v) => return Ok(v),
+            Err(CcTryRecvError::Disconnected) => {
+                return Err(RecvCancelledError::Disconnected);
+            }
+            Err(CcTryRecvError::Empty) => {
+                // Need to wait for message, with cancellation checking
+                loop {
+                    // Check for cancellation
+                    if token.is_cancelled() {
+                        return Err(RecvCancelledError::Cancelled);
+                    }
+
+                    // Try to receive with short timeout
+                    match self.inner.recv_timeout(Duration::from_millis(10)) {
+                        Ok(v) => return Ok(v),
+                        Err(CcRecvTimeoutError::Disconnected) => {
+                            return Err(RecvCancelledError::Disconnected);
+                        }
+                        Err(CcRecvTimeoutError::Timeout) => {
+                            // Continue loop, will check cancellation again
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Receive a message with both cancellation and timeout support.
+    ///
+    /// Returns error if cancelled, timeout expires, or channel disconnected.
+    pub fn recv_cancellable_timeout(
+        &self,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<T, RecvCancelledError> {
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            // Check for cancellation
+            if token.is_cancelled() {
+                return Err(RecvCancelledError::Cancelled);
+            }
+
+            // Check for timeout
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(RecvCancelledError::Cancelled);
+            }
+
+            // Calculate remaining time with minimum poll interval
+            let remaining = deadline.saturating_duration_since(now);
+            let poll_timeout = remaining.min(Duration::from_millis(10));
+
+            match self.inner.recv_timeout(poll_timeout) {
+                Ok(v) => return Ok(v),
+                Err(CcRecvTimeoutError::Disconnected) => {
+                    return Err(RecvCancelledError::Disconnected);
+                }
+                Err(CcRecvTimeoutError::Timeout) => {
+                    // Continue loop
+                }
+            }
+        }
     }
 }
 

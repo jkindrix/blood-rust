@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use crate::cancellation::{CancellationError, CancellationToken};
 use crate::fiber::{FiberId, WakeCondition, IoInterest};
 
 /// Unique I/O operation identifier.
@@ -161,6 +162,8 @@ pub enum IoResult {
     Ready(Interest),
     /// Timeout expired.
     TimedOut,
+    /// Operation was cancelled.
+    Cancelled,
     /// Error occurred.
     Error(IoError),
 }
@@ -225,6 +228,32 @@ impl Default for ReactorConfig {
             poll_timeout: Duration::from_millis(100),
         }
     }
+}
+
+impl ReactorConfig {
+    /// Create a reactor config from the global runtime configuration.
+    ///
+    /// Uses the configured I/O timeout for poll operations if available.
+    pub fn from_runtime_config() -> Self {
+        if let Some(config) = crate::runtime_config() {
+            Self {
+                max_pending: 1024,
+                // Use a fraction of io_timeout for poll operations
+                poll_timeout: config.timeout.io_timeout / 10,
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// Get the configured I/O timeout from the runtime configuration.
+///
+/// Returns the default (30 seconds) if no runtime config is available.
+pub fn configured_io_timeout() -> Duration {
+    crate::runtime_config()
+        .map(|c| c.timeout.io_timeout)
+        .unwrap_or_else(|| Duration::from_secs(30))
 }
 
 /// I/O reactor driver (platform-specific backend).
@@ -594,6 +623,298 @@ impl IoReactor {
     /// Store a completed result for later retrieval.
     pub fn store_completion(&self, op_id: IoOpId, result: IoResult) {
         self.completed.lock().insert(op_id, result);
+    }
+
+    // ========================================================================
+    // Cancellation-aware methods
+    // ========================================================================
+
+    /// Cancel a pending I/O operation.
+    ///
+    /// Returns true if the operation was found and cancelled.
+    pub fn cancel_operation(&self, op_id: IoOpId) -> bool {
+        // Try to cancel in the driver
+        if self.driver.cancel(op_id).is_ok() {
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            // Remove fiber mapping if present
+            self.fiber_mappings.lock().remove(&op_id);
+            // Store cancellation result
+            self.completed.lock().insert(op_id, IoResult::Cancelled);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Submit an operation with cancellation token support.
+    ///
+    /// If the token is already cancelled, returns immediately with a cancelled result.
+    /// The operation ID is still returned for consistency.
+    pub fn submit_cancellable(
+        &self,
+        op: IoOp,
+        token: &CancellationToken,
+    ) -> io::Result<(IoOpId, bool)> {
+        // Check if already cancelled
+        if token.is_cancelled() {
+            let op_id = next_io_op_id();
+            self.completed.lock().insert(op_id, IoResult::Cancelled);
+            return Ok((op_id, true)); // true = already cancelled
+        }
+
+        let op_id = self.submit(op)?;
+        Ok((op_id, false)) // false = not cancelled
+    }
+
+    /// Submit an operation for a fiber with cancellation support.
+    pub fn submit_for_fiber_cancellable(
+        &self,
+        op: IoOp,
+        fiber_id: FiberId,
+        token: &CancellationToken,
+    ) -> io::Result<(IoOpId, bool)> {
+        if token.is_cancelled() {
+            let op_id = next_io_op_id();
+            self.completed.lock().insert(op_id, IoResult::Cancelled);
+            return Ok((op_id, true));
+        }
+
+        let op_id = self.submit_for_fiber(op, fiber_id)?;
+        Ok((op_id, false))
+    }
+
+    /// Wait for an operation to complete, checking for cancellation.
+    ///
+    /// Polls until the operation completes or the cancellation token is triggered.
+    /// Returns `Err(CancellationError)` if cancelled before completion.
+    pub fn wait_for_completion(
+        &self,
+        op_id: IoOpId,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        loop {
+            // Check for cancellation
+            if token.is_cancelled() {
+                // Cancel the operation
+                self.cancel_operation(op_id);
+                return Err(CancellationError {
+                    reason: token.reason(),
+                });
+            }
+
+            // Check if already complete
+            if let Some(result) = self.try_get_result(op_id) {
+                return Ok(result);
+            }
+
+            // Poll for completions
+            if let Ok(completions) = self.poll() {
+                for completion in completions {
+                    if completion.op_id == op_id {
+                        return Ok(completion.result);
+                    } else {
+                        // Store other completions for later retrieval
+                        self.store_completion(completion.op_id, completion.result);
+                    }
+                }
+            }
+
+            // Small yield to prevent busy-waiting
+            std::thread::yield_now();
+        }
+    }
+
+    /// Wait for an operation with timeout and cancellation support.
+    ///
+    /// Returns `Err(CancellationError)` if cancelled, or `Ok(IoResult::TimedOut)` if timeout expires.
+    pub fn wait_for_completion_timeout(
+        &self,
+        op_id: IoOpId,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            // Check for cancellation
+            if token.is_cancelled() {
+                self.cancel_operation(op_id);
+                return Err(CancellationError {
+                    reason: token.reason(),
+                });
+            }
+
+            // Check for timeout
+            if std::time::Instant::now() >= deadline {
+                self.cancel_operation(op_id);
+                return Ok(IoResult::TimedOut);
+            }
+
+            // Check if already complete
+            if let Some(result) = self.try_get_result(op_id) {
+                return Ok(result);
+            }
+
+            // Poll with remaining time
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let poll_timeout = remaining.min(Duration::from_millis(10));
+
+            if let Ok(completions) = self.poll_timeout(poll_timeout) {
+                for completion in completions {
+                    if completion.op_id == op_id {
+                        return Ok(completion.result);
+                    } else {
+                        self.store_completion(completion.op_id, completion.result);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Async read with cancellation support.
+    pub fn async_read_cancellable(
+        &self,
+        fd: i32,
+        buf_len: usize,
+        offset: i64,
+        token: &CancellationToken,
+    ) -> io::Result<(IoOpId, bool)> {
+        self.submit_cancellable(IoOp::Read { fd, buf_len, offset }, token)
+    }
+
+    /// Async write with cancellation support.
+    pub fn async_write_cancellable(
+        &self,
+        fd: i32,
+        data: Vec<u8>,
+        offset: i64,
+        token: &CancellationToken,
+    ) -> io::Result<(IoOpId, bool)> {
+        self.submit_cancellable(IoOp::Write { fd, data, offset }, token)
+    }
+
+    /// Async accept with cancellation support.
+    pub fn async_accept_cancellable(
+        &self,
+        fd: i32,
+        token: &CancellationToken,
+    ) -> io::Result<(IoOpId, bool)> {
+        self.submit_cancellable(IoOp::Accept { fd }, token)
+    }
+
+    /// Async connect with cancellation support.
+    pub fn async_connect_cancellable(
+        &self,
+        fd: i32,
+        addr: Vec<u8>,
+        token: &CancellationToken,
+    ) -> io::Result<(IoOpId, bool)> {
+        self.submit_cancellable(IoOp::Connect { fd, addr }, token)
+    }
+
+    // ========================================================================
+    // Configured timeout methods
+    // ========================================================================
+
+    /// Wait for an operation with the configured I/O timeout.
+    ///
+    /// Uses `config.timeout.io_timeout` from the runtime configuration,
+    /// falling back to 30 seconds if no configuration is available.
+    pub fn wait_for_completion_with_configured_timeout(
+        &self,
+        op_id: IoOpId,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        self.wait_for_completion_timeout(op_id, configured_io_timeout(), token)
+    }
+
+    /// Submit a read operation and wait for completion with configured timeout.
+    ///
+    /// This is a convenience method that combines submit and wait.
+    pub fn read_with_configured_timeout(
+        &self,
+        fd: i32,
+        buf_len: usize,
+        offset: i64,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        let (op_id, already_cancelled) = self
+            .async_read_cancellable(fd, buf_len, offset, token)
+            .map_err(|e| CancellationError {
+                reason: Some(e.to_string()),
+            })?;
+
+        if already_cancelled {
+            return Ok(IoResult::Cancelled);
+        }
+
+        self.wait_for_completion_with_configured_timeout(op_id, token)
+    }
+
+    /// Submit a write operation and wait for completion with configured timeout.
+    ///
+    /// This is a convenience method that combines submit and wait.
+    pub fn write_with_configured_timeout(
+        &self,
+        fd: i32,
+        data: Vec<u8>,
+        offset: i64,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        let (op_id, already_cancelled) = self
+            .async_write_cancellable(fd, data, offset, token)
+            .map_err(|e| CancellationError {
+                reason: Some(e.to_string()),
+            })?;
+
+        if already_cancelled {
+            return Ok(IoResult::Cancelled);
+        }
+
+        self.wait_for_completion_with_configured_timeout(op_id, token)
+    }
+
+    /// Submit an accept operation and wait for completion with configured timeout.
+    ///
+    /// This is a convenience method that combines submit and wait.
+    pub fn accept_with_configured_timeout(
+        &self,
+        fd: i32,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        let (op_id, already_cancelled) = self
+            .async_accept_cancellable(fd, token)
+            .map_err(|e| CancellationError {
+                reason: Some(e.to_string()),
+            })?;
+
+        if already_cancelled {
+            return Ok(IoResult::Cancelled);
+        }
+
+        self.wait_for_completion_with_configured_timeout(op_id, token)
+    }
+
+    /// Submit a connect operation and wait for completion with configured timeout.
+    ///
+    /// This is a convenience method that combines submit and wait.
+    pub fn connect_with_configured_timeout(
+        &self,
+        fd: i32,
+        addr: Vec<u8>,
+        token: &CancellationToken,
+    ) -> Result<IoResult, CancellationError> {
+        let (op_id, already_cancelled) = self
+            .async_connect_cancellable(fd, addr, token)
+            .map_err(|e| CancellationError {
+                reason: Some(e.to_string()),
+            })?;
+
+        if already_cancelled {
+            return Ok(IoResult::Cancelled);
+        }
+
+        self.wait_for_completion_with_configured_timeout(op_id, token)
     }
 }
 
