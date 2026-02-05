@@ -27,12 +27,14 @@
 //! - Print support via runtime
 
 pub mod context;
+pub mod debug_info;
 pub mod types;
 pub mod expr;
 pub mod runtime;
 pub mod mir_codegen;
 
 pub use context::CodegenContext;
+pub use debug_info::{DebugInfoGenerator, DebugInfoConfig};
 pub use mir_codegen::MirCodegen;
 
 // ============================================================================
