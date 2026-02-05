@@ -407,6 +407,20 @@ impl SlotRegistry {
         self.slots.write().clear();
         self.count.store(0, Ordering::Relaxed);
     }
+
+    /// Get the count of unique regions that have allocations.
+    ///
+    /// Returns the number of distinct non-zero region IDs in the registry.
+    pub fn region_count(&self) -> usize {
+        let slots = self.slots.read();
+        let mut regions = std::collections::HashSet::new();
+        for entry in slots.values() {
+            if entry.region_id != 0 && entry.is_allocated {
+                regions.insert(entry.region_id);
+            }
+        }
+        regions.len()
+    }
 }
 
 impl Default for SlotRegistry {
@@ -639,6 +653,52 @@ pub struct MemoryUsageSummary {
     pub limit_bytes: Option<u64>,
     /// Usage as a percentage of limit (0 if unlimited).
     pub usage_percent: f64,
+}
+
+/// Allocation statistics for observability.
+#[derive(Debug, Clone)]
+pub struct AllocationStats {
+    /// Total bytes allocated (including freed).
+    pub total_allocated: usize,
+    /// Total bytes freed.
+    pub total_freed: usize,
+    /// Currently live bytes.
+    pub current_live: usize,
+    /// Number of allocations.
+    pub allocation_count: usize,
+    /// Number of deallocations.
+    pub deallocation_count: usize,
+}
+
+/// Get total currently allocated bytes.
+pub fn total_allocated() -> usize {
+    let (allocated, freed, _, _) = system_alloc_stats();
+    allocated.saturating_sub(freed) as usize
+}
+
+/// Get number of active regions.
+///
+/// Note: This currently returns the count of registered slots that have
+/// non-zero region IDs, as regions are not globally tracked.
+pub fn active_region_count() -> usize {
+    slot_registry().region_count()
+}
+
+/// Get allocation statistics.
+pub fn allocation_stats() -> AllocationStats {
+    let (allocated, freed, alloc_count, free_count) = system_alloc_stats();
+    AllocationStats {
+        total_allocated: allocated as usize,
+        total_freed: freed as usize,
+        current_live: allocated.saturating_sub(freed) as usize,
+        allocation_count: alloc_count as usize,
+        deallocation_count: free_count as usize,
+    }
+}
+
+/// Get the number of active persistent slots.
+pub fn persistent_slot_count() -> usize {
+    persistent_allocator().slot_count()
 }
 
 /// Register an allocation in the global slot registry.
@@ -2311,6 +2371,11 @@ impl PersistentAllocator {
     /// Get the number of live slots.
     pub fn live_count(&self) -> usize {
         self.slots.read().len()
+    }
+
+    /// Get the number of slots (alias for live_count).
+    pub fn slot_count(&self) -> usize {
+        self.live_count()
     }
 }
 

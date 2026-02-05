@@ -49,28 +49,35 @@ pub mod channel;
 pub mod config;
 pub mod continuation;
 pub mod fiber;
+pub mod fiber_local;
 pub mod ffi;
 pub mod ffi_exports;
 pub mod io;
 pub mod log;
 pub mod memory;
+pub mod net;
+pub mod observability;
 pub mod panic;
 pub mod process;
 pub mod scheduler;
+pub mod serialize;
 pub mod signal;
 pub mod simd;
 pub mod stdlib;
 pub mod sync;
+pub mod timeout;
 
 // Re-exports
 pub use cancellation::{CancellationToken, CancellationSource, CancellationError, CancellableScope};
 pub use channel::{bounded, unbounded, Receiver, Sender};
 pub use config::{RuntimeConfig, RuntimeConfigBuilder, LogLevel, ConfigError};
 pub use fiber::{Fiber, FiberId, FiberHandle, FiberState};
+pub use fiber_local::{FiberLocal, FiberLocalKey, FiberLocalStorage, FiberContext, TraceContext, RequestContext, PropagationMode};
 pub use panic::{BloodPanicInfo, Location as PanicLocation};
 pub use scheduler::{Scheduler, Worker};
 pub use signal::{Signal, SignalHandler};
 pub use sync::{Mutex, RwLock, Once, Barrier, Semaphore, OnceLock};
+pub use timeout::{Timeout, TimeoutGuard, TimeoutError, TimeoutBuilder, Deadline, with_timeout, with_timeout_and_parent};
 
 /// Runtime version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

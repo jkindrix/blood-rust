@@ -147,6 +147,22 @@ pub struct TimeoutConfig {
     /// None means no timeout (default).
     pub default_timeout: Option<Duration>,
 
+    /// Default timeout for general operations.
+    /// Default: 30 seconds.
+    pub default_operation_timeout: Duration,
+
+    /// Timeout for network operations.
+    /// Default: 60 seconds.
+    pub network_timeout: Duration,
+
+    /// Timeout for I/O operations.
+    /// Default: 30 seconds.
+    pub io_timeout: Duration,
+
+    /// Timeout for compute-bound operations.
+    /// Default: 300 seconds (5 minutes).
+    pub compute_timeout: Duration,
+
     /// Graceful shutdown timeout.
     /// Default: 5 seconds.
     pub graceful_shutdown: Duration,
@@ -156,6 +172,10 @@ impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
             default_timeout: None,
+            default_operation_timeout: Duration::from_secs(30),
+            network_timeout: Duration::from_secs(60),
+            io_timeout: Duration::from_secs(30),
+            compute_timeout: Duration::from_secs(300),
             graceful_shutdown: Duration::from_secs(5),
         }
     }
@@ -300,6 +320,22 @@ impl RuntimeConfig {
 
         if let Some(val) = parse_env_usize("BLOOD_GRACEFUL_SHUTDOWN_MS") {
             config.timeout.graceful_shutdown = Duration::from_millis(val as u64);
+        }
+
+        if let Some(val) = parse_env_usize("BLOOD_OPERATION_TIMEOUT_MS") {
+            config.timeout.default_operation_timeout = Duration::from_millis(val as u64);
+        }
+
+        if let Some(val) = parse_env_usize("BLOOD_NETWORK_TIMEOUT_MS") {
+            config.timeout.network_timeout = Duration::from_millis(val as u64);
+        }
+
+        if let Some(val) = parse_env_usize("BLOOD_IO_TIMEOUT_MS") {
+            config.timeout.io_timeout = Duration::from_millis(val as u64);
+        }
+
+        if let Some(val) = parse_env_usize("BLOOD_COMPUTE_TIMEOUT_MS") {
+            config.timeout.compute_timeout = Duration::from_millis(val as u64);
         }
 
         // Logging configuration
@@ -462,6 +498,30 @@ impl RuntimeConfigBuilder {
     /// Set the graceful shutdown timeout.
     pub fn graceful_shutdown(mut self, timeout: Duration) -> Self {
         self.config.timeout.graceful_shutdown = timeout;
+        self
+    }
+
+    /// Set the default operation timeout.
+    pub fn default_operation_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout.default_operation_timeout = timeout;
+        self
+    }
+
+    /// Set the network timeout.
+    pub fn network_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout.network_timeout = timeout;
+        self
+    }
+
+    /// Set the I/O timeout.
+    pub fn io_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout.io_timeout = timeout;
+        self
+    }
+
+    /// Set the compute timeout.
+    pub fn compute_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout.compute_timeout = timeout;
         self
     }
 

@@ -304,11 +304,11 @@ The self-hosted compiler has specific dependencies:
 - [x] #24 Variance rules
 
 ### Phase 5: Production
-- [ ] #4 Observability
-- [ ] #29 Fiber-local storage
-- [ ] #6 Timeout enforcement
-- [ ] #13 Networking
-- [ ] #40 Serialization
+- [x] #4 Observability
+- [x] #29 Fiber-local storage
+- [x] #6 Timeout enforcement
+- [x] #13 Networking
+- [x] #40 Serialization
 
 ---
 
