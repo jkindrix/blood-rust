@@ -17,6 +17,8 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cancellation::{CancellationError, CancellationSource, CancellationToken};
+
 /// Unique identifier for a fiber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FiberId(pub u64);
@@ -45,6 +47,28 @@ static NEXT_FIBER_ID: AtomicU64 = AtomicU64::new(1);
 /// Generate a new unique fiber ID.
 pub fn next_fiber_id() -> FiberId {
     FiberId(NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+// ============================================================================
+// CONFIGURED STACK SIZES
+// ============================================================================
+
+/// Get the configured initial stack size from the runtime configuration.
+///
+/// Returns the default (8 KB) if no runtime config is available.
+pub fn configured_initial_stack_size() -> usize {
+    crate::runtime_config()
+        .map(|c| c.scheduler.initial_stack_size)
+        .unwrap_or(8 * 1024) // 8 KB default
+}
+
+/// Get the configured maximum stack size from the runtime configuration.
+///
+/// Returns the default (1 MB) if no runtime config is available.
+pub fn configured_max_stack_size() -> usize {
+    crate::runtime_config()
+        .map(|c| c.scheduler.max_stack_size)
+        .unwrap_or(1024 * 1024) // 1 MB default
 }
 
 /// Fiber execution state.
@@ -90,19 +114,34 @@ pub struct FiberConfig {
     pub stack_size: usize,
     /// Scheduling priority.
     pub priority: Priority,
+    /// Parent cancellation token for hierarchical cancellation.
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 impl Default for FiberConfig {
     fn default() -> Self {
         Self {
             name: None,
-            stack_size: 8 * 1024, // 8 KB
+            stack_size: configured_initial_stack_size(),
             priority: Priority::Normal,
+            cancellation_token: None,
         }
     }
 }
 
 impl FiberConfig {
+    /// Create a fiber config from the global runtime configuration.
+    ///
+    /// This explicitly uses the configured stack size from RuntimeConfig.
+    pub fn from_runtime_config() -> Self {
+        Self {
+            name: None,
+            stack_size: configured_initial_stack_size(),
+            priority: Priority::Normal,
+            cancellation_token: None,
+        }
+    }
+
     /// Create a new fiber config with a name.
     pub fn named(name: impl Into<String>) -> Self {
         Self {
@@ -120,6 +159,14 @@ impl FiberConfig {
     /// Set the priority.
     pub fn with_priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Set the parent cancellation token.
+    ///
+    /// The fiber will be cancelled when the parent token is cancelled.
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
         self
     }
 }
@@ -278,6 +325,10 @@ pub struct Fiber {
     /// Reserved for future use when fiber join returns results.
     #[allow(dead_code)] // Fiber result field — used when fiber join is implemented
     result: Option<Box<dyn std::any::Any + Send>>,
+    /// Cancellation source for this fiber.
+    cancellation_source: CancellationSource,
+    /// Cancellation token for checking cancellation state.
+    cancellation_token: CancellationToken,
 }
 
 impl Fiber {
@@ -286,11 +337,18 @@ impl Fiber {
     where
         F: FnOnce() + Send + 'static,
     {
+        // Create cancellation source, optionally with parent token
+        let cancellation_source = match config.cancellation_token {
+            Some(parent_token) => CancellationSource::with_parent(parent_token),
+            None => CancellationSource::new(),
+        };
+        let cancellation_token = cancellation_source.token();
+
         Self {
             id: next_fiber_id(),
             parent: None,
             state: FiberState::Runnable,
-            stack: FiberStack::new(config.stack_size, 1024 * 1024),
+            stack: FiberStack::new(config.stack_size, configured_max_stack_size()),
             context: FiberContext::default(),
             priority: config.priority,
             wake_condition: None,
@@ -298,6 +356,8 @@ impl Fiber {
             created_at: std::time::Instant::now(),
             task: Some(Box::new(task)),
             result: None,
+            cancellation_source,
+            cancellation_token,
         }
     }
 
@@ -347,17 +407,70 @@ impl Fiber {
     }
 
     /// Mark the fiber as cancelled.
+    ///
+    /// This both sets the fiber state to Cancelled and triggers the
+    /// cancellation source, which notifies any child fibers or operations.
     pub fn cancel(&mut self) {
         self.state = FiberState::Cancelled;
+        self.cancellation_source.cancel();
+    }
+
+    /// Request cancellation of this fiber.
+    ///
+    /// This triggers the cancellation token but doesn't immediately change
+    /// the fiber state. The fiber will transition to Cancelled when it
+    /// next checks for cancellation (typically at a yield point).
+    pub fn request_cancel(&self) {
+        self.cancellation_source.cancel();
+    }
+
+    /// Request cancellation with a reason.
+    pub fn request_cancel_with_reason(&self, reason: String) {
+        self.cancellation_source.cancel_with_reason(Some(reason));
+    }
+
+    /// Get the cancellation token for this fiber.
+    ///
+    /// Child fibers should use this token as their parent to enable
+    /// hierarchical cancellation.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
+    }
+
+    /// Check if cancellation has been requested.
+    pub fn is_cancellation_requested(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
+
+    /// Check cancellation and return error if cancelled.
+    ///
+    /// Call this at yield points and before resuming work.
+    pub fn check_cancellation(&self) -> Result<(), CancellationError> {
+        self.cancellation_token.check()
     }
 
     /// Run the fiber's task.
+    ///
+    /// Checks for cancellation before running. If cancelled, the fiber
+    /// transitions to the Cancelled state without running the task.
     pub fn run(&mut self) {
+        // Check for cancellation before running
+        if self.cancellation_token.is_cancelled() {
+            self.state = FiberState::Cancelled;
+            return;
+        }
+
         if let Some(task) = self.task.take() {
             self.state = FiberState::Running;
             task();
+            // Check if task completed normally or was interrupted
             if self.state == FiberState::Running {
-                self.complete();
+                // Check for cancellation that may have occurred during execution
+                if self.cancellation_token.is_cancelled() {
+                    self.state = FiberState::Cancelled;
+                } else {
+                    self.complete();
+                }
             }
         }
     }
@@ -426,7 +539,27 @@ mod tests {
     fn test_fiber_config_default() {
         let config = FiberConfig::default();
         assert!(config.name.is_none());
-        assert_eq!(config.stack_size, 8 * 1024);
+        // Uses configured stack size (8KB default without runtime config)
+        assert_eq!(config.stack_size, configured_initial_stack_size());
+        assert_eq!(config.priority, Priority::Normal);
+    }
+
+    #[test]
+    fn test_configured_stack_sizes() {
+        // Without runtime config, should return defaults
+        let initial = configured_initial_stack_size();
+        let max = configured_max_stack_size();
+
+        // 8KB initial, 1MB max defaults
+        assert_eq!(initial, 8 * 1024);
+        assert_eq!(max, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_fiber_config_from_runtime() {
+        let config = FiberConfig::from_runtime_config();
+        assert!(config.name.is_none());
+        assert_eq!(config.stack_size, configured_initial_stack_size());
         assert_eq!(config.priority, Priority::Normal);
     }
 
