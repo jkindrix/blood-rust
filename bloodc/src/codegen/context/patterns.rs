@@ -10,7 +10,7 @@ use inkwell::FloatPredicate;
 
 use crate::hir::{self, Type};
 use crate::diagnostics::Diagnostic;
-use crate::span::Span;
+
 use crate::ice_err;
 
 use super::CodegenContext;
@@ -24,7 +24,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         result_ty: &Type,
     ) -> Result<Option<BasicValueEnum<'ctx>>, Vec<Diagnostic>> {
         let fn_value = self.current_fn
-            .ok_or_else(|| vec![Diagnostic::error("Match outside function", Span::dummy())])?;
+            .ok_or_else(|| vec![Diagnostic::error("Match outside function", self.current_span())])?;
 
         // Evaluate scrutinee once
         let scrutinee_val = self.compile_expr(scrutinee)?;
@@ -45,11 +45,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Jump to first arm's test
         if let Some((first_test, _)) = arm_blocks.first() {
             self.builder.build_unconditional_branch(*first_test)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         } else {
             // No arms - should not happen with exhaustive patterns
             self.builder.build_unconditional_branch(merge_bb)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         }
 
         // Collect results for phi node
@@ -84,7 +84,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // If pattern matches, check guard
                 let guard_bb = self.context.append_basic_block(fn_value, &format!("match.arm{}.guard", i));
                 self.builder.build_conditional_branch(matches, guard_bb, next_test)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 self.builder.position_at_end(guard_bb);
                 // Bind pattern variables for guard evaluation
@@ -99,19 +99,19 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             } else {
                 // Bind pattern variables directly and branch
                 self.builder.build_conditional_branch(matches, body_bb, next_test)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                 continue; // Branch already built
             };
 
             // Branch based on guard result
             self.builder.build_conditional_branch(final_match, body_bb, next_test)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         }
 
         // Build unreachable block
         self.builder.position_at_end(unreachable_bb);
         self.builder.build_unreachable()
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Compile each arm body
         for (i, arm) in arms.iter().enumerate() {
@@ -134,7 +134,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
             // Jump to merge
             self.builder.build_unconditional_branch(merge_bb)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         }
 
         // Position at merge block
@@ -143,7 +143,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // Create phi node if result type is non-unit
         if !result_ty.is_unit() && !incoming.is_empty() {
             let phi = self.builder.build_phi(self.lower_type(result_ty), "match.result")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             for (val, bb) in &incoming {
                 phi.add_incoming(&[(val, *bb)]);
@@ -188,12 +188,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 for (i, sub_pat) in patterns.iter().enumerate() {
                     let elem = self.builder
                         .build_extract_value(struct_val, i as u32, "tuple.elem")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                     let sub_match = self.compile_pattern_test(sub_pat, &elem)?;
                     result = self.builder
                         .build_and(result, sub_match, "and")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                 }
 
                 Ok(result)
@@ -206,12 +206,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 for field in fields {
                     let field_val = self.builder
                         .build_extract_value(struct_val, field.field_idx, "field")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                     let sub_match = self.compile_pattern_test(&field.pattern, &field_val)?;
                     result = self.builder
                         .build_and(result, sub_match, "and")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                 }
 
                 Ok(result)
@@ -224,7 +224,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     let sub_match = self.compile_pattern_test(sub_pat, scrutinee)?;
                     result = self.builder
                         .build_or(result, sub_match, "or")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                 }
 
                 Ok(result)
@@ -244,7 +244,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Payload enum - extract discriminant from first field
                         let discrim = self.builder
                             .build_extract_value(*sv, 0, "discrim")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                             .into_int_value();
                         (discrim, Some(*sv))
                     }
@@ -258,7 +258,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                 let mut result = self.builder
                     .build_int_compare(IntPredicate::EQ, discriminant, expected, "variant.check")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Check field patterns (offset by 1 for discriminant) - only for payload enums
                 if !fields.is_empty() {
@@ -270,12 +270,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     for (i, field_pat) in fields.iter().enumerate() {
                         let field_val = self.builder
                             .build_extract_value(struct_val, (i + 1) as u32, "field")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                         let sub_match = self.compile_pattern_test(field_pat, &field_val)?;
                         result = self.builder
                             .build_and(result, sub_match, "and")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     }
                 }
 
@@ -321,12 +321,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     for (i, pat) in prefix.iter().enumerate() {
                         let elem = self.builder
                             .build_extract_value(*arr, i as u32, "slice.prefix")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                         let sub_match = self.compile_pattern_test(pat, &elem)?;
                         result = self.builder
                             .build_and(result, sub_match, "and")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     }
 
                     // Test suffix patterns (indices array_size-suffix_len, ..., array_size-1)
@@ -334,12 +334,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let suffix_offset = array_size - suffix_len + i as u64;
                         let elem = self.builder
                             .build_extract_value(*arr, suffix_offset as u32, "slice.suffix")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                         let sub_match = self.compile_pattern_test(pat, &elem)?;
                         result = self.builder
                             .build_and(result, sub_match, "and")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     }
 
                     // If there's a rest pattern with a binding, we don't need to test it
@@ -361,10 +361,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let start_val = self.compile_literal(lit)?.into_int_value();
                         let ge_check = self.builder
                             .build_int_compare(IntPredicate::SGE, scrutinee_int, start_val, "range.ge")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         result = self.builder
                             .build_and(result, ge_check, "and")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     }
                 }
 
@@ -375,10 +375,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let cmp_pred = if *inclusive { IntPredicate::SLE } else { IntPredicate::SLT };
                         let bound_check = self.builder
                             .build_int_compare(cmp_pred, scrutinee_int, end_val, "range.bound")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         result = self.builder
                             .build_and(result, bound_check, "and")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     }
                 }
 
@@ -397,30 +397,30 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             (BasicValueEnum::IntValue(a), BasicValueEnum::IntValue(b)) => {
                 self.builder
                     .build_int_compare(IntPredicate::EQ, *a, *b, "eq")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])
             }
             (BasicValueEnum::FloatValue(a), BasicValueEnum::FloatValue(b)) => {
                 self.builder
                     .build_float_compare(FloatPredicate::OEQ, *a, *b, "eq")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])
             }
             (BasicValueEnum::PointerValue(a), BasicValueEnum::PointerValue(b)) => {
                 self.builder
                     .build_int_compare(
                         IntPredicate::EQ,
                         self.builder.build_ptr_to_int(*a, self.context.i64_type(), "ptr_a")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?,
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?,
                         self.builder.build_ptr_to_int(*b, self.context.i64_type(), "ptr_b")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?,
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?,
                         "eq",
                     )
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])
             }
             (a_val, b_val) => {
                 // In a properly type-checked program, we should never compare incompatible types.
                 // If we reach here, it's an internal compiler error.
                 Err(vec![ice_err!(
-                    Span::dummy(),
+                    self.current_span(),
                     "cannot compare values of incompatible types in pattern match";
                     "lhs_type" => a_val.get_type(),
                     "rhs_type" => b_val.get_type()
@@ -445,10 +445,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 let llvm_type = self.lower_type(&pattern.ty);
                 let alloca = self.builder
                     .build_alloca(llvm_type, &format!("match.bind{}", local_id.index))
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 self.builder.build_store(alloca, *scrutinee)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 self.locals.insert(*local_id, alloca);
 
@@ -468,7 +468,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 for (i, sub_pat) in patterns.iter().enumerate() {
                     let elem = self.builder
                         .build_extract_value(struct_val, i as u32, "tuple.elem")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     self.compile_pattern_bindings(sub_pat, &elem)?;
                 }
                 Ok(())
@@ -478,7 +478,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 for field in fields {
                     let field_val = self.builder
                         .build_extract_value(struct_val, field.field_idx, "field")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                     self.compile_pattern_bindings(&field.pattern, &field_val)?;
                 }
                 Ok(())
@@ -492,7 +492,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             for (i, field_pat) in fields.iter().enumerate() {
                                 let field_val = self.builder
                                     .build_extract_value(*sv, (i + 1) as u32, "field")
-                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                                 self.compile_pattern_bindings(field_pat, &field_val)?;
                             }
                         }
@@ -540,7 +540,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     for (i, pat) in prefix.iter().enumerate() {
                         let elem = self.builder
                             .build_extract_value(*arr, i as u32, "slice.prefix")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         self.compile_pattern_bindings(pat, &elem)?;
                     }
 
@@ -646,7 +646,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let suffix_offset = array_size - suffix_len + i as u64;
                         let elem = self.builder
                             .build_extract_value(*arr, suffix_offset as u32, "slice.suffix")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         self.compile_pattern_bindings(pat, &elem)?;
                     }
                 }

@@ -191,6 +191,9 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
         body: &MirBody,
         escape_results: Option<&EscapeResults>,
     ) -> Result<(), Vec<Diagnostic>> {
+        // Set the MIR span for error reporting in downstream codegen helpers.
+        self.current_mir_span.set(body.span);
+
         // DEFENSIVE CHECK: Skip if this DefId is a static item.
         // Static items are compiled as global variables by compile_static_items(),
         // not as functions. MIR lowering should never create bodies for static items,
@@ -395,11 +398,13 @@ impl<'ctx, 'a> MirCodegen<'ctx, 'a> for CodegenContext<'ctx, 'a> {
 
         // Compile statements
         for stmt in &block_data.statements {
+            self.current_mir_span.set(stmt.span);
             self.compile_mir_statement(stmt, body, escape_results)?;
         }
 
         // Compile terminator
         if let Some(term) = &block_data.terminator {
+            self.current_mir_span.set(term.span);
             self.compile_mir_terminator(term, body, llvm_blocks, escape_results)?;
         } else {
             // Unterminated block - add unreachable

@@ -13,7 +13,7 @@ use inkwell::values::BasicValueEnum;
 
 use crate::hir::{self, Type, DefId};
 use crate::diagnostics::Diagnostic;
-use crate::span::Span;
+
 use crate::ice_err;
 
 use super::CodegenContext;
@@ -281,12 +281,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 &[callback_ptr.into(), null_context.into()],
                 "continuation",
             )
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error creating continuation: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error creating continuation: {}", e), self.current_span())])?;
 
         let cont_handle = call_result.try_as_basic_value().left()
             .ok_or_else(|| vec![Diagnostic::error(
                 "blood_continuation_create returned void".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?
             .into_int_value();
 
@@ -329,12 +329,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let value_param = fn_val.get_nth_param(0)
             .ok_or_else(|| vec![Diagnostic::error(
                 "Identity continuation missing value parameter".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?
             .into_int_value();
 
         self.builder.build_return(Some(&value_param))
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Restore builder position
         if let Some(block) = saved_block {
@@ -362,7 +362,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let perform_fn = self.module.get_function("blood_perform")
             .ok_or_else(|| vec![Diagnostic::error(
                 "Runtime function blood_perform not found".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?;
 
         // Compile arguments and pack into an i64 array
@@ -377,46 +377,46 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         } else {
                             self.builder
                                 .build_int_s_extend(iv, i64_type, "arg_ext")
-                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                         }
                     }
                     BasicValueEnum::FloatValue(fv) => {
                         // Bitcast float to i64 for passing through uniform interface
                         self.builder
                             .build_bit_cast(fv, i64_type, "float_as_i64")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                             .into_int_value()
                     }
                     BasicValueEnum::PointerValue(pv) => {
                         self.builder
                             .build_ptr_to_int(pv, i64_type, "ptr_as_i64")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     }
                     BasicValueEnum::StructValue(sv) => {
                         // Allocate stack space and store the struct
                         let struct_alloca = self.builder
                             .build_alloca(sv.get_type(), "struct_arg")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         self.builder.build_store(struct_alloca, sv)
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                         // Pass pointer as i64
                         self.builder
                             .build_ptr_to_int(struct_alloca, i64_type, "struct_ptr_as_i64")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     }
                     BasicValueEnum::ArrayValue(av) => {
                         // Allocate stack space and store the array
                         let array_alloca = self.builder
                             .build_alloca(av.get_type(), "array_arg")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         self.builder.build_store(array_alloca, av)
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                         // Pass pointer as i64
                         self.builder
                             .build_ptr_to_int(array_alloca, i64_type, "array_ptr_as_i64")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     }
                     BasicValueEnum::VectorValue(_) => {
                         return Err(vec![ice_err!(
@@ -437,7 +437,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             let array_type = i64_type.array_type(arg_count as u32);
             let args_alloca = self.builder
                 .build_alloca(array_type, "perform_args")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Store each argument in the array
             let zero = i32_type.const_zero();
@@ -449,11 +449,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         &[zero, idx],
                         &format!("arg_ptr_{}", i),
                     )
-                }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 self.builder
                     .build_store(gep, *arg_val)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
             }
 
             // Get pointer to first element
@@ -463,7 +463,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     &[zero, zero],
                     "args_ptr",
                 )
-            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
         } else {
             // No arguments - pass null pointer
             i64_type.ptr_type(inkwell::AddressSpace::default()).const_null()
@@ -491,7 +491,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 ],
                 "perform_result",
             )
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Get the result value and convert to appropriate type
         if result_ty.is_unit() {
@@ -500,7 +500,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             let result_i64 = call_result.try_as_basic_value().left()
                 .ok_or_else(|| vec![Diagnostic::error(
                     "blood_perform returned void unexpectedly".to_string(),
-                    Span::dummy(),
+                    self.current_span(),
                 )])?;
 
             // Convert result from i64 to expected type
@@ -512,17 +512,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 } else {
                     self.builder
                         .build_int_truncate(result_i64.into_int_value(), result_int_type, "result_trunc")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                         .into()
                 }
             } else if result_llvm_type.is_float_type() {
                 self.builder
                     .build_bit_cast(result_i64, result_llvm_type, "result_float")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
             } else if result_llvm_type.is_pointer_type() {
                 self.builder
                     .build_int_to_ptr(result_i64.into_int_value(), result_llvm_type.into_pointer_type(), "result_ptr")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     .into()
             } else if result_llvm_type.is_struct_type() {
                 // For struct types (including enums), the bits are packed into the i64.
@@ -533,22 +533,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                 // Allocate temp storage for the i64
                 let temp_alloca = self.builder.build_alloca(i64_ty, "perform_temp")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Store the i64 (which contains packed struct bits)
                 self.builder.build_store(temp_alloca, result_i64_val)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Bitcast i64* to struct*
                 let struct_ptr = self.builder.build_pointer_cast(
                     temp_alloca,
                     dest_struct_ty.ptr_type(inkwell::AddressSpace::default()),
                     "perform_struct_ptr"
-                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Load the struct value
                 self.builder.build_load(struct_ptr, "perform_struct")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
             } else {
                 result_i64
             };
@@ -600,13 +600,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         } else {
                             self.builder
                                 .build_int_s_extend(iv, i64_type, "resume_ext")
-                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                         }
                     }
                     BasicValueEnum::PointerValue(pv) => {
                         self.builder
                             .build_ptr_to_int(pv, i64_type, "resume_ptr_int")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     }
                     BasicValueEnum::StructValue(sv) => {
                         // For small structs that fit in 64 bits, pack the bits directly into i64.
@@ -615,31 +615,31 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         let struct_type = sv.get_type();
                         let alloca = self.builder
                             .build_alloca(struct_type, "resume_struct")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         self.builder.build_store(alloca, sv)
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                         // Bitcast the struct pointer to i64 pointer and load as i64
                         let i64_ptr_type = i64_type.ptr_type(inkwell::AddressSpace::default());
                         let i64_ptr = self.builder
                             .build_pointer_cast(alloca, i64_ptr_type, "resume_i64_ptr")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                         self.builder
                             .build_load(i64_ptr, "resume_struct_bits")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                             .into_int_value()
                     }
                     BasicValueEnum::FloatValue(fv) => {
                         self.builder
                             .build_bit_cast(fv, i64_type, "resume_float")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                             .into_int_value()
                     }
                     BasicValueEnum::ArrayValue(_) | BasicValueEnum::VectorValue(_) => {
                         // Arrays and vectors cannot be directly converted to i64 for resume
                         return Err(vec![Diagnostic::error(
                             "cannot resume with array or vector value".to_string(),
-                            Span::dummy(),
+                            self.current_span(),
                         )]);
                     }
                 }
@@ -655,30 +655,30 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // Load the continuation handle
             let cont_handle = self.builder
                 .build_load(cont_ptr, "cont_handle")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                 .into_int_value();
 
             // Check if continuation is 0 (tail-resumptive) or non-zero (call continuation)
             let zero = i64_type.const_zero();
             let is_tail_resumptive = self.builder
                 .build_int_compare(inkwell::IntPredicate::EQ, cont_handle, zero, "is_tail")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Create blocks for branching
             let fn_value = self.current_fn.ok_or_else(|| vec![Diagnostic::error(
-                "resume called outside of function".to_string(), Span::dummy()
+                "resume called outside of function".to_string(), self.current_span()
             )])?;
             let tail_block = self.context.append_basic_block(fn_value, "resume_tail");
             let cont_block = self.context.append_basic_block(fn_value, "resume_cont");
             let merge_block = self.context.append_basic_block(fn_value, "resume_merge");
 
             self.builder.build_conditional_branch(is_tail_resumptive, tail_block, cont_block)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Tail-resumptive path: just return the value
             self.builder.position_at_end(tail_block);
             self.builder.build_return(Some(&resume_value))
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Continuation path: call blood_continuation_resume
             self.builder.position_at_end(cont_block);
@@ -697,12 +697,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // Clone the continuation
                 let clone_result = self.builder
                     .build_call(cont_clone_fn, &[cont_handle.into()], "cont_clone")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error cloning continuation: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error cloning continuation: {}", e), self.current_span())])?;
 
                 clone_result.try_as_basic_value().left()
                     .ok_or_else(|| vec![Diagnostic::error(
                         "blood_continuation_clone returned void".to_string(),
-                        Span::dummy(),
+                        self.current_span(),
                     )])?
                     .into_int_value()
             } else {
@@ -719,17 +719,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // Call blood_continuation_resume(resume_cont_handle, resume_value)
             let call_result = self.builder
                 .build_call(cont_resume_fn, &[resume_cont_handle.into(), resume_value.into()], "cont_result")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             let cont_result = call_result.try_as_basic_value().left()
                 .ok_or_else(|| vec![Diagnostic::error(
                     "blood_continuation_resume returned void".to_string(),
-                    Span::dummy(),
+                    self.current_span(),
                 )])?;
 
             // Branch to merge block (continuation path doesn't return, it continues)
             self.builder.build_unconditional_branch(merge_block)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Position at merge block for code after resume
             self.builder.position_at_end(merge_block);
@@ -738,7 +738,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // Note: tail path doesn't reach here (it returns), so only cont_result matters
             let phi = self.builder
                 .build_phi(i64_type, "resume_result")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
             phi.add_incoming(&[(&cont_result, cont_block)]);
 
             // Convert i64 result to expected type
@@ -750,17 +750,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 } else {
                     self.builder
                         .build_int_truncate(phi_value, target_int_type, "resume_trunc")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                         .into()
                 }
             } else if expected_llvm_ty.is_float_type() {
                 self.builder
                     .build_bit_cast(phi_value, expected_llvm_ty, "resume_float")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
             } else if expected_llvm_ty.is_pointer_type() {
                 self.builder
                     .build_int_to_ptr(phi_value, expected_llvm_ty.into_pointer_type(), "resume_ptr")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     .into()
             } else if expected_llvm_ty.is_struct_type() {
                 // For struct types (including enums), the bits are packed into the i64.
@@ -769,22 +769,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
                 // Allocate temp storage for the i64
                 let temp_alloca = self.builder.build_alloca(i64_type, "resume_temp")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Store the i64 (which contains packed struct bits)
                 self.builder.build_store(temp_alloca, phi_value)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Bitcast i64* to struct*
                 let struct_ptr = self.builder.build_pointer_cast(
                     temp_alloca,
                     dest_struct_ty.ptr_type(inkwell::AddressSpace::default()),
                     "resume_struct_ptr"
-                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                 // Load the struct value
                 self.builder.build_load(struct_ptr, "resume_struct")
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
             } else {
                 // Default: return as-is (may need more cases)
                 phi_value.into()
@@ -794,16 +794,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         } else {
             // Shallow handler or no continuation context: just return the value
             let fn_value = self.current_fn.ok_or_else(|| vec![Diagnostic::error(
-                "resume called outside of function".to_string(), Span::dummy()
+                "resume called outside of function".to_string(), self.current_span()
             )])?;
             let fn_ret_ty = fn_value.get_type().get_return_type();
 
             if fn_ret_ty == Some(i64_type.into()) {
                 self.builder.build_return(Some(&resume_value))
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
             } else {
                 self.builder.build_return(None)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
             }
 
             // For tail-resumptive, resume doesn't produce a usable value (control transfers)
@@ -853,7 +853,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let ev_create = self.module.get_function("blood_evidence_create")
             .ok_or_else(|| vec![Diagnostic::error(
                 "Runtime function blood_evidence_create not found".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?;
         let ev_push_with_state = self.module.get_function("blood_evidence_push_with_state")
             .unwrap_or_else(|| {
@@ -876,32 +876,32 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let ev_pop = self.module.get_function("blood_evidence_pop")
             .ok_or_else(|| vec![Diagnostic::error(
                 "Runtime function blood_evidence_pop not found".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?;
         let ev_destroy = self.module.get_function("blood_evidence_destroy")
             .ok_or_else(|| vec![Diagnostic::error(
                 "Runtime function blood_evidence_destroy not found".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?;
 
         // Save current evidence vector
         let saved_ev = self.builder.build_call(ev_current, &[], "saved_evidence")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
             .try_as_basic_value()
             .left()
             .ok_or_else(|| vec![Diagnostic::error(
                 "blood_evidence_current returned void".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?;
 
         // Create new evidence vector
         let ev = self.builder.build_call(ev_create, &[], "evidence")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
             .try_as_basic_value()
             .left()
             .ok_or_else(|| vec![Diagnostic::error(
                 "blood_evidence_create returned void".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])?;
 
         // Compile handler instance to get state pointer
@@ -910,7 +910,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             match state_val {
                 BasicValueEnum::PointerValue(pv) => {
                     self.builder.build_pointer_cast(pv, i8_ptr_type, "state_void_ptr")
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                         .into()
                 }
                 BasicValueEnum::IntValue(_)
@@ -935,22 +935,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             ev_push_with_state,
             &[ev.into(), effect_id_val.into(), state_ptr],
             ""
-        ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+        ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Set as current evidence vector
         self.builder.build_call(ev_set_current, &[ev.into()], "")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Compile the body
         let body_result = self.compile_expr(body)?;
 
         // Pop handler from evidence vector
         self.builder.build_call(ev_pop, &[ev.into()], "")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Restore previous evidence vector (or null)
         self.builder.build_call(ev_set_current, &[saved_ev.into()], "")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Call the return clause to transform the result
         // The return clause function is named {handler_name}_return (content-based naming)
@@ -978,18 +978,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         } else {
                             self.builder
                                 .build_int_s_extend(iv, i64_type, "result_ext")
-                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                         }
                     }
                     BasicValueEnum::PointerValue(pv) => {
                         self.builder
                             .build_ptr_to_int(pv, i64_type, "result_ptr_int")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                     }
                     BasicValueEnum::FloatValue(fv) => {
                         self.builder
                             .build_bit_cast(fv, i64_type, "result_float_bits")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                             .into_int_value()
                     }
                     BasicValueEnum::StructValue(_) => {
@@ -1000,7 +1000,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         // Arrays and vectors cannot be directly converted to i64
                         return Err(vec![Diagnostic::error(
                             "effect handler body returned array or vector value which cannot be converted to result".to_string(),
-                            Span::dummy(),
+                            self.current_span(),
                         )]);
                     }
                 }
@@ -1011,7 +1011,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             // Call return clause: fn(result: i64, state_ptr: *void) -> i64
             let return_result = self.builder
                 .build_call(return_fn, &[result_i64.into(), state_ptr], "return_clause_result")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                 .try_as_basic_value()
                 .left();
 
@@ -1026,7 +1026,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     } else {
                         Some(self.builder
                             .build_int_truncate(ret_i64, result_int_type, "ret_trunc")
-                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?
                             .into())
                     }
                 } else {
@@ -1039,7 +1039,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // Destroy evidence vector
         self.builder.build_call(ev_destroy, &[ev.into()], "")
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Return result with proper type
         if result_ty.is_unit() {

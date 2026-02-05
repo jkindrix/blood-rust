@@ -3,7 +3,7 @@
 //! This module provides the main code generation context which
 //! coordinates LLVM code generation for a Blood program.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use inkwell::context::Context;
@@ -799,6 +799,11 @@ pub struct CodegenContext<'ctx, 'a> {
     /// Errors collected during type lowering (which takes &self, not &mut self).
     /// Drained into `self.errors` at compilation checkpoints.
     pub(super) type_lowering_errors: RefCell<Vec<Diagnostic>>,
+    /// Current MIR span for error reporting during codegen.
+    /// Updated as each statement/terminator is compiled so that downstream
+    /// codegen helpers can produce diagnostics with source locations.
+    /// Uses Cell<Span> because Span is Copy and we only need interior mutability.
+    pub(super) current_mir_span: Cell<Span>,
 }
 
 impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
@@ -860,6 +865,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             handler_state_shadows: HashMap::new(),
             lowering_adts: RefCell::new(HashSet::new()),
             type_lowering_errors: RefCell::new(Vec::new()),
+            current_mir_span: Cell::new(Span::dummy()),
         }
     }
 
@@ -878,6 +884,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.vec_def_id = vec_def_id;
         self.option_def_id = option_def_id;
         self.result_def_id = result_def_id;
+    }
+
+    /// Get the current MIR source span for error reporting.
+    ///
+    /// Returns the span of the MIR statement or terminator currently being
+    /// compiled. This is updated by `compile_mir_block` before each
+    /// statement/terminator compilation.
+    pub(super) fn current_span(&self) -> Span {
+        self.current_mir_span.get()
     }
 
     /// Set escape analysis results for optimization.
@@ -1913,7 +1928,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     global.as_pointer_value(),
                     self.context.i8_type().ptr_type(AddressSpace::default()),
                     "str_ptr"
-                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                 let len = self.context.i64_type().const_int(bytes.len() as u64, false);
 
                 // Create str slice struct {ptr, len}
@@ -1971,7 +1986,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 } else {
                     Err(vec![Diagnostic::error(
                         "Negation on unsupported type in const context".to_string(),
-                        crate::span::Span::dummy(),
+                        self.current_span(),
                     )])
                 }
             }
@@ -1982,13 +1997,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 } else {
                     Err(vec![Diagnostic::error(
                         "Not on unsupported type in const context".to_string(),
-                        crate::span::Span::dummy(),
+                        self.current_span(),
                     )])
                 }
             }
             _ => Err(vec![Diagnostic::error(
                 format!("Unary operator {:?} not supported in const context", op),
-                crate::span::Span::dummy(),
+                self.current_span(),
             )]),
         }
     }
@@ -2027,7 +2042,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 _ => {
                     return Err(vec![Diagnostic::error(
                         format!("Binary operator {:?} not supported in const context", op),
-                        crate::span::Span::dummy(),
+                        self.current_span(),
                     )]);
                 }
             };
@@ -2046,7 +2061,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 _ => {
                     return Err(vec![Diagnostic::error(
                         format!("Float binary operator {:?} not supported in const context", op),
-                        crate::span::Span::dummy(),
+                        self.current_span(),
                     )]);
                 }
             };
@@ -2055,7 +2070,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         Err(vec![Diagnostic::error(
             "Binary operation on unsupported types in const context".to_string(),
-            crate::span::Span::dummy(),
+            self.current_span(),
         )])
     }
 
@@ -2344,7 +2359,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let fn_value = *self.functions.get(&def_id).ok_or_else(|| {
             vec![Diagnostic::error(
                 "Internal error: function not declared",
-                Span::dummy(),
+                self.current_span(),
             )]
         })?;
 
@@ -2362,13 +2377,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         for (i, param) in body.params().enumerate() {
             let llvm_type = self.lower_type(&param.ty);
             let alloca = self.builder.build_alloca(llvm_type, &param.name.clone().unwrap_or_else(|| format!("arg{}", i)))
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Store parameter value
             let param_value = fn_value.get_nth_param(i as u32)
-                .ok_or_else(|| vec![Diagnostic::error("Parameter not found", Span::dummy())])?;
+                .ok_or_else(|| vec![Diagnostic::error("Parameter not found", self.current_span())])?;
             self.builder.build_store(alloca, param_value)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             self.locals.insert(param.id, alloca);
         }
@@ -2385,22 +2400,22 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 // main must return i32 for C runtime - return 0 on success
                 let zero = self.context.i32_type().const_int(0, false);
                 self.builder.build_return(Some(&zero))
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
             } else {
                 self.builder.build_return(None)
-                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
             }
         } else if let Some(value) = result {
             self.builder.build_return(Some(&value))
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         } else if is_main {
             // main must return i32 for C runtime - return 0 on success
             let zero = self.context.i32_type().const_int(0, false);
             self.builder.build_return(Some(&zero))
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         } else {
             self.builder.build_return(None)
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         }
 
         self.current_fn = None;
@@ -2415,7 +2430,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.builder.get_insert_block()
             .ok_or_else(|| vec![Diagnostic::error(
                 "Internal error: no active basic block".to_string(),
-                Span::dummy(),
+                self.current_span(),
             )])
     }
 

@@ -9,7 +9,7 @@ use inkwell::AddressSpace;
 
 use crate::hir::{self, DefId, LocalId, TypeKind};
 use crate::diagnostics::Diagnostic;
-use crate::span::Span;
+
 
 use super::CodegenContext;
 
@@ -870,7 +870,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             let array_type = i8_ptr_type.array_type(op_count as u32);
             let ops_alloca = self.builder
                 .build_alloca(array_type, "handler_ops")
-                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             let i32_type = self.context.i32_type();
             let zero = i32_type.const_zero();
@@ -880,7 +880,7 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     let idx = i32_type.const_int(op_idx as u64, false);
                     let gep = unsafe {
                         self.builder.build_gep(ops_alloca, &[zero, idx], "op_ptr")
-                    }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                    }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                     let fn_ptr = self.builder
                         .build_pointer_cast(
@@ -888,17 +888,17 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                             i8_ptr_type,
                             "fn_ptr",
                         )
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
                     self.builder.build_store(gep, fn_ptr)
-                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+                        .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
                 }
             }
 
             // Get pointer to first element
             let ops_ptr = unsafe {
                 self.builder.build_gep(ops_alloca, &[zero, zero], "ops_ptr")
-            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            }.map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
             // Call blood_evidence_register(null, effect_id, ops, op_count)
             // Note: We pass null for evidence handle - registration is global
@@ -910,11 +910,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 register_fn,
                 &[null_ev.into(), effect_id_val.into(), ops_ptr.into(), op_count_val.into()],
                 "",
-            ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            ).map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
         }
 
         self.builder.build_return(None)
-            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), Span::dummy())])?;
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
 
         // Add to llvm.global_ctors so it runs at program startup
         self.add_global_constructor(init_fn)?;
