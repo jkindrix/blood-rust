@@ -165,6 +165,24 @@ Proof.
   intros M snap [Hvalid _]. exact Hvalid.
 Qed.
 
+(** Helper lemma: forallb returning false implies existence of failing element *)
+
+Lemma forallb_false_exists :
+  forall {A : Type} (f : A -> bool) (l : list A),
+    forallb f l = false ->
+    exists x, In x l /\ f x = false.
+Proof.
+  intros A f l Hfalse.
+  induction l as [| hd tl IH].
+  - simpl in Hfalse. discriminate.
+  - simpl in Hfalse.
+    apply Bool.andb_false_iff in Hfalse.
+    destruct Hfalse as [Hhd | Htl].
+    + exists hd. split. left. reflexivity. assumption.
+    + specialize (IH Htl). destruct IH as [x [Hin Hfx]].
+      exists x. split. right. assumption. assumption.
+Qed.
+
 (** *** Part 2: Detection Completeness *)
 
 Theorem detection_completeness :
@@ -185,10 +203,21 @@ Proof.
   - (* All valid *)
     left. apply snapshot_valid_dec_correct. exact Hdec.
   - (* Some reference stale: snapshot_valid_dec = false means
-       there exists a ref with mismatched generation.
-       This requires a forallb_false_exists lemma. *)
+       there exists a ref with mismatched generation. *)
     right.
-Admitted.
+    unfold snapshot_valid_dec in Hdec.
+    apply forallb_false_exists in Hdec.
+    destruct Hdec as [gr [Hin Hfalse]].
+    destruct gr as [addr gen].
+    exists addr, gen, (current_gen M1 addr).
+    split; [| split].
+    + exact Hin.
+    + reflexivity.
+    + (* gen <> current_gen M1 addr because eqb returned false *)
+      apply Nat.eqb_neq in Hfalse.
+      (* Hfalse says current_gen M1 addr <> gen, but we need gen <> current_gen M1 addr *)
+      intro Heq. apply Hfalse. symmetry. exact Heq.
+Qed.
 
 (** *** Part 3: No Use-After-Free *)
 

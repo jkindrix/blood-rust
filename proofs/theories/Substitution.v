@@ -12,6 +12,7 @@ From Stdlib Require Import List.
 From Stdlib Require Import Arith.
 From Stdlib Require Import Bool.
 From Stdlib Require Import PeanoNat.
+From Stdlib Require Import Lia.
 Import ListNotations.
 From Blood Require Import Syntax.
 From Blood Require Import Typing.
@@ -204,14 +205,183 @@ Fixpoint multi_subst (vals : list expr) (e : expr) : expr :=
 (** ** Substitution commutes with shifting *)
 
 Lemma shift_subst_commute :
-  forall d c j s e,
+  forall e d c j s,
     c <= j ->
     shift_expr d c (subst j s e) =
     subst (j + d) (shift_expr d c s) (shift_expr d c e).
 Proof.
-  (* Standard de Bruijn shifting/substitution commutation lemma.
-     Proof by induction on e. *)
-Admitted.  (* TODO: complete proof *)
+  intros e.
+  induction e; intros dd cc jj ss Hcj.
+
+  - (* E_Var x *)
+    simpl.
+    destruct (jj =? v) eqn:Hjv.
+    + (* jj = v *)
+      apply Nat.eqb_eq in Hjv. subst v.
+      simpl.
+      destruct (cc <=? jj) eqn:Hccj.
+      * simpl.
+        destruct (jj + dd =? jj + dd) eqn:Heq.
+        { reflexivity. }
+        { apply Nat.eqb_neq in Heq. lia. }
+      * apply Nat.leb_gt in Hccj. lia.
+    + (* jj <> v *)
+      destruct (jj <? v) eqn:Hjv'.
+      * (* jj < v *)
+        apply Nat.ltb_lt in Hjv'.
+        simpl.
+        destruct (cc <=? v - 1) eqn:Hcv1.
+        { apply Nat.leb_le in Hcv1. simpl.
+          destruct (cc <=? v) eqn:Hcv.
+          { simpl.
+            destruct (jj + dd =? v + dd) eqn:Hjdvd.
+            { apply Nat.eqb_eq in Hjdvd. apply Nat.eqb_neq in Hjv. lia. }
+            destruct (jj + dd <? v + dd) eqn:Hltjv.
+            { f_equal. lia. }
+            { apply Nat.ltb_ge in Hltjv. lia. }
+          }
+          { apply Nat.leb_gt in Hcv. lia. }
+        }
+        { apply Nat.leb_gt in Hcv1. simpl.
+          destruct (cc <=? v) eqn:Hcv.
+          { apply Nat.leb_le in Hcv. assert (cc = v) by lia. subst cc. simpl.
+            destruct (jj + dd =? v + dd) eqn:Hjdvd.
+            { apply Nat.eqb_eq in Hjdvd. apply Nat.eqb_neq in Hjv. lia. }
+            destruct (jj + dd <? v + dd) eqn:Hltjv.
+            { f_equal. lia. }
+            { apply Nat.ltb_ge in Hltjv. lia. }
+          }
+          { apply Nat.leb_gt in Hcv. lia. }
+        }
+      * (* jj >= v *)
+        apply Nat.ltb_ge in Hjv'. apply Nat.eqb_neq in Hjv.
+        assert (jj > v) by lia. simpl.
+        destruct (cc <=? v) eqn:Hcv.
+        { simpl.
+          destruct (jj + dd =? v + dd) eqn:Hjdvd.
+          { apply Nat.eqb_eq in Hjdvd. lia. }
+          destruct (jj + dd <? v + dd) eqn:Hltjv.
+          { apply Nat.ltb_lt in Hltjv. lia. }
+          { reflexivity. }
+        }
+        { simpl.
+          destruct (jj + dd =? v) eqn:Hjdv.
+          { apply Nat.eqb_eq in Hjdv. lia. }
+          destruct (jj + dd <? v) eqn:Hltjdv.
+          { apply Nat.ltb_lt in Hltjdv. lia. }
+          { reflexivity. }
+        }
+
+  - (* E_Const *) reflexivity.
+
+  - (* E_Lam: needs shift commutation lemma *)
+    simpl. f_equal.
+    rewrite IHe with (c := S cc) (j := S jj) by lia.
+    (* Remaining: show shift commutation for ss *)
+    admit.
+
+  - (* E_App *)
+    simpl. f_equal; [apply IHe1 | apply IHe2]; assumption.
+
+  - (* E_Let: similar to E_Lam *)
+    simpl. f_equal.
+    + apply IHe1. assumption.
+    + rewrite IHe2 with (c := S cc) (j := S jj) by lia. admit.
+
+  - (* E_Annot *)
+    simpl. f_equal. apply IHe. assumption.
+
+  - (* E_Record: nested list *)
+    simpl. f_equal.
+    induction l as [| [lbl ei] rest IHl]; [reflexivity | simpl; admit].
+
+  - (* E_Select *)
+    simpl. f_equal. apply IHe. assumption.
+
+  - (* E_Extend *)
+    simpl. f_equal; [apply IHe1 | apply IHe2]; assumption.
+
+  - (* E_Perform *)
+    simpl. f_equal. apply IHe. assumption.
+
+  - (* E_Handle: nested structure *)
+    simpl. f_equal.
+    + destruct h as [hk e_ret clauses]. simpl. f_equal; admit.
+    + apply IHe. assumption.
+
+  - (* E_Resume *)
+    simpl. f_equal. apply IHe. assumption.
+Admitted.  (* Partial: var case done, needs shift commutation and nested list lemmas *)
+
+(** ** Generalized lemma: shifting then substituting cancels *)
+
+Lemma shift_then_subst_general :
+  forall e s cutoff,
+    subst cutoff s (shift_expr 1 cutoff e) = e.
+Proof.
+  intros e.
+  induction e; intros s cutoff.
+
+  - (* E_Var x *)
+    simpl.
+    destruct (cutoff <=? v) eqn:Hle.
+    + (* cutoff <= v *)
+      simpl.
+      destruct (cutoff =? v + 1) eqn:Heq.
+      * (* cutoff = v + 1, but cutoff <= v, contradiction *)
+        apply Nat.eqb_eq in Heq.
+        apply Nat.leb_le in Hle.
+        lia.
+      * destruct (cutoff <? v + 1) eqn:Hlt.
+        { (* cutoff < v + 1, so we return v + 1 - 1 = v *)
+          f_equal.
+          apply Nat.leb_le in Hle.
+          lia.
+        }
+        { (* cutoff >= v + 1, but cutoff <= v, contradiction *)
+          apply Nat.ltb_ge in Hlt.
+          apply Nat.leb_le in Hle.
+          lia.
+        }
+    + (* cutoff > v *)
+      simpl.
+      destruct (cutoff =? v) eqn:Heq.
+      * (* cutoff = v, but cutoff > v, contradiction *)
+        apply Nat.eqb_eq in Heq.
+        apply Nat.leb_gt in Hle.
+        lia.
+      * destruct (cutoff <? v) eqn:Hlt.
+        { (* cutoff < v, but cutoff > v, contradiction *)
+          apply Nat.ltb_lt in Hlt.
+          apply Nat.leb_gt in Hle.
+          lia.
+        }
+        { reflexivity. }
+
+  - (* E_Const *) reflexivity.
+  - (* E_Lam *) simpl. f_equal. apply IHe.
+  - (* E_App *) simpl. f_equal; [apply IHe1 | apply IHe2].
+  - (* E_Let *) simpl. f_equal; [apply IHe1 | apply IHe2].
+  - (* E_Annot *) simpl. f_equal. apply IHe.
+
+  - (* E_Record: nested list requires custom induction, admit for now *)
+    simpl. f_equal.
+    induction l as [| [lbl ei] rest IHl].
+    + reflexivity.
+    + simpl. admit.
+
+  - (* E_Select *) simpl. f_equal. apply IHe.
+  - (* E_Extend *) simpl. f_equal; [apply IHe1 | apply IHe2].
+  - (* E_Perform *) simpl. f_equal. apply IHe.
+
+  - (* E_Handle: handler clauses require custom induction *)
+    simpl. f_equal.
+    + destruct h as [hk e_ret clauses].
+      simpl. f_equal; admit.
+    + apply IHe.
+
+  - (* E_Resume *) simpl. f_equal. apply IHe.
+Admitted.  (* Partial: only record fields and handler clauses need custom mutual induction *)
 
 (** ** Identity substitution *)
 
@@ -219,5 +389,6 @@ Lemma subst_shift_cancel :
   forall e v,
     subst 0 v (shift_expr 1 0 e) = e.
 Proof.
-  (* Substituting into a shifted term cancels the shift. *)
-Admitted.  (* TODO: complete proof *)
+  intros e v.
+  apply shift_then_subst_general.
+Qed.
