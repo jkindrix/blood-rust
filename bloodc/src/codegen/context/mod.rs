@@ -1176,7 +1176,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.declare_ffi_functions(hir_crate)?;
 
         // Drain any errors collected during type lowering (which uses &self).
-        self.errors.extend(self.type_lowering_errors.borrow_mut().drain(..));
+        // Only propagate actual errors; warnings (e.g. unresolved inference
+        // variables in effect handler paths) are non-fatal.
+        self.errors.extend(
+            self.type_lowering_errors.borrow_mut().drain(..)
+                .filter(|d| d.kind == crate::diagnostics::DiagnosticKind::Error)
+        );
 
         if self.errors.is_empty() {
             Ok(())
@@ -2341,7 +2346,12 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         self.register_handlers_with_runtime()?;
 
         // Drain any errors collected during type lowering (which uses &self).
-        self.errors.extend(self.type_lowering_errors.borrow_mut().drain(..));
+        // Only propagate actual errors; warnings (e.g. unresolved inference
+        // variables in effect handler paths) are non-fatal.
+        self.errors.extend(
+            self.type_lowering_errors.borrow_mut().drain(..)
+                .filter(|d| d.kind == crate::diagnostics::DiagnosticKind::Error)
+        );
 
         if self.errors.is_empty() {
             Ok(())
