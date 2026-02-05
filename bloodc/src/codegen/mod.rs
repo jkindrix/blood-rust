@@ -760,6 +760,10 @@ pub fn compile_mir_to_ir_with_opt(
     // First pass: declare types and functions from HIR
     codegen.compile_crate_declarations(hir_crate)?;
 
+    // Compile const and static items (global variables)
+    codegen.compile_const_items(hir_crate)?;
+    codegen.compile_static_items(hir_crate)?;
+
     // Second pass: declare closure functions from MIR
     // Closures have synthetic DefIds (>= 0xFFFF_0000) that aren't in HIR items
     for (&def_id, mir_body) in mir_bodies {

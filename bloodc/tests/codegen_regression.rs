@@ -259,14 +259,12 @@ fn test_effect_state_ir() {
 // Static Mutable IR Tests — should emit LLVM globals, not dummy functions
 // ============================================================================
 
-/// Static mutable items fail codegen through check_program() path with
-/// "Unknown static DefId". This test documents the limitation and will be
-/// enabled once codegen handles statics without full pipeline context.
+/// Static mutable items should produce LLVM globals.
 #[test]
-#[should_panic(expected = "Unknown static")]
 fn test_static_mut_ir() {
     let source = load_fixture("static_mut.blood");
-    let _ir = compile_to_ir(&source);
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
 }
 
 // ============================================================================
@@ -351,12 +349,16 @@ fn test_closure_produces_call_or_function_ptr() {
     );
 }
 
-/// Blocked by same codegen limitation as test_static_mut_ir.
+/// Static mutable items should produce LLVM global variables.
 #[test]
-#[should_panic(expected = "Unknown static")]
 fn test_static_mut_produces_global() {
     let source = load_fixture("static_mut.blood");
-    let _ir = compile_to_ir(&source);
+    let ir = compile_to_ir(&source);
+    assert!(
+        ir.contains("@") && (ir.contains("global") || ir.contains("internal")),
+        "Expected global variable declaration in IR for static mut:\n{}",
+        ir
+    );
 }
 
 #[test]
