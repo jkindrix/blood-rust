@@ -298,10 +298,10 @@ The self-hosted compiler has specific dependencies:
 - [x] #10 Logging infrastructure
 
 ### Phase 4: Self-Hosting
-- [ ] #22 Test framework
-- [ ] #14 Subprocess management
-- [ ] #21 DWARF debug symbols
-- [ ] #24 Variance rules
+- [x] #22 Test framework
+- [x] #14 Subprocess management
+- [x] #21 DWARF debug symbols
+- [x] #24 Variance rules
 
 ### Phase 5: Production
 - [ ] #4 Observability
