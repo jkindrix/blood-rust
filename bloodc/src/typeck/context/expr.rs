@@ -5975,8 +5975,50 @@ impl<'a> TypeContext<'a> {
                 self.unifier.unify(&right_expr.ty, &Type::bool(), span)?;
                 Type::bool()
             }
-            ast::BinOp::BitAnd | ast::BinOp::BitOr | ast::BinOp::BitXor | ast::BinOp::Shl | ast::BinOp::Shr => {
+            ast::BinOp::BitAnd | ast::BinOp::BitOr | ast::BinOp::BitXor => {
                 self.unifier.unify(&left_expr.ty, &right_expr.ty, span)?;
+                left_expr.ty.clone()
+            }
+            ast::BinOp::Shl | ast::BinOp::Shr => {
+                // Shift operators: the shift amount (right operand) does NOT need to match
+                // the shifted value (left operand) type. Both must be integer types,
+                // but u64 >> u32 is perfectly valid.
+                let left_resolved = self.unifier.resolve(&left_expr.ty);
+                let right_resolved = self.unifier.resolve(&right_expr.ty);
+
+                // Verify left operand is an integer type
+                match left_resolved.kind() {
+                    TypeKind::Primitive(PrimitiveTy::Int(_) | PrimitiveTy::Uint(_)) => {}
+                    TypeKind::Infer(_) | TypeKind::Param(_) | TypeKind::Error => {}
+                    _ => {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::InvalidBinaryOp {
+                                op: op.as_str().to_string(),
+                                left: left_resolved,
+                                right: right_resolved.clone(),
+                            },
+                            span,
+                        )));
+                    }
+                }
+
+                // Verify right operand (shift amount) is an integer type
+                match right_resolved.kind() {
+                    TypeKind::Primitive(PrimitiveTy::Int(_) | PrimitiveTy::Uint(_)) => {}
+                    TypeKind::Infer(_) | TypeKind::Param(_) | TypeKind::Error => {}
+                    _ => {
+                        return Err(Box::new(TypeError::new(
+                            TypeErrorKind::InvalidBinaryOp {
+                                op: op.as_str().to_string(),
+                                left: left_resolved,
+                                right: right_resolved,
+                            },
+                            span,
+                        )));
+                    }
+                }
+
+                // Result type is the type of the value being shifted (left operand)
                 left_expr.ty.clone()
             }
             ast::BinOp::Pipe => {

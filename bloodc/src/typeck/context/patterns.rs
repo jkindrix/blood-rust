@@ -12,6 +12,7 @@ use super::TypeContext;
 use super::super::error::{TypeError, TypeErrorKind};
 use super::super::resolve::Binding;
 
+
 impl<'a> TypeContext<'a> {
     /// Define a pattern, returning the local ID for simple patterns.
     pub(crate) fn define_pattern(&mut self, pattern: &ast::Pattern, ty: Type) -> Result<LocalId, Box<TypeError>> {
@@ -363,7 +364,56 @@ impl<'a> TypeContext<'a> {
     /// 2. Extract the variant's field types (with generic params)
     /// 3. Substitute `T` with the concrete type from expected_ty
     /// 4. Type check inner patterns against substituted field types
+    ///
+    /// ## Match Ergonomics
+    ///
+    /// When the expected type is a reference (`&T` or `&mut T`) but the pattern is not
+    /// a reference pattern (`&pat`), the compiler automatically inserts an implicit
+    /// reference pattern. This allows ergonomic patterns like:
+    ///
+    /// ```blood
+    /// match &some_enum {
+    ///     Variant { field } => { /* field is &T */ }
+    /// }
+    /// ```
+    ///
+    /// Without requiring the explicit:
+    ///
+    /// ```blood
+    /// match &some_enum {
+    ///     &Variant { field } => { /* field is T */ }
+    /// }
+    /// ```
     pub(crate) fn lower_pattern(&mut self, pattern: &ast::Pattern, expected_ty: &Type) -> Result<hir::Pattern, Box<TypeError>> {
+        // Match ergonomics: if expected type is a reference but pattern is not a reference pattern,
+        // automatically dereference the expected type and wrap result in an implicit Ref pattern.
+        // This handles cases like `match &enum_value { Variant { field } => ... }`
+        if let TypeKind::Ref { inner: inner_ty, mutable } = expected_ty.kind() {
+            // Only apply match ergonomics for patterns that need it
+            // (not for explicit reference patterns or simple bindings which handle refs themselves)
+            let needs_ergonomics = matches!(
+                &pattern.kind,
+                ast::PatternKind::Struct { .. }
+                    | ast::PatternKind::TupleStruct { .. }
+                    | ast::PatternKind::Tuple { .. }
+                    | ast::PatternKind::Literal(_)
+            );
+
+            if needs_ergonomics {
+                // Lower the pattern against the inner (dereferenced) type
+                let inner_pattern = self.lower_pattern(pattern, inner_ty)?;
+
+                return Ok(hir::Pattern {
+                    kind: hir::PatternKind::Ref {
+                        mutable: *mutable,
+                        inner: Box::new(inner_pattern),
+                    },
+                    ty: expected_ty.clone(),
+                    span: pattern.span,
+                });
+            }
+        }
+
         let kind = match &pattern.kind {
             ast::PatternKind::Wildcard => hir::PatternKind::Wildcard,
             ast::PatternKind::Ident { name, mutable, by_ref, .. } => {

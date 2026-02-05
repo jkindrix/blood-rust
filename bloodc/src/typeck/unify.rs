@@ -42,6 +42,10 @@ use crate::hir::{PrimitiveTy, Type, TypeKind, TyVarId, RecordRowVarId, RecordFie
 use super::error::{TypeError, TypeErrorKind};
 use crate::span::Span;
 
+/// Maximum type recursion depth during unification.
+/// This prevents DoS attacks via pathologically nested types.
+pub const MAX_TYPE_DEPTH: usize = 128;
+
 /// The unifier maintains type variable substitutions.
 #[derive(Debug, Clone)]
 pub struct Unifier {
@@ -55,6 +59,10 @@ pub struct Unifier {
     row_substitutions: HashMap<RecordRowVarId, (Vec<RecordField>, Option<RecordRowVarId>)>,
     /// The next row variable ID to assign.
     next_row_var: u32,
+    /// Current recursion depth during unification.
+    depth: usize,
+    /// Maximum allowed depth (configurable, defaults to MAX_TYPE_DEPTH).
+    max_depth: usize,
 }
 
 impl Unifier {
@@ -65,6 +73,20 @@ impl Unifier {
             next_var: 0,
             row_substitutions: HashMap::new(),
             next_row_var: 0,
+            depth: 0,
+            max_depth: MAX_TYPE_DEPTH,
+        }
+    }
+
+    /// Create a new unifier with a custom depth limit.
+    pub fn with_max_depth(max_depth: usize) -> Self {
+        Self {
+            substitutions: HashMap::new(),
+            next_var: 0,
+            row_substitutions: HashMap::new(),
+            next_row_var: 0,
+            depth: 0,
+            max_depth,
         }
     }
 
@@ -99,6 +121,24 @@ impl Unifier {
     ///
     /// Returns Ok(()) if unification succeeds, Err if types are incompatible.
     pub fn unify(&mut self, t1: &Type, t2: &Type, span: Span) -> Result<(), Box<TypeError>> {
+        // Check recursion depth limit (prevents DoS via pathologically nested types)
+        if self.depth >= self.max_depth {
+            return Err(Box::new(TypeError::new(
+                TypeErrorKind::TypeDepthExceeded {
+                    depth: self.depth,
+                    limit: self.max_depth,
+                },
+                span,
+            )));
+        }
+        self.depth += 1;
+        let result = self.unify_inner(t1, t2, span);
+        self.depth -= 1;
+        result
+    }
+
+    /// Internal unification without depth tracking (called by unify).
+    fn unify_inner(&mut self, t1: &Type, t2: &Type, span: Span) -> Result<(), Box<TypeError>> {
         // Resolve any existing substitutions
         let t1 = self.resolve(t1);
         let t2 = self.resolve(t2);
@@ -2623,5 +2663,72 @@ mod tests {
         // Return type should be unified
         let resolved = u.resolve(&var);
         assert_eq!(resolved, Type::string());
+    }
+
+    // ============================================================
+    // Depth Limit Tests (Security)
+    // ============================================================
+
+    #[test]
+    fn test_depth_limit_exceeded() {
+        let span = Span::dummy();
+
+        // Create a unifier with a small depth limit for testing
+        let mut u = Unifier::with_max_depth(3);
+
+        // Create nested tuple types that exceed the depth limit
+        // Depth 1: (i32, (i32, (i32, (i32, i32))))
+        let inner = Type::tuple(vec![Type::i32(), Type::i32()]);
+        let nested1 = Type::tuple(vec![Type::i32(), inner]);
+        let nested2 = Type::tuple(vec![Type::i32(), nested1]);
+        let deeply_nested = Type::tuple(vec![Type::i32(), nested2]);
+
+        // Try to unify with itself - this requires recursing into the structure
+        // With max_depth=3, this should fail because the nesting is 4 levels deep
+        let result = u.unify(&deeply_nested, &deeply_nested, span);
+
+        // The unification should fail due to depth limit
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match &err.kind {
+            TypeErrorKind::TypeDepthExceeded { depth: _, limit } => {
+                assert_eq!(*limit, 3);
+            }
+            other => panic!("Expected TypeDepthExceeded, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_depth_limit_not_exceeded() {
+        let span = Span::dummy();
+
+        // Create a unifier with the default depth limit
+        let mut u = Unifier::new();
+
+        // Create a reasonably nested type (should be fine with default limit)
+        let nested = Type::tuple(vec![
+            Type::i32(),
+            Type::tuple(vec![
+                Type::bool(),
+                Type::tuple(vec![Type::string()]),
+            ]),
+        ]);
+
+        // This should succeed
+        assert!(u.unify(&nested, &nested, span).is_ok());
+    }
+
+    #[test]
+    fn test_default_max_depth() {
+        // Verify the default max depth is set correctly
+        let u = Unifier::new();
+        assert_eq!(u.max_depth, MAX_TYPE_DEPTH);
+        assert_eq!(u.max_depth, 128);
+    }
+
+    #[test]
+    fn test_custom_max_depth() {
+        let u = Unifier::with_max_depth(50);
+        assert_eq!(u.max_depth, 50);
     }
 }

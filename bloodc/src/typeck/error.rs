@@ -370,6 +370,12 @@ impl TypeError {
                 format!("parse error in module: {message}"),
             ),
 
+            // Security limits (E07xx)
+            TypeErrorKind::TypeDepthExceeded { depth, limit } => (
+                "E0701",
+                format!("type recursion depth exceeded: depth {depth} exceeds limit {limit}"),
+            ),
+
         };
 
         let mut diag = Diagnostic::error(message, self.span).with_code(code);
@@ -699,6 +705,14 @@ pub enum TypeErrorKind {
     /// Parse error in module file.
     ParseError {
         message: String,
+    },
+
+    // Security limits (E07xx)
+    /// Type recursion depth exceeded during unification.
+    /// This prevents DoS attacks via pathologically nested types.
+    TypeDepthExceeded {
+        depth: usize,
+        limit: usize,
     },
 }
 
