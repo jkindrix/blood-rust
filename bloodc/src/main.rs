@@ -1002,32 +1002,37 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
         ctx
     };
 
-    if let Err(errors) = ctx.resolve_program(&program) {
-        for error in &errors {
-            emitter.emit(error);
+    let mut all_type_errors: Vec<bloodc::diagnostics::Diagnostic> = Vec::new();
+
+    let resolve_ok = match ctx.resolve_program(&program) {
+        Ok(()) => true,
+        Err(errors) => {
+            all_type_errors.extend(errors);
+            false
         }
-        eprintln!("Build failed: type errors.");
-        return ExitCode::from(1);
-    }
+    };
 
     // Expand derive macros after collection, before type checking bodies
     ctx.expand_derives();
 
     // Check for recursive types with infinite size
     if let Err(errors) = ctx.check_recursive_types() {
-        for error in &errors {
-            emitter.emit(error);
-        }
-        eprintln!("Build failed: type errors.");
-        return ExitCode::from(1);
+        all_type_errors.extend(errors);
     }
 
-    // Type-check all function bodies
-    if let Err(errors) = ctx.check_all_bodies() {
-        for error in &errors {
+    // Type-check all function bodies (only if resolution succeeded,
+    // since body checking depends on resolved names)
+    if resolve_ok {
+        if let Err(errors) = ctx.check_all_bodies() {
+            all_type_errors.extend(errors);
+        }
+    }
+
+    if !all_type_errors.is_empty() {
+        for error in &all_type_errors {
             emitter.emit(error);
         }
-        eprintln!("Build failed: type errors.");
+        eprintln!("Build failed: {} type error(s).", all_type_errors.len());
         return ExitCode::from(1);
     }
     phase_timings.push(("Type check", t.elapsed()));
