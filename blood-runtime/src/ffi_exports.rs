@@ -6366,6 +6366,557 @@ pub unsafe extern "C" fn log_entry_drop(handle: *mut LogEntryHandle) {
 }
 
 // ============================================================================
+// Subprocess Management
+// ============================================================================
+
+/// Handle to a child process.
+#[repr(C)]
+pub struct ProcessHandle {
+    /// Opaque pointer to the Child struct.
+    ptr: *mut std::ffi::c_void,
+    /// Process ID assigned by the runtime.
+    id: u64,
+    /// OS process ID.
+    pid: u32,
+}
+
+/// Process output structure.
+#[repr(C)]
+pub struct ProcessOutput {
+    /// Exit code (-1 if terminated by signal).
+    exit_code: i32,
+    /// Signal that terminated the process (0 if exited normally).
+    signal: i32,
+    /// Pointer to stdout data.
+    stdout_ptr: *mut u8,
+    /// Length of stdout data.
+    stdout_len: u64,
+    /// Pointer to stderr data.
+    stderr_ptr: *mut u8,
+    /// Length of stderr data.
+    stderr_len: u64,
+}
+
+/// Stdio configuration constants.
+pub mod stdio_config {
+    /// Inherit from parent.
+    pub const INHERIT: u8 = 0;
+    /// Redirect to null.
+    pub const NULL: u8 = 1;
+    /// Create a pipe.
+    pub const PIPED: u8 = 2;
+}
+
+/// Create a new command builder.
+///
+/// # Arguments
+/// * `program_ptr` - Pointer to program name bytes
+/// * `program_len` - Length of program name
+///
+/// # Returns
+/// Opaque pointer to Command, or null on error.
+///
+/// # Safety
+/// `program_ptr` must be valid UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn process_command_new(
+    program_ptr: *const u8,
+    program_len: u64,
+) -> *mut std::ffi::c_void {
+    if program_ptr.is_null() || program_len == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let program_bytes = std::slice::from_raw_parts(program_ptr, program_len as usize);
+    let program = match std::str::from_utf8(program_bytes) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let cmd = Box::new(crate::process::Command::new(program));
+    Box::into_raw(cmd) as *mut std::ffi::c_void
+}
+
+/// Add an argument to a command.
+///
+/// # Safety
+/// * `cmd` must be a valid command pointer
+/// * `arg_ptr` must be valid UTF-8 data
+#[no_mangle]
+pub unsafe extern "C" fn process_command_arg(
+    cmd: *mut std::ffi::c_void,
+    arg_ptr: *const u8,
+    arg_len: u64,
+) {
+    if cmd.is_null() || arg_ptr.is_null() {
+        return;
+    }
+
+    let arg_bytes = std::slice::from_raw_parts(arg_ptr, arg_len as usize);
+    let arg = match std::str::from_utf8(arg_bytes) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let command = &mut *(cmd as *mut crate::process::Command);
+    command.arg(arg);
+}
+
+/// Set an environment variable for a command.
+///
+/// # Safety
+/// * `cmd` must be a valid command pointer
+/// * `key_ptr` and `val_ptr` must be valid UTF-8 data
+#[no_mangle]
+pub unsafe extern "C" fn process_command_env(
+    cmd: *mut std::ffi::c_void,
+    key_ptr: *const u8,
+    key_len: u64,
+    val_ptr: *const u8,
+    val_len: u64,
+) {
+    if cmd.is_null() || key_ptr.is_null() {
+        return;
+    }
+
+    let key_bytes = std::slice::from_raw_parts(key_ptr, key_len as usize);
+    let key = match std::str::from_utf8(key_bytes) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let val = if val_ptr.is_null() || val_len == 0 {
+        ""
+    } else {
+        let val_bytes = std::slice::from_raw_parts(val_ptr, val_len as usize);
+        match std::str::from_utf8(val_bytes) {
+            Ok(s) => s,
+            Err(_) => return,
+        }
+    };
+
+    let command = &mut *(cmd as *mut crate::process::Command);
+    command.env(key, val);
+}
+
+/// Set the working directory for a command.
+///
+/// # Safety
+/// * `cmd` must be a valid command pointer
+/// * `dir_ptr` must be valid UTF-8 data
+#[no_mangle]
+pub unsafe extern "C" fn process_command_current_dir(
+    cmd: *mut std::ffi::c_void,
+    dir_ptr: *const u8,
+    dir_len: u64,
+) {
+    if cmd.is_null() || dir_ptr.is_null() {
+        return;
+    }
+
+    let dir_bytes = std::slice::from_raw_parts(dir_ptr, dir_len as usize);
+    let dir = match std::str::from_utf8(dir_bytes) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let command = &mut *(cmd as *mut crate::process::Command);
+    command.current_dir(dir);
+}
+
+/// Set stdin configuration for a command.
+///
+/// # Arguments
+/// * `cfg` - 0=INHERIT, 1=NULL, 2=PIPED
+///
+/// # Safety
+/// `cmd` must be a valid command pointer.
+#[no_mangle]
+pub unsafe extern "C" fn process_command_stdin(cmd: *mut std::ffi::c_void, cfg: u8) {
+    if cmd.is_null() {
+        return;
+    }
+
+    let stdio = match cfg {
+        0 => crate::process::Stdio::Inherit,
+        1 => crate::process::Stdio::Null,
+        2 => crate::process::Stdio::Piped,
+        _ => return,
+    };
+
+    let command = &mut *(cmd as *mut crate::process::Command);
+    command.stdin(stdio);
+}
+
+/// Set stdout configuration for a command.
+///
+/// # Safety
+/// `cmd` must be a valid command pointer.
+#[no_mangle]
+pub unsafe extern "C" fn process_command_stdout(cmd: *mut std::ffi::c_void, cfg: u8) {
+    if cmd.is_null() {
+        return;
+    }
+
+    let stdio = match cfg {
+        0 => crate::process::Stdio::Inherit,
+        1 => crate::process::Stdio::Null,
+        2 => crate::process::Stdio::Piped,
+        _ => return,
+    };
+
+    let command = &mut *(cmd as *mut crate::process::Command);
+    command.stdout(stdio);
+}
+
+/// Set stderr configuration for a command.
+///
+/// # Safety
+/// `cmd` must be a valid command pointer.
+#[no_mangle]
+pub unsafe extern "C" fn process_command_stderr(cmd: *mut std::ffi::c_void, cfg: u8) {
+    if cmd.is_null() {
+        return;
+    }
+
+    let stdio = match cfg {
+        0 => crate::process::Stdio::Inherit,
+        1 => crate::process::Stdio::Null,
+        2 => crate::process::Stdio::Piped,
+        _ => return,
+    };
+
+    let command = &mut *(cmd as *mut crate::process::Command);
+    command.stderr(stdio);
+}
+
+/// Spawn a command as a child process.
+///
+/// # Returns
+/// ProcessHandle with valid ptr on success, null ptr on failure.
+///
+/// # Safety
+/// `cmd` must be a valid command pointer. The command is consumed.
+#[no_mangle]
+pub unsafe extern "C" fn process_spawn(cmd: *mut std::ffi::c_void) -> ProcessHandle {
+    if cmd.is_null() {
+        return ProcessHandle {
+            ptr: std::ptr::null_mut(),
+            id: 0,
+            pid: 0,
+        };
+    }
+
+    let mut command = Box::from_raw(cmd as *mut crate::process::Command);
+
+    match command.spawn() {
+        Ok(child) => {
+            let id = child.id();
+            let pid = child.pid();
+            ProcessHandle {
+                ptr: Box::into_raw(Box::new(child)) as *mut std::ffi::c_void,
+                id,
+                pid,
+            }
+        }
+        Err(_) => ProcessHandle {
+            ptr: std::ptr::null_mut(),
+            id: 0,
+            pid: 0,
+        },
+    }
+}
+
+/// Execute a command and wait for it to complete.
+///
+/// # Returns
+/// Exit code on success, -1 on error.
+///
+/// # Safety
+/// `cmd` must be a valid command pointer. The command is consumed.
+#[no_mangle]
+pub unsafe extern "C" fn process_run(cmd: *mut std::ffi::c_void) -> i32 {
+    if cmd.is_null() {
+        return -1;
+    }
+
+    let mut command = Box::from_raw(cmd as *mut crate::process::Command);
+
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+/// Execute a command and capture its output.
+///
+/// # Safety
+/// * `cmd` must be a valid command pointer. The command is consumed.
+/// * `output` must be a valid pointer to uninitialized ProcessOutput.
+#[no_mangle]
+pub unsafe extern "C" fn process_output(
+    cmd: *mut std::ffi::c_void,
+    output: *mut ProcessOutput,
+) -> c_int {
+    if cmd.is_null() || output.is_null() {
+        return -1;
+    }
+
+    let mut command = Box::from_raw(cmd as *mut crate::process::Command);
+
+    match command.output() {
+        Ok(result) => {
+            (*output).exit_code = result.status.code().unwrap_or(-1);
+
+            #[cfg(unix)]
+            {
+                (*output).signal = result.status.signal().unwrap_or(0);
+            }
+            #[cfg(not(unix))]
+            {
+                (*output).signal = 0;
+            }
+
+            // Allocate and copy stdout
+            if result.stdout.is_empty() {
+                (*output).stdout_ptr = std::ptr::null_mut();
+                (*output).stdout_len = 0;
+            } else {
+                let stdout = result.stdout.into_boxed_slice();
+                (*output).stdout_len = stdout.len() as u64;
+                (*output).stdout_ptr = Box::into_raw(stdout) as *mut u8;
+            }
+
+            // Allocate and copy stderr
+            if result.stderr.is_empty() {
+                (*output).stderr_ptr = std::ptr::null_mut();
+                (*output).stderr_len = 0;
+            } else {
+                let stderr = result.stderr.into_boxed_slice();
+                (*output).stderr_len = stderr.len() as u64;
+                (*output).stderr_ptr = Box::into_raw(stderr) as *mut u8;
+            }
+
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Free memory allocated by process_output.
+///
+/// # Safety
+/// `output` must be a result from `process_output`.
+#[no_mangle]
+pub unsafe extern "C" fn process_output_free(output: *mut ProcessOutput) {
+    if output.is_null() {
+        return;
+    }
+
+    if !(*output).stdout_ptr.is_null() && (*output).stdout_len > 0 {
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+            (*output).stdout_ptr,
+            (*output).stdout_len as usize,
+        ));
+    }
+
+    if !(*output).stderr_ptr.is_null() && (*output).stderr_len > 0 {
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(
+            (*output).stderr_ptr,
+            (*output).stderr_len as usize,
+        ));
+    }
+
+    (*output).stdout_ptr = std::ptr::null_mut();
+    (*output).stdout_len = 0;
+    (*output).stderr_ptr = std::ptr::null_mut();
+    (*output).stderr_len = 0;
+}
+
+/// Wait for a child process to complete.
+///
+/// # Returns
+/// Exit code on success, -1 on error.
+///
+/// # Safety
+/// `handle` must be a valid process handle.
+#[no_mangle]
+pub unsafe extern "C" fn process_wait(handle: *mut ProcessHandle) -> i32 {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return -1;
+    }
+
+    let child = &mut *((*handle).ptr as *mut crate::process::Child);
+
+    match child.wait() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
+/// Check if a child process has exited (non-blocking).
+///
+/// # Returns
+/// * >= 0: Exit code (process has exited)
+/// * -1: Process still running
+/// * -2: Error
+///
+/// # Safety
+/// `handle` must be a valid process handle.
+#[no_mangle]
+pub unsafe extern "C" fn process_try_wait(handle: *mut ProcessHandle) -> i32 {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return -2;
+    }
+
+    let child = &mut *((*handle).ptr as *mut crate::process::Child);
+
+    match child.try_wait() {
+        Ok(Some(status)) => status.code().unwrap_or(-2),
+        Ok(None) => -1, // Still running
+        Err(_) => -2,
+    }
+}
+
+/// Kill a child process.
+///
+/// # Returns
+/// 0 on success, -1 on error.
+///
+/// # Safety
+/// `handle` must be a valid process handle.
+#[no_mangle]
+pub unsafe extern "C" fn process_kill(handle: *mut ProcessHandle) -> c_int {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return -1;
+    }
+
+    let child = &mut *((*handle).ptr as *mut crate::process::Child);
+
+    match child.kill() {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Free a process handle.
+///
+/// # Safety
+/// `handle` must be a valid process handle.
+#[no_mangle]
+pub unsafe extern "C" fn process_free(handle: *mut ProcessHandle) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let _ = Box::from_raw((*handle).ptr as *mut crate::process::Child);
+    (*handle).ptr = std::ptr::null_mut();
+}
+
+/// Free a command without executing it.
+///
+/// # Safety
+/// `cmd` must be a valid command pointer.
+#[no_mangle]
+pub unsafe extern "C" fn process_command_free(cmd: *mut std::ffi::c_void) {
+    if cmd.is_null() {
+        return;
+    }
+
+    let _ = Box::from_raw(cmd as *mut crate::process::Command);
+}
+
+/// Check if a program exists in PATH.
+///
+/// # Returns
+/// 1 if found, 0 if not found.
+///
+/// # Safety
+/// `program_ptr` must be valid UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn process_which(program_ptr: *const u8, program_len: u64) -> c_int {
+    if program_ptr.is_null() || program_len == 0 {
+        return 0;
+    }
+
+    let program_bytes = std::slice::from_raw_parts(program_ptr, program_len as usize);
+    let program = match std::str::from_utf8(program_bytes) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    if crate::process::which(program).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Get the current process ID.
+#[no_mangle]
+pub extern "C" fn process_current_pid() -> u32 {
+    crate::process::current_pid()
+}
+
+/// Execute a shell command and capture output.
+///
+/// # Safety
+/// * `command_ptr` must be valid UTF-8 data
+/// * `output` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn process_shell(
+    command_ptr: *const u8,
+    command_len: u64,
+    output: *mut ProcessOutput,
+) -> c_int {
+    if command_ptr.is_null() || command_len == 0 || output.is_null() {
+        return -1;
+    }
+
+    let command_bytes = std::slice::from_raw_parts(command_ptr, command_len as usize);
+    let command = match std::str::from_utf8(command_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    match crate::process::shell(command) {
+        Ok(result) => {
+            (*output).exit_code = result.status.code().unwrap_or(-1);
+
+            #[cfg(unix)]
+            {
+                (*output).signal = result.status.signal().unwrap_or(0);
+            }
+            #[cfg(not(unix))]
+            {
+                (*output).signal = 0;
+            }
+
+            if result.stdout.is_empty() {
+                (*output).stdout_ptr = std::ptr::null_mut();
+                (*output).stdout_len = 0;
+            } else {
+                let stdout = result.stdout.into_boxed_slice();
+                (*output).stdout_len = stdout.len() as u64;
+                (*output).stdout_ptr = Box::into_raw(stdout) as *mut u8;
+            }
+
+            if result.stderr.is_empty() {
+                (*output).stderr_ptr = std::ptr::null_mut();
+                (*output).stderr_len = 0;
+            } else {
+                let stderr = result.stderr.into_boxed_slice();
+                (*output).stderr_len = stderr.len() as u64;
+                (*output).stderr_ptr = Box::into_raw(stderr) as *mut u8;
+            }
+
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+// ============================================================================
 // Vec<T> Runtime Functions
 // ============================================================================
 

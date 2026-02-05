@@ -55,6 +55,7 @@ pub mod io;
 pub mod log;
 pub mod memory;
 pub mod panic;
+pub mod process;
 pub mod scheduler;
 pub mod signal;
 pub mod simd;
