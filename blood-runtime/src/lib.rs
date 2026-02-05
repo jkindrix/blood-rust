@@ -44,22 +44,31 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+pub mod cancellation;
 pub mod channel;
+pub mod config;
 pub mod continuation;
 pub mod fiber;
 pub mod ffi;
 pub mod ffi_exports;
 pub mod io;
+pub mod log;
 pub mod memory;
+pub mod panic;
 pub mod scheduler;
+pub mod signal;
 pub mod simd;
 pub mod stdlib;
 pub mod sync;
 
 // Re-exports
+pub use cancellation::{CancellationToken, CancellationSource, CancellationError, CancellableScope};
 pub use channel::{bounded, unbounded, Receiver, Sender};
+pub use config::{RuntimeConfig, RuntimeConfigBuilder, LogLevel, ConfigError};
 pub use fiber::{Fiber, FiberId, FiberHandle, FiberState};
+pub use panic::{BloodPanicInfo, Location as PanicLocation};
 pub use scheduler::{Scheduler, Worker};
+pub use signal::{Signal, SignalHandler};
 pub use sync::{Mutex, RwLock, Once, Barrier, Semaphore, OnceLock};
 
 /// Runtime version.
@@ -70,9 +79,60 @@ pub fn init() -> Scheduler {
     Scheduler::new(SchedulerConfig::default())
 }
 
-/// Initialize the runtime with custom configuration.
+/// Initialize the runtime with custom scheduler configuration.
+///
+/// This is the legacy initialization method. For more comprehensive
+/// configuration, use `init_with_runtime_config`.
 pub fn init_with(config: SchedulerConfig) -> Scheduler {
     Scheduler::new(config)
+}
+
+/// Initialize the runtime with full runtime configuration.
+///
+/// This method supports all runtime configuration options including
+/// memory limits, timeout settings, and logging configuration.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use blood_runtime::{init_with_runtime_config, RuntimeConfig};
+///
+/// let config = RuntimeConfig::builder()
+///     .num_workers(4)
+///     .max_heap_size(1024 * 1024 * 1024)
+///     .build()
+///     .unwrap();
+///
+/// let scheduler = init_with_runtime_config(config);
+/// ```
+pub fn init_with_runtime_config(config: RuntimeConfig) -> Scheduler {
+    // Store the runtime config globally for other components to access
+    let _ = RUNTIME_CONFIG.set(config.clone());
+
+    // Set memory limits
+    memory::set_max_heap_size(config.memory.max_heap_size as u64);
+
+    Scheduler::new(config.to_scheduler_config())
+}
+
+/// Initialize the runtime from environment variables.
+///
+/// Reads configuration from `BLOOD_*` environment variables.
+/// See `RuntimeConfig::from_env()` for the full list of supported variables.
+pub fn init_from_env() -> Scheduler {
+    let config = RuntimeConfig::from_env();
+    init_with_runtime_config(config)
+}
+
+/// Global runtime configuration.
+static RUNTIME_CONFIG: std::sync::OnceLock<RuntimeConfig> = std::sync::OnceLock::new();
+
+/// Get the current runtime configuration.
+///
+/// Returns `None` if the runtime was not initialized with `init_with_runtime_config`
+/// or `init_from_env`.
+pub fn runtime_config() -> Option<&'static RuntimeConfig> {
+    RUNTIME_CONFIG.get()
 }
 
 /// Configuration for the runtime scheduler.

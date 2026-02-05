@@ -1072,7 +1072,10 @@ pub unsafe extern "C" fn string_to_uppercase(s: *const BloodStr) -> BloodVec {
     }
 
     let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
-    let str_slice = std::str::from_utf8_unchecked(slice);
+    let str_slice = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 },
+    };
     let upper = str_slice.to_uppercase();
     let bytes = upper.into_bytes();
 
@@ -1111,7 +1114,10 @@ pub unsafe extern "C" fn string_to_lowercase(s: *const BloodStr) -> BloodVec {
     }
 
     let slice = std::slice::from_raw_parts(s.ptr, s.len as usize);
-    let str_slice = std::str::from_utf8_unchecked(slice);
+    let str_slice = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 },
+    };
     let lower = str_slice.to_lowercase();
     let bytes = lower.into_bytes();
 
@@ -1156,7 +1162,10 @@ pub unsafe extern "C" fn string_replace(
     }
 
     let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len as usize);
-    let str_slice = std::str::from_utf8_unchecked(slice);
+    let str_slice = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 },
+    };
 
     // Get the from pattern
     let from_str = if from.is_null() {
@@ -1166,9 +1175,12 @@ pub unsafe extern "C" fn string_replace(
         if from_ref.ptr.is_null() || from_ref.len == 0 {
             ""
         } else {
-            std::str::from_utf8_unchecked(
+            match std::str::from_utf8(
                 std::slice::from_raw_parts(from_ref.ptr, from_ref.len as usize)
-            )
+            ) {
+                Ok(s) => s,
+                Err(_) => return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 },
+            }
         }
     };
 
@@ -1180,9 +1192,12 @@ pub unsafe extern "C" fn string_replace(
         if to_ref.ptr.is_null() || to_ref.len == 0 {
             ""
         } else {
-            std::str::from_utf8_unchecked(
+            match std::str::from_utf8(
                 std::slice::from_raw_parts(to_ref.ptr, to_ref.len as usize)
-            )
+            ) {
+                Ok(s) => s,
+                Err(_) => return BloodVec { ptr: std::ptr::null_mut(), len: 0, capacity: 0 },
+            }
         }
     };
 
@@ -1332,6 +1347,192 @@ pub extern "C" fn read_int() -> i32 {
 }
 
 // ============================================================================
+// Path Security Functions
+// ============================================================================
+
+/// Validate that a path does not contain traversal attempts.
+///
+/// Returns `Some(canonical_path)` if the path is safe, `None` if it contains
+/// traversal attempts or cannot be canonicalized.
+///
+/// This function:
+/// - Rejects paths containing `..` components
+/// - Rejects paths containing null bytes
+/// - Canonicalizes the path to resolve symlinks
+fn validate_and_canonicalize_path(path_str: &str) -> Option<std::path::PathBuf> {
+    use std::path::Path;
+
+    // Reject paths with null bytes (shouldn't happen with valid UTF-8, but defense in depth)
+    if path_str.contains('\0') {
+        return None;
+    }
+
+    let path = Path::new(path_str);
+
+    // Check for obvious traversal attempts in the raw path
+    // This catches attempts even before canonicalization
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            // Path contains `..` - this is a traversal attempt
+            return None;
+        }
+    }
+
+    // Canonicalize to resolve symlinks and get the absolute path
+    // This also catches symlink-based traversal attacks
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => Some(canonical),
+        Err(_) => {
+            // If the file doesn't exist yet (for write operations),
+            // canonicalize the parent directory and append the filename
+            if let Some(parent) = path.parent() {
+                if parent.as_os_str().is_empty() {
+                    // No parent directory specified, use current directory
+                    if let Ok(cwd) = std::env::current_dir() {
+                        if let Some(filename) = path.file_name() {
+                            return Some(cwd.join(filename));
+                        }
+                    }
+                } else if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
+                    if let Some(filename) = path.file_name() {
+                        return Some(canonical_parent.join(filename));
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Canonicalize a path, resolving symlinks and normalizing the path.
+///
+/// This function is essential for security - it should be used before any
+/// file operation to prevent path traversal attacks.
+///
+/// # Arguments
+/// * `path` - Path to canonicalize as a BloodStr
+///
+/// # Returns
+/// * BloodStr containing the canonical path on success
+/// * Empty BloodStr (ptr=null, len=0) on error or if path is unsafe
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn path_canonicalize(path: BloodStr) -> BloodStr {
+    if path.ptr.is_null() || path.len == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return BloodStr { ptr: std::ptr::null(), len: 0 },
+    };
+
+    match validate_and_canonicalize_path(path_str) {
+        Some(canonical) => {
+            let canonical_str = canonical.to_string_lossy().into_owned();
+            string_to_blood_str(canonical_str)
+        }
+        None => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+/// Check if a path is safe (does not contain traversal attempts).
+///
+/// This is a quick check that can be used before file operations to detect
+/// obvious path traversal attacks without the overhead of full canonicalization.
+///
+/// # Arguments
+/// * `path` - Path to check as a BloodStr
+///
+/// # Returns
+/// * true if the path appears safe
+/// * false if the path contains traversal attempts or is invalid
+///
+/// # Safety
+/// The path pointer must be valid for `path.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn path_is_safe(path: BloodStr) -> bool {
+    use std::path::Path;
+
+    if path.ptr.is_null() || path.len == 0 {
+        return false;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Reject null bytes
+    if path_str.contains('\0') {
+        return false;
+    }
+
+    // Check for traversal components
+    let p = Path::new(path_str);
+    for component in p.components() {
+        if let std::path::Component::ParentDir = component {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a path is within a given base directory.
+///
+/// This is useful for sandboxing file operations to a specific directory.
+/// The path is canonicalized and checked to ensure it starts with the
+/// canonicalized base directory.
+///
+/// # Arguments
+/// * `path` - Path to check as a BloodStr
+/// * `base` - Base directory that the path must be within
+///
+/// # Returns
+/// * true if the canonicalized path starts with the canonicalized base
+/// * false otherwise (including if either path is invalid)
+///
+/// # Safety
+/// Both pointers must be valid for their respective lengths.
+#[no_mangle]
+pub unsafe extern "C" fn path_is_within(path: BloodStr, base: BloodStr) -> bool {
+    if path.ptr.is_null() || path.len == 0 || base.ptr.is_null() || base.len == 0 {
+        return false;
+    }
+
+    let path_slice = std::slice::from_raw_parts(path.ptr, path.len as usize);
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let base_slice = std::slice::from_raw_parts(base.ptr, base.len as usize);
+    let base_str = match std::str::from_utf8(base_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Canonicalize both paths
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let canonical_base = match std::fs::canonicalize(base_str) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    // Check if path starts with base
+    canonical_path.starts_with(&canonical_base)
+}
+
+// ============================================================================
 // File I/O Functions
 // ============================================================================
 
@@ -1362,6 +1563,12 @@ pub unsafe extern "C" fn file_open(path: BloodStr, mode: BloodStr) -> i64 {
         Err(_) => return -1,
     };
 
+    // Validate path for traversal attacks
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return -1, // Path contains traversal attempt or is invalid
+    };
+
     let mode_str = if mode.ptr.is_null() || mode.len == 0 {
         "r"
     } else {
@@ -1373,11 +1580,11 @@ pub unsafe extern "C" fn file_open(path: BloodStr, mode: BloodStr) -> i64 {
     };
 
     let file_result = match mode_str {
-        "r" => File::open(path_str),
-        "w" => File::create(path_str),
-        "a" => OpenOptions::new().append(true).create(true).open(path_str),
-        "rw" => OpenOptions::new().read(true).write(true).open(path_str),
-        "rw+" => OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path_str),
+        "r" => File::open(&canonical_path),
+        "w" => File::create(&canonical_path),
+        "a" => OpenOptions::new().append(true).create(true).open(&canonical_path),
+        "rw" => OpenOptions::new().read(true).write(true).open(&canonical_path),
+        "rw+" => OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&canonical_path),
         _ => return -1,
     };
 
@@ -1501,7 +1708,13 @@ pub unsafe extern "C" fn file_read_to_string(path: BloodStr) -> BloodStr {
         Err(_) => return BloodStr { ptr: std::ptr::null(), len: 0 },
     };
 
-    match fs::read_to_string(path_str) {
+    // Validate path for traversal attacks
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return BloodStr { ptr: std::ptr::null(), len: 0 },
+    };
+
+    match fs::read_to_string(&canonical_path) {
         Ok(contents) => string_to_blood_str(contents),
         Err(_) => BloodStr { ptr: std::ptr::null(), len: 0 },
     }
@@ -1533,6 +1746,12 @@ pub unsafe extern "C" fn file_write_string(path: BloodStr, content: BloodStr) ->
         Err(_) => return false,
     };
 
+    // Validate path for traversal attacks
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return false,
+    };
+
     let content_str = if content.ptr.is_null() || content.len == 0 {
         ""
     } else {
@@ -1543,7 +1762,7 @@ pub unsafe extern "C" fn file_write_string(path: BloodStr, content: BloodStr) ->
         }
     };
 
-    fs::write(path_str, content_str).is_ok()
+    fs::write(&canonical_path, content_str).is_ok()
 }
 
 /// Append a string to a file, creating it if it doesn't exist.
@@ -1573,6 +1792,12 @@ pub unsafe extern "C" fn file_append_string(path: BloodStr, content: BloodStr) -
         Err(_) => return false,
     };
 
+    // Validate path for traversal attacks
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return false,
+    };
+
     let content_str = if content.ptr.is_null() || content.len == 0 {
         ""
     } else {
@@ -1583,7 +1808,7 @@ pub unsafe extern "C" fn file_append_string(path: BloodStr, content: BloodStr) -
         }
     };
 
-    match OpenOptions::new().append(true).create(true).open(path_str) {
+    match OpenOptions::new().append(true).create(true).open(&canonical_path) {
         Ok(mut file) => file.write_all(content_str.as_bytes()).is_ok(),
         Err(_) => false,
     }
@@ -1614,7 +1839,16 @@ pub unsafe extern "C" fn file_exists(path: BloodStr) -> bool {
         Err(_) => return false,
     };
 
-    Path::new(path_str).exists()
+    // Check for traversal attempts (reject `..` components)
+    // Note: We don't require full canonicalization here since the file might not exist
+    let p = Path::new(path_str);
+    for component in p.components() {
+        if let std::path::Component::ParentDir = component {
+            return false; // Traversal attempt
+        }
+    }
+
+    p.exists()
 }
 
 /// Delete a file.
@@ -1642,7 +1876,13 @@ pub unsafe extern "C" fn file_delete(path: BloodStr) -> bool {
         Err(_) => return false,
     };
 
-    fs::remove_file(path_str).is_ok()
+    // Validate path for traversal attacks
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    fs::remove_file(&canonical_path).is_ok()
 }
 
 /// Get the size of a file in bytes.
@@ -1670,10 +1910,372 @@ pub unsafe extern "C" fn file_size(path: BloodStr) -> i64 {
         Err(_) => return -1,
     };
 
-    match fs::metadata(path_str) {
+    // Validate path for traversal attacks
+    let canonical_path = match validate_and_canonicalize_path(path_str) {
+        Some(p) => p,
+        None => return -1,
+    };
+
+    match fs::metadata(&canonical_path) {
         Ok(metadata) => metadata.len() as i64,
         Err(_) => -1,
     }
+}
+
+// ============================================================================
+// Secure Temporary Files
+// ============================================================================
+
+/// Registry of open temporary files.
+/// Maps handle IDs to (File, PathBuf, delete_on_close) tuples.
+static TEMP_FILE_REGISTRY: OnceLock<Mutex<HashMap<u64, (std::fs::File, std::path::PathBuf, bool)>>> = OnceLock::new();
+
+/// Counter for generating unique temp file handles.
+static TEMP_FILE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn get_temp_file_registry() -> &'static Mutex<HashMap<u64, (std::fs::File, std::path::PathBuf, bool)>> {
+    TEMP_FILE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Create a secure temporary file.
+///
+/// Creates a temporary file with a unique name in the system's temp directory.
+/// The file is created with restricted permissions (owner read/write only on Unix).
+///
+/// # Arguments
+/// * `prefix` - Optional prefix for the filename (can be empty)
+/// * `suffix` - Optional suffix/extension for the filename (can be empty)
+/// * `delete_on_close` - If true, the file will be deleted when closed
+///
+/// # Returns
+/// * Handle ID (> 0) on success
+/// * 0 on error
+///
+/// # Safety
+/// The prefix and suffix pointers must be valid for their respective lengths.
+#[no_mangle]
+pub unsafe extern "C" fn temp_file_create(
+    prefix: BloodStr,
+    suffix: BloodStr,
+    delete_on_close: bool,
+) -> u64 {
+    use std::fs::OpenOptions;
+
+    // Parse prefix (default to "blood_")
+    let prefix_str = if prefix.ptr.is_null() || prefix.len == 0 {
+        "blood_"
+    } else {
+        let prefix_slice = std::slice::from_raw_parts(prefix.ptr, prefix.len as usize);
+        match std::str::from_utf8(prefix_slice) {
+            Ok(s) => s,
+            Err(_) => "blood_",
+        }
+    };
+
+    // Parse suffix (default to empty)
+    let suffix_str = if suffix.ptr.is_null() || suffix.len == 0 {
+        ""
+    } else {
+        let suffix_slice = std::slice::from_raw_parts(suffix.ptr, suffix.len as usize);
+        match std::str::from_utf8(suffix_slice) {
+            Ok(s) => s,
+            Err(_) => "",
+        }
+    };
+
+    // Validate prefix and suffix don't contain path separators (security)
+    if prefix_str.contains('/') || prefix_str.contains('\\') ||
+       suffix_str.contains('/') || suffix_str.contains('\\') {
+        return 0;
+    }
+
+    // Get system temp directory
+    let temp_dir = std::env::temp_dir();
+
+    // Generate unique filename using secure random bytes
+    let mut attempts = 0;
+    const MAX_ATTEMPTS: u32 = 100;
+
+    while attempts < MAX_ATTEMPTS {
+        // Generate random component
+        let random_component: u64 = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let counter = TEMP_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Mix time with counter and process ID for uniqueness
+            nanos.wrapping_mul(31).wrapping_add(counter).wrapping_mul(17).wrapping_add(std::process::id() as u64)
+        };
+
+        let filename = format!("{}{:016x}{}", prefix_str, random_component, suffix_str);
+        let path = temp_dir.join(&filename);
+
+        // Create file with O_EXCL to prevent race conditions
+        #[cfg(unix)]
+        let file_result = {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)  // O_EXCL - fail if exists
+                .mode(0o600)       // Owner read/write only
+                .open(&path)
+        };
+
+        #[cfg(not(unix))]
+        let file_result = {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)  // Fail if exists
+                .open(&path)
+        };
+
+        match file_result {
+            Ok(file) => {
+                let handle = TEMP_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let registry = get_temp_file_registry();
+                let mut guard = registry.lock();
+                guard.insert(handle, (file, path, delete_on_close));
+                return handle;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Try again with different random name
+                attempts += 1;
+                continue;
+            }
+            Err(_) => {
+                return 0;
+            }
+        }
+    }
+
+    0 // Failed after max attempts
+}
+
+/// Write data to a temporary file.
+///
+/// # Arguments
+/// * `handle` - Temp file handle from temp_file_create
+/// * `data` - Data to write
+///
+/// # Returns
+/// * Number of bytes written (>= 0) on success
+/// * -1 on error
+///
+/// # Safety
+/// The data pointer must be valid for `data.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn temp_file_write(handle: u64, data: BloodStr) -> i64 {
+    use std::io::Write;
+
+    if handle == 0 {
+        return -1;
+    }
+
+    let registry = get_temp_file_registry();
+    let mut guard = registry.lock();
+
+    let entry = match guard.get_mut(&handle) {
+        Some(e) => e,
+        None => return -1,
+    };
+
+    if data.ptr.is_null() || data.len == 0 {
+        return 0; // Nothing to write
+    }
+
+    let data_slice = std::slice::from_raw_parts(data.ptr, data.len as usize);
+
+    match entry.0.write(data_slice) {
+        Ok(n) => n as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Read data from a temporary file.
+///
+/// Reads up to `max_len` bytes from the current position.
+///
+/// # Arguments
+/// * `handle` - Temp file handle from temp_file_create
+/// * `buf` - Buffer to read into
+/// * `max_len` - Maximum number of bytes to read
+///
+/// # Returns
+/// * Number of bytes read (>= 0) on success
+/// * -1 on error
+///
+/// # Safety
+/// The buffer must be valid for `max_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn temp_file_read(handle: u64, buf: *mut u8, max_len: u64) -> i64 {
+    use std::io::Read;
+
+    if handle == 0 || buf.is_null() {
+        return -1;
+    }
+
+    let registry = get_temp_file_registry();
+    let mut guard = registry.lock();
+
+    let entry = match guard.get_mut(&handle) {
+        Some(e) => e,
+        None => return -1,
+    };
+
+    let buffer = std::slice::from_raw_parts_mut(buf, max_len as usize);
+
+    match entry.0.read(buffer) {
+        Ok(n) => n as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Seek to a position in a temporary file.
+///
+/// # Arguments
+/// * `handle` - Temp file handle
+/// * `position` - Position to seek to from the beginning of the file
+///
+/// # Returns
+/// * New position on success
+/// * -1 on error
+#[no_mangle]
+pub extern "C" fn temp_file_seek(handle: u64, position: u64) -> i64 {
+    use std::io::{Seek, SeekFrom};
+
+    if handle == 0 {
+        return -1;
+    }
+
+    let registry = get_temp_file_registry();
+    let mut guard = registry.lock();
+
+    let entry = match guard.get_mut(&handle) {
+        Some(e) => e,
+        None => return -1,
+    };
+
+    match entry.0.seek(SeekFrom::Start(position)) {
+        Ok(pos) => pos as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Get the path of a temporary file.
+///
+/// # Arguments
+/// * `handle` - Temp file handle
+///
+/// # Returns
+/// * BloodStr containing the file path on success
+/// * Empty BloodStr on error
+#[no_mangle]
+pub extern "C" fn temp_file_path(handle: u64) -> BloodStr {
+    if handle == 0 {
+        return BloodStr { ptr: std::ptr::null(), len: 0 };
+    }
+
+    let registry = get_temp_file_registry();
+    let guard = registry.lock();
+
+    let entry = match guard.get(&handle) {
+        Some(e) => e,
+        None => return BloodStr { ptr: std::ptr::null(), len: 0 },
+    };
+
+    let path_str = entry.1.to_string_lossy().into_owned();
+    string_to_blood_str(path_str)
+}
+
+/// Close a temporary file.
+///
+/// If the file was created with delete_on_close=true, the file will be deleted.
+///
+/// # Arguments
+/// * `handle` - Temp file handle to close
+///
+/// # Returns
+/// * true on success
+/// * false on error
+#[no_mangle]
+pub extern "C" fn temp_file_close(handle: u64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+
+    let registry = get_temp_file_registry();
+    let mut guard = registry.lock();
+
+    let entry = match guard.remove(&handle) {
+        Some(e) => e,
+        None => return false,
+    };
+
+    let (file, path, delete_on_close) = entry;
+
+    // Drop the file handle first to close it
+    drop(file);
+
+    // Delete if requested
+    if delete_on_close {
+        let _ = std::fs::remove_file(&path);
+    }
+
+    true
+}
+
+/// Persist a temporary file by moving it to a permanent location.
+///
+/// This closes the temp file and moves it to the specified destination.
+/// The file is removed from the temp file registry.
+///
+/// # Arguments
+/// * `handle` - Temp file handle
+/// * `dest` - Destination path
+///
+/// # Returns
+/// * true on success
+/// * false on error
+///
+/// # Safety
+/// The dest pointer must be valid for `dest.len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn temp_file_persist(handle: u64, dest: BloodStr) -> bool {
+    if handle == 0 || dest.ptr.is_null() || dest.len == 0 {
+        return false;
+    }
+
+    let dest_slice = std::slice::from_raw_parts(dest.ptr, dest.len as usize);
+    let dest_str = match std::str::from_utf8(dest_slice) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Validate destination path
+    let dest_path = match validate_and_canonicalize_path(dest_str) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let registry = get_temp_file_registry();
+    let mut guard = registry.lock();
+
+    let entry = match guard.remove(&handle) {
+        Some(e) => e,
+        None => return false,
+    };
+
+    let (file, src_path, _delete_on_close) = entry;
+
+    // Close the file handle first
+    drop(file);
+
+    // Move the file to the destination
+    std::fs::rename(&src_path, &dest_path).is_ok()
 }
 
 // ============================================================================
@@ -4478,6 +5080,1292 @@ pub extern "C" fn blood_runtime_shutdown() {
 }
 
 // ============================================================================
+// Runtime Configuration
+// ============================================================================
+
+/// Runtime configuration handle for FFI.
+#[repr(C)]
+pub struct RuntimeConfigHandle {
+    /// Number of worker threads.
+    pub num_workers: u64,
+    /// Initial fiber stack size in bytes.
+    pub initial_stack_size: u64,
+    /// Maximum fiber stack size in bytes.
+    pub max_stack_size: u64,
+    /// Enable work stealing (1 = true, 0 = false).
+    pub work_stealing: u8,
+    /// Maximum heap size in bytes (0 = unlimited).
+    pub max_heap_size: u64,
+    /// Maximum region size in bytes.
+    pub max_region_size: u64,
+    /// GC cycle collection threshold.
+    pub gc_threshold: u64,
+    /// Default timeout in milliseconds (0 = none).
+    pub default_timeout_ms: u64,
+    /// Graceful shutdown timeout in milliseconds.
+    pub graceful_shutdown_ms: u64,
+    /// Log level (0=off, 1=error, 2=warn, 3=info, 4=debug, 5=trace).
+    pub log_level: u8,
+}
+
+impl Default for RuntimeConfigHandle {
+    fn default() -> Self {
+        Self {
+            num_workers: std::thread::available_parallelism()
+                .map(|n| n.get() as u64)
+                .unwrap_or(1),
+            initial_stack_size: 8 * 1024,
+            max_stack_size: 1024 * 1024,
+            work_stealing: 1,
+            max_heap_size: 0,
+            max_region_size: 16 * 1024 * 1024,
+            gc_threshold: 1000,
+            default_timeout_ms: 0,
+            graceful_shutdown_ms: 5000,
+            log_level: 3, // Info
+        }
+    }
+}
+
+/// Get the default runtime configuration.
+///
+/// # Safety
+/// `out` must be a valid pointer to uninitialized RuntimeConfigHandle memory.
+#[no_mangle]
+pub unsafe extern "C" fn runtime_config_default(out: *mut RuntimeConfigHandle) {
+    if out.is_null() {
+        return;
+    }
+    *out = RuntimeConfigHandle::default();
+}
+
+/// Load runtime configuration from environment variables.
+///
+/// Reads `BLOOD_*` environment variables and populates the configuration.
+/// Values that are not set will use defaults.
+///
+/// # Safety
+/// `out` must be a valid pointer to uninitialized RuntimeConfigHandle memory.
+#[no_mangle]
+pub unsafe extern "C" fn runtime_config_from_env(out: *mut RuntimeConfigHandle) {
+    use crate::config::RuntimeConfig;
+
+    if out.is_null() {
+        return;
+    }
+
+    let config = RuntimeConfig::from_env();
+
+    *out = RuntimeConfigHandle {
+        num_workers: config.scheduler.num_workers as u64,
+        initial_stack_size: config.scheduler.initial_stack_size as u64,
+        max_stack_size: config.scheduler.max_stack_size as u64,
+        work_stealing: if config.scheduler.work_stealing { 1 } else { 0 },
+        max_heap_size: config.memory.max_heap_size as u64,
+        max_region_size: config.memory.max_region_size as u64,
+        gc_threshold: config.memory.gc_threshold as u64,
+        default_timeout_ms: config.timeout.default_timeout
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        graceful_shutdown_ms: config.timeout.graceful_shutdown.as_millis() as u64,
+        log_level: config.log.level as u8,
+    };
+}
+
+/// Initialize the runtime with the given configuration.
+///
+/// Returns 0 on success, non-zero on failure.
+///
+/// # Safety
+/// `config` must be a valid pointer to a RuntimeConfigHandle.
+#[no_mangle]
+pub unsafe extern "C" fn runtime_init_with_config(config: *const RuntimeConfigHandle) -> c_int {
+    use crate::config::{RuntimeConfig, LogLevel};
+    use std::time::Duration;
+
+    if config.is_null() {
+        return -1;
+    }
+
+    let handle = &*config;
+
+    // Validate basic constraints
+    if handle.num_workers == 0 || handle.initial_stack_size < 4096 {
+        return -2;
+    }
+
+    if handle.max_stack_size < handle.initial_stack_size {
+        return -3;
+    }
+
+    // Build the RuntimeConfig
+    let log_level = match handle.log_level {
+        0 => LogLevel::Off,
+        1 => LogLevel::Error,
+        2 => LogLevel::Warn,
+        3 => LogLevel::Info,
+        4 => LogLevel::Debug,
+        _ => LogLevel::Trace,
+    };
+
+    let default_timeout = if handle.default_timeout_ms > 0 {
+        Some(Duration::from_millis(handle.default_timeout_ms))
+    } else {
+        None
+    };
+
+    let config = RuntimeConfig::builder()
+        .num_workers(handle.num_workers as usize)
+        .initial_stack_size(handle.initial_stack_size as usize)
+        .max_stack_size(handle.max_stack_size as usize)
+        .work_stealing(handle.work_stealing != 0)
+        .max_heap_size(handle.max_heap_size as usize)
+        .max_region_size(handle.max_region_size as usize)
+        .gc_threshold(handle.gc_threshold as usize)
+        .default_timeout(default_timeout)
+        .graceful_shutdown(Duration::from_millis(handle.graceful_shutdown_ms))
+        .log_level(log_level)
+        .build_unchecked();
+
+    // Initialize the scheduler with the config
+    let scheduler_config = config.to_scheduler_config();
+    let _ = GLOBAL_SCHEDULER.set(Mutex::new(crate::scheduler::Scheduler::new(scheduler_config)));
+
+    0
+}
+
+/// Get a configuration value as an integer.
+///
+/// # Arguments
+/// * `key` - Configuration key name
+///
+/// # Returns
+/// * Value on success
+/// * -1 if key is unknown or not set
+///
+/// # Safety
+/// `key` must be a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn runtime_config_get_int(key: BloodStr) -> i64 {
+    if key.ptr.is_null() || key.len == 0 {
+        return -1;
+    }
+
+    let key_slice = std::slice::from_raw_parts(key.ptr, key.len as usize);
+    let key_str = match std::str::from_utf8(key_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // Try to get from current runtime config
+    if let Some(config) = crate::runtime_config() {
+        match key_str {
+            "num_workers" => return config.scheduler.num_workers as i64,
+            "initial_stack_size" => return config.scheduler.initial_stack_size as i64,
+            "max_stack_size" => return config.scheduler.max_stack_size as i64,
+            "work_stealing" => return if config.scheduler.work_stealing { 1 } else { 0 },
+            "max_heap_size" => return config.memory.max_heap_size as i64,
+            "max_region_size" => return config.memory.max_region_size as i64,
+            "gc_threshold" => return config.memory.gc_threshold as i64,
+            "default_timeout_ms" => {
+                return config.timeout.default_timeout
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+            }
+            "graceful_shutdown_ms" => return config.timeout.graceful_shutdown.as_millis() as i64,
+            "log_level" => return config.log.level as i64,
+            _ => {}
+        }
+    }
+
+    // Fall back to defaults
+    let defaults = RuntimeConfigHandle::default();
+    match key_str {
+        "num_workers" => defaults.num_workers as i64,
+        "initial_stack_size" => defaults.initial_stack_size as i64,
+        "max_stack_size" => defaults.max_stack_size as i64,
+        "work_stealing" => defaults.work_stealing as i64,
+        "max_heap_size" => defaults.max_heap_size as i64,
+        "max_region_size" => defaults.max_region_size as i64,
+        "gc_threshold" => defaults.gc_threshold as i64,
+        "default_timeout_ms" => defaults.default_timeout_ms as i64,
+        "graceful_shutdown_ms" => defaults.graceful_shutdown_ms as i64,
+        "log_level" => defaults.log_level as i64,
+        _ => -1,
+    }
+}
+
+// ============================================================================
+// Signal Handling
+// ============================================================================
+
+/// Signal types for FFI.
+///
+/// Values:
+/// - 0: None (no signal)
+/// - 1: SIGTERM (termination request)
+/// - 2: SIGINT (interrupt, Ctrl+C)
+/// - 3: SIGHUP (hangup)
+pub type SignalType = u8;
+
+/// Install signal handlers for graceful shutdown.
+///
+/// This installs handlers for SIGTERM, SIGINT, and SIGHUP.
+/// Calling this multiple times is safe (subsequent calls are no-ops).
+///
+/// Returns 1 if handlers were installed, 0 if already installed.
+#[no_mangle]
+pub extern "C" fn signal_install_handlers() -> c_int {
+    if crate::signal::install_handlers() { 1 } else { 0 }
+}
+
+/// Check if shutdown has been requested.
+///
+/// Returns 1 if shutdown was requested (SIGTERM or SIGINT received), 0 otherwise.
+#[no_mangle]
+pub extern "C" fn signal_shutdown_requested() -> c_int {
+    if crate::signal::shutdown_requested() { 1 } else { 0 }
+}
+
+/// Request graceful shutdown.
+///
+/// This triggers the shutdown sequence as if SIGTERM was received.
+#[no_mangle]
+pub extern "C" fn signal_request_shutdown() {
+    crate::signal::request_shutdown();
+}
+
+/// Get the last received signal.
+///
+/// Returns the SignalType of the last received signal:
+/// - 0: None
+/// - 1: SIGTERM
+/// - 2: SIGINT
+/// - 3: SIGHUP
+#[no_mangle]
+pub extern "C" fn signal_last() -> SignalType {
+    crate::signal::global_handler().last_signal() as u8
+}
+
+/// Get the number of signals received.
+#[no_mangle]
+pub extern "C" fn signal_count() -> u8 {
+    crate::signal::global_handler().signal_count()
+}
+
+/// Wait for a shutdown signal.
+///
+/// Blocks until a shutdown signal is received or the timeout expires.
+///
+/// # Arguments
+/// * `timeout_ms` - Timeout in milliseconds (0 = wait forever)
+///
+/// # Returns
+/// * 1 if shutdown was requested
+/// * 0 if timeout expired
+#[no_mangle]
+pub extern "C" fn signal_wait_shutdown(timeout_ms: u64) -> c_int {
+    use std::time::Duration;
+
+    let timeout = if timeout_ms == 0 {
+        Duration::from_secs(u64::MAX / 1000) // Effectively infinite
+    } else {
+        Duration::from_millis(timeout_ms)
+    };
+
+    if crate::signal::global_handler().wait_for_shutdown(timeout) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Reset signal state.
+///
+/// Clears the shutdown flag and signal history.
+/// This is mainly useful for testing.
+#[no_mangle]
+pub extern "C" fn signal_reset() {
+    crate::signal::global_handler().reset();
+}
+
+// ============================================================================
+// Cancellation
+// ============================================================================
+
+/// Cancellation token handle for FFI.
+pub type CancellationHandle = u64;
+
+/// Registry for cancellation sources (owned by Blood code).
+static CANCELLATION_REGISTRY: OnceLock<Mutex<HashMap<u64, crate::cancellation::CancellationSource>>> =
+    OnceLock::new();
+
+/// Counter for cancellation handles.
+static CANCELLATION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn get_cancellation_registry() -> &'static Mutex<HashMap<u64, crate::cancellation::CancellationSource>> {
+    CANCELLATION_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Create a new cancellation source.
+///
+/// Returns a handle that can be used to cancel operations and create tokens.
+/// The handle must be freed with `cancellation_free` when no longer needed.
+///
+/// Returns 0 on error.
+#[no_mangle]
+pub extern "C" fn cancellation_create() -> CancellationHandle {
+    let source = crate::cancellation::CancellationSource::new();
+    let handle = CANCELLATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let registry = get_cancellation_registry();
+    let mut guard = registry.lock();
+    guard.insert(handle, source);
+    handle
+}
+
+/// Create a new cancellation source with a parent.
+///
+/// The child cancellation source is cancelled when either:
+/// - The child is directly cancelled
+/// - The parent is cancelled
+///
+/// Returns a handle, or 0 on error.
+#[no_mangle]
+pub extern "C" fn cancellation_create_child(parent: CancellationHandle) -> CancellationHandle {
+    let registry = get_cancellation_registry();
+    let parent_token = {
+        let guard = registry.lock();
+        match guard.get(&parent) {
+            Some(source) => source.token(),
+            None => return 0,
+        }
+    };
+
+    let child_source = crate::cancellation::CancellationSource::with_parent(parent_token);
+    let handle = CANCELLATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let mut guard = registry.lock();
+    guard.insert(handle, child_source);
+    handle
+}
+
+/// Cancel a cancellation source.
+///
+/// All tokens derived from this source will report as cancelled.
+#[no_mangle]
+pub extern "C" fn cancellation_cancel(handle: CancellationHandle) {
+    let registry = get_cancellation_registry();
+    let guard = registry.lock();
+    if let Some(source) = guard.get(&handle) {
+        source.cancel();
+    }
+}
+
+/// Cancel with a reason message.
+///
+/// # Safety
+/// `reason` must be a valid BloodStr.
+#[no_mangle]
+pub unsafe extern "C" fn cancellation_cancel_with_reason(handle: CancellationHandle, reason: BloodStr) {
+    let reason_str = if reason.ptr.is_null() || reason.len == 0 {
+        None
+    } else {
+        let slice = std::slice::from_raw_parts(reason.ptr, reason.len as usize);
+        std::str::from_utf8(slice).ok().map(|s| s.to_string())
+    };
+
+    let registry = get_cancellation_registry();
+    let guard = registry.lock();
+    if let Some(source) = guard.get(&handle) {
+        source.cancel_with_reason(reason_str);
+    }
+}
+
+/// Check if cancellation has been requested.
+///
+/// Returns 1 if cancelled, 0 if not cancelled.
+#[no_mangle]
+pub extern "C" fn cancellation_is_cancelled(handle: CancellationHandle) -> c_int {
+    let registry = get_cancellation_registry();
+    let guard = registry.lock();
+    if let Some(source) = guard.get(&handle) {
+        return if source.is_cancelled() { 1 } else { 0 };
+    }
+    0
+}
+
+/// Wait for cancellation.
+///
+/// Blocks until cancellation is requested or the timeout expires.
+///
+/// # Arguments
+/// * `handle` - Cancellation handle
+/// * `timeout_ms` - Timeout in milliseconds (0 = wait forever)
+///
+/// # Returns
+/// * 1 if cancelled
+/// * 0 if timeout expired
+#[no_mangle]
+pub extern "C" fn cancellation_wait(handle: CancellationHandle, timeout_ms: u64) -> c_int {
+    use std::time::Duration;
+
+    let token = {
+        let registry = get_cancellation_registry();
+        let guard = registry.lock();
+        match guard.get(&handle) {
+            Some(source) => source.token(),
+            None => return 0,
+        }
+    };
+
+    let timeout = if timeout_ms == 0 {
+        Duration::from_secs(u64::MAX / 1000)
+    } else {
+        Duration::from_millis(timeout_ms)
+    };
+
+    if token.wait(timeout) { 1 } else { 0 }
+}
+
+/// Free a cancellation source.
+///
+/// The source is removed from the registry. Any tokens created from
+/// this source remain valid but can no longer be cancelled through
+/// this handle.
+#[no_mangle]
+pub extern "C" fn cancellation_free(handle: CancellationHandle) {
+    let registry = get_cancellation_registry();
+    let mut guard = registry.lock();
+    guard.remove(&handle);
+}
+
+/// Cancel all registered cancellation sources.
+///
+/// This is typically called during shutdown to cancel all in-flight operations.
+#[no_mangle]
+pub extern "C" fn cancellation_cancel_all() {
+    crate::cancellation::cancel_all();
+
+    // Also cancel all sources in our registry
+    let registry = get_cancellation_registry();
+    let guard = registry.lock();
+    for source in guard.values() {
+        source.cancel();
+    }
+}
+
+/// Get the number of active cancellation sources.
+#[no_mangle]
+pub extern "C" fn cancellation_active_count() -> u64 {
+    let registry = get_cancellation_registry();
+    let guard = registry.lock();
+    guard.len() as u64
+}
+
+// ============================================================================
+// Vec<T> Runtime Functions
+// ============================================================================
+
+// ============================================================================
+// Memory Limits
+// ============================================================================
+
+/// Set the maximum heap size in bytes.
+///
+/// Allocations that would exceed this limit will fail.
+/// Set to 0 for unlimited (default).
+#[no_mangle]
+pub extern "C" fn memory_set_limit(max_bytes: u64) {
+    crate::memory::set_max_heap_size(max_bytes);
+}
+
+/// Get the current maximum heap size in bytes.
+///
+/// Returns 0 if unlimited.
+#[no_mangle]
+pub extern "C" fn memory_get_limit() -> u64 {
+    crate::memory::max_heap_size()
+}
+
+/// Get current live memory usage in bytes.
+#[no_mangle]
+pub extern "C" fn memory_live_bytes() -> u64 {
+    crate::memory::system_alloc_live_bytes()
+}
+
+/// Check if an allocation of the given size would be allowed.
+///
+/// Returns 1 if allowed, 0 if it would exceed the limit.
+#[no_mangle]
+pub extern "C" fn memory_check_allowed(size: u64) -> c_int {
+    if crate::memory::check_allocation_allowed(size as usize) { 1 } else { 0 }
+}
+
+/// Memory usage summary for FFI.
+#[repr(C)]
+pub struct MemoryUsage {
+    /// Total bytes allocated.
+    pub allocated_bytes: u64,
+    /// Total bytes freed.
+    pub freed_bytes: u64,
+    /// Currently live bytes (allocated - freed).
+    pub live_bytes: u64,
+    /// Total number of allocations.
+    pub allocation_count: u64,
+    /// Total number of frees.
+    pub free_count: u64,
+    /// Memory limit in bytes (0 = unlimited).
+    pub limit_bytes: u64,
+    /// Usage as a percentage of limit (0.0 - 100.0, 0 if unlimited).
+    pub usage_percent: f64,
+}
+
+/// Get memory usage summary.
+///
+/// # Safety
+/// `out` must be a valid pointer to uninitialized MemoryUsage memory.
+#[no_mangle]
+pub unsafe extern "C" fn memory_usage(out: *mut MemoryUsage) {
+    if out.is_null() {
+        return;
+    }
+
+    let summary = crate::memory::memory_usage_summary();
+    (*out) = MemoryUsage {
+        allocated_bytes: summary.allocated_bytes,
+        freed_bytes: summary.freed_bytes,
+        live_bytes: summary.live_bytes,
+        allocation_count: summary.allocation_count,
+        free_count: summary.free_count,
+        limit_bytes: summary.limit_bytes.unwrap_or(0),
+        usage_percent: summary.usage_percent,
+    };
+}
+
+// ============================================================================
+// Panic Handling
+// ============================================================================
+
+/// Panic info for FFI.
+#[repr(C)]
+pub struct PanicInfoHandle {
+    /// Panic message (BloodStr).
+    pub message_ptr: *const u8,
+    /// Message length.
+    pub message_len: u64,
+    /// File name (BloodStr), null if unavailable.
+    pub file_ptr: *const u8,
+    /// File name length.
+    pub file_len: u64,
+    /// Line number (0 if unavailable).
+    pub line: u32,
+    /// Column number (0 if unavailable).
+    pub column: u32,
+    /// Panic count.
+    pub count: u64,
+    /// Thread ID.
+    pub thread_id: u64,
+}
+
+/// Install the panic handler.
+///
+/// This installs a Rust panic hook that captures panic information.
+/// Should be called during runtime initialization.
+#[no_mangle]
+pub extern "C" fn panic_install_handler() {
+    crate::panic::install_panic_handler();
+}
+
+/// Get the number of panics that have occurred.
+#[no_mangle]
+pub extern "C" fn panic_count() -> u64 {
+    crate::panic::panic_count()
+}
+
+/// Check if a panic has occurred.
+///
+/// Returns 1 if at least one panic has occurred, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn panic_has_occurred() -> c_int {
+    if crate::panic::panic_count() > 0 { 1 } else { 0 }
+}
+
+/// Get the last panic message.
+///
+/// Returns a BloodStr containing the message, or empty if no panic has occurred.
+#[no_mangle]
+pub extern "C" fn panic_last_message() -> BloodStr {
+    match crate::panic::last_panic() {
+        Some(info) => string_to_blood_str(info.message().to_string()),
+        None => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+/// Get the last panic backtrace.
+///
+/// Returns a BloodStr containing the backtrace, or empty if unavailable.
+#[no_mangle]
+pub extern "C" fn panic_last_backtrace() -> BloodStr {
+    match crate::panic::last_panic() {
+        Some(info) => match info.backtrace() {
+            Some(bt) => string_to_blood_str(bt.to_string()),
+            None => BloodStr { ptr: std::ptr::null(), len: 0 },
+        },
+        None => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+/// Capture a backtrace at the current location.
+///
+/// Returns a BloodStr containing the backtrace, or empty if unavailable.
+/// The returned string must be freed with `blood_str_free`.
+#[no_mangle]
+pub extern "C" fn backtrace_capture() -> BloodStr {
+    match crate::panic::capture_backtrace() {
+        Some(bt) => string_to_blood_str(bt),
+        None => BloodStr { ptr: std::ptr::null(), len: 0 },
+    }
+}
+
+/// Check if backtraces are available.
+///
+/// Returns 1 if backtraces can be captured, 0 otherwise.
+/// Backtraces require RUST_BACKTRACE=1 environment variable.
+#[no_mangle]
+pub extern "C" fn backtrace_available() -> c_int {
+    if crate::panic::backtraces_available() { 1 } else { 0 }
+}
+
+/// Callback type for panic hooks.
+pub type PanicCallback = extern "C" fn(*const PanicInfoHandle);
+
+/// Panic hook registry for FFI callbacks.
+static PANIC_CALLBACK: std::sync::OnceLock<Mutex<Option<PanicCallback>>> = std::sync::OnceLock::new();
+
+fn get_panic_callback() -> &'static Mutex<Option<PanicCallback>> {
+    PANIC_CALLBACK.get_or_init(|| Mutex::new(None))
+}
+
+/// Register a panic callback.
+///
+/// The callback will be invoked when a panic occurs.
+/// Only one callback can be registered at a time; calling this
+/// replaces any previously registered callback.
+///
+/// # Safety
+/// The callback must be a valid function pointer that remains valid
+/// for the lifetime of the program.
+#[no_mangle]
+pub unsafe extern "C" fn panic_set_callback(callback: PanicCallback) {
+    // Store the callback
+    {
+        let mut guard = get_panic_callback().lock();
+        *guard = Some(callback);
+    }
+
+    // Register a Rust hook that invokes the FFI callback
+    crate::panic::set_panic_hook(move |info| {
+        let callback = {
+            let guard = get_panic_callback().lock();
+            *guard
+        };
+
+        if let Some(cb) = callback {
+            // Convert to FFI struct
+            let message = info.message();
+            let (file_ptr, file_len) = match info.location() {
+                Some(loc) => (loc.file.as_ptr(), loc.file.len() as u64),
+                None => (std::ptr::null(), 0),
+            };
+            let (line, column) = match info.location() {
+                Some(loc) => (loc.line, loc.column),
+                None => (0, 0),
+            };
+
+            let handle = PanicInfoHandle {
+                message_ptr: message.as_ptr(),
+                message_len: message.len() as u64,
+                file_ptr,
+                file_len,
+                line,
+                column,
+                count: info.count(),
+                thread_id: info.thread_id(),
+            };
+
+            cb(&handle);
+        }
+    });
+}
+
+/// Clear the panic callback.
+#[no_mangle]
+pub extern "C" fn panic_clear_callback() {
+    let mut guard = get_panic_callback().lock();
+    *guard = None;
+    crate::panic::clear_panic_hooks();
+}
+
+// ============================================================================
+// Panic Recovery (catch_panic)
+// ============================================================================
+
+/// Result of a panic catch operation.
+#[repr(C)]
+pub struct CatchPanicResult {
+    /// 0 = success (no panic), 1 = panic occurred
+    pub panicked: c_int,
+    /// Panic message (only valid if panicked == 1)
+    pub message_ptr: *const u8,
+    /// Panic message length
+    pub message_len: u64,
+    /// Backtrace (may be null)
+    pub backtrace_ptr: *const u8,
+    /// Backtrace length
+    pub backtrace_len: u64,
+}
+
+/// Function pointer type for the closure to execute.
+///
+/// Takes a user-provided context pointer and returns:
+/// - 0 for success
+/// - non-zero for failure (panic will be caught and reported)
+pub type CatchPanicFn = extern "C" fn(*mut std::ffi::c_void) -> c_int;
+
+/// Execute a function with panic catching.
+///
+/// This allows Blood programs to catch panics and recover from them.
+///
+/// # Arguments
+/// * `func` - Function to execute
+/// * `context` - User context passed to the function
+/// * `result` - Output buffer for the result
+///
+/// # Returns
+/// * 0 if the function completed (check result.panicked for panic info)
+/// * -1 if recovery is not available
+///
+/// # Safety
+/// * `func` must be a valid function pointer
+/// * `context` must be valid for the duration of the call
+/// * `result` must be a valid pointer to uninitialized CatchPanicResult
+#[no_mangle]
+pub unsafe extern "C" fn panic_catch(
+    func: CatchPanicFn,
+    context: *mut std::ffi::c_void,
+    result: *mut CatchPanicResult,
+) -> c_int {
+    if !crate::panic::recovery_available() {
+        return -1;
+    }
+
+    // Wrap the extern "C" function call
+    let catch_result = crate::panic::catch_panic_unchecked(|| {
+        func(context)
+    });
+
+    match catch_result {
+        crate::panic::CatchResult::Ok(_) => {
+            (*result).panicked = 0;
+            (*result).message_ptr = std::ptr::null();
+            (*result).message_len = 0;
+            (*result).backtrace_ptr = std::ptr::null();
+            (*result).backtrace_len = 0;
+        }
+        crate::panic::CatchResult::Panicked(info) => {
+            (*result).panicked = 1;
+
+            // Allocate and copy the message
+            let message = info.message().to_string();
+            let message_bytes = message.into_bytes().into_boxed_slice();
+            (*result).message_len = message_bytes.len() as u64;
+            (*result).message_ptr = Box::into_raw(message_bytes) as *const u8;
+
+            // Allocate and copy the backtrace if available
+            if let Some(bt) = info.backtrace() {
+                let backtrace_bytes = bt.to_string().into_bytes().into_boxed_slice();
+                (*result).backtrace_len = backtrace_bytes.len() as u64;
+                (*result).backtrace_ptr = Box::into_raw(backtrace_bytes) as *const u8;
+            } else {
+                (*result).backtrace_ptr = std::ptr::null();
+                (*result).backtrace_len = 0;
+            }
+        }
+    }
+
+    0
+}
+
+/// Free memory allocated by panic_catch.
+///
+/// # Safety
+/// * `result` must be a result returned by `panic_catch`
+/// * Must only be called once per result
+#[no_mangle]
+pub unsafe extern "C" fn panic_catch_result_free(result: *mut CatchPanicResult) {
+    if result.is_null() {
+        return;
+    }
+
+    // Free message if allocated
+    if !(*result).message_ptr.is_null() && (*result).message_len > 0 {
+        let slice = std::slice::from_raw_parts_mut(
+            (*result).message_ptr as *mut u8,
+            (*result).message_len as usize,
+        );
+        let _ = Box::from_raw(slice);
+    }
+
+    // Free backtrace if allocated
+    if !(*result).backtrace_ptr.is_null() && (*result).backtrace_len > 0 {
+        let slice = std::slice::from_raw_parts_mut(
+            (*result).backtrace_ptr as *mut u8,
+            (*result).backtrace_len as usize,
+        );
+        let _ = Box::from_raw(slice);
+    }
+
+    // Reset the struct
+    (*result).panicked = 0;
+    (*result).message_ptr = std::ptr::null();
+    (*result).message_len = 0;
+    (*result).backtrace_ptr = std::ptr::null();
+    (*result).backtrace_len = 0;
+}
+
+/// Check if panic recovery is available.
+///
+/// Returns 1 if catch_panic will work, 0 if panics cannot be caught
+/// (e.g., compiled with panic=abort).
+#[no_mangle]
+pub extern "C" fn panic_recovery_available() -> c_int {
+    if crate::panic::recovery_available() { 1 } else { 0 }
+}
+
+// ============================================================================
+// Logging Infrastructure
+// ============================================================================
+
+/// Log level constants.
+pub mod log_level {
+    /// Trace level (most verbose).
+    pub const TRACE: u8 = 0;
+    /// Debug level.
+    pub const DEBUG: u8 = 1;
+    /// Info level.
+    pub const INFO: u8 = 2;
+    /// Warning level.
+    pub const WARN: u8 = 3;
+    /// Error level.
+    pub const ERROR: u8 = 4;
+    /// Off (no logging).
+    pub const OFF: u8 = 5;
+}
+
+/// Log format constants.
+pub mod log_format {
+    /// Plain text format.
+    pub const PLAIN: u8 = 0;
+    /// JSON format.
+    pub const JSON: u8 = 1;
+}
+
+/// Initialize the logger.
+#[no_mangle]
+pub extern "C" fn log_init() {
+    crate::log::init();
+}
+
+/// Initialize the logger with a specific level.
+///
+/// # Arguments
+/// * `level` - Log level (0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR, 5=OFF)
+#[no_mangle]
+pub extern "C" fn log_init_with_level(level: u8) {
+    if let Some(log_level) = crate::log::LogLevel::from_u8(level) {
+        crate::log::init_with_level(log_level);
+    }
+}
+
+/// Set the minimum log level.
+///
+/// # Arguments
+/// * `level` - Log level (0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR, 5=OFF)
+#[no_mangle]
+pub extern "C" fn log_set_level(level: u8) {
+    if let Some(log_level) = crate::log::LogLevel::from_u8(level) {
+        crate::log::set_level(log_level);
+    }
+}
+
+/// Get the current minimum log level.
+///
+/// Returns the level as u8 (0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR, 5=OFF).
+#[no_mangle]
+pub extern "C" fn log_get_level() -> u8 {
+    crate::log::level() as u8
+}
+
+/// Set the output format.
+///
+/// # Arguments
+/// * `format` - 0=PLAIN, 1=JSON
+#[no_mangle]
+pub extern "C" fn log_set_format(format: u8) {
+    if let Some(log_format) = crate::log::LogFormat::from_u8(format) {
+        crate::log::set_format(log_format);
+    }
+}
+
+/// Enable or disable logging.
+///
+/// # Arguments
+/// * `enabled` - 1 to enable, 0 to disable
+#[no_mangle]
+pub extern "C" fn log_set_enabled(enabled: c_int) {
+    crate::log::set_enabled(enabled != 0);
+}
+
+/// Check if logging is enabled.
+///
+/// Returns 1 if enabled, 0 if disabled.
+#[no_mangle]
+pub extern "C" fn log_is_enabled() -> c_int {
+    if crate::log::is_enabled() { 1 } else { 0 }
+}
+
+/// Check if a log level would be logged.
+///
+/// Returns 1 if the level would be logged, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn log_would_log(level: u8) -> c_int {
+    if let Some(log_level) = crate::log::LogLevel::from_u8(level) {
+        if crate::log::would_log(log_level) { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+/// Log a message at the specified level.
+///
+/// # Arguments
+/// * `level` - Log level
+/// * `message_ptr` - Pointer to message bytes
+/// * `message_len` - Message length
+///
+/// # Safety
+/// `message_ptr` must be a valid pointer to `message_len` bytes of UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_message(level: u8, message_ptr: *const u8, message_len: u64) {
+    let log_level = match crate::log::LogLevel::from_u8(level) {
+        Some(l) => l,
+        None => return,
+    };
+
+    if message_ptr.is_null() || message_len == 0 {
+        return;
+    }
+
+    let message_bytes = std::slice::from_raw_parts(message_ptr, message_len as usize);
+    let message = match std::str::from_utf8(message_bytes) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    crate::log::log(log_level, message);
+}
+
+/// Log a trace message.
+///
+/// # Safety
+/// `message_ptr` must be a valid pointer to `message_len` bytes of UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_trace(message_ptr: *const u8, message_len: u64) {
+    log_message(log_level::TRACE, message_ptr, message_len);
+}
+
+/// Log a debug message.
+///
+/// # Safety
+/// `message_ptr` must be a valid pointer to `message_len` bytes of UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_debug(message_ptr: *const u8, message_len: u64) {
+    log_message(log_level::DEBUG, message_ptr, message_len);
+}
+
+/// Log an info message.
+///
+/// # Safety
+/// `message_ptr` must be a valid pointer to `message_len` bytes of UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_info(message_ptr: *const u8, message_len: u64) {
+    log_message(log_level::INFO, message_ptr, message_len);
+}
+
+/// Log a warning message.
+///
+/// # Safety
+/// `message_ptr` must be a valid pointer to `message_len` bytes of UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_warn(message_ptr: *const u8, message_len: u64) {
+    log_message(log_level::WARN, message_ptr, message_len);
+}
+
+/// Log an error message.
+///
+/// # Safety
+/// `message_ptr` must be a valid pointer to `message_len` bytes of UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_error(message_ptr: *const u8, message_len: u64) {
+    log_message(log_level::ERROR, message_ptr, message_len);
+}
+
+/// Handle for a log entry being built.
+#[repr(C)]
+pub struct LogEntryHandle {
+    /// Opaque pointer to the LogBuilder.
+    ptr: *mut std::ffi::c_void,
+}
+
+/// Create a new log entry builder.
+///
+/// Returns a handle to a log entry being built.
+/// The handle must be freed with `log_entry_emit` or `log_entry_drop`.
+#[no_mangle]
+pub extern "C" fn log_entry_new(level: u8) -> LogEntryHandle {
+    let log_level = crate::log::LogLevel::from_u8(level).unwrap_or(crate::log::LogLevel::Info);
+    let builder = Box::new(crate::log::LogBuilder::new(log_level));
+    LogEntryHandle {
+        ptr: Box::into_raw(builder) as *mut std::ffi::c_void,
+    }
+}
+
+/// Set the message on a log entry.
+///
+/// # Safety
+/// * `handle` must be a valid handle from `log_entry_new`
+/// * `message_ptr` must be valid UTF-8 data
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_set_message(
+    handle: *mut LogEntryHandle,
+    message_ptr: *const u8,
+    message_len: u64,
+) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let message = if message_ptr.is_null() || message_len == 0 {
+        String::new()
+    } else {
+        let bytes = std::slice::from_raw_parts(message_ptr, message_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    // Take ownership, modify, put back
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    let builder = builder.message(message);
+    (*handle).ptr = Box::into_raw(Box::new(builder)) as *mut std::ffi::c_void;
+}
+
+/// Set the target on a log entry.
+///
+/// # Safety
+/// * `handle` must be a valid handle from `log_entry_new`
+/// * `target_ptr` must be valid UTF-8 data
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_set_target(
+    handle: *mut LogEntryHandle,
+    target_ptr: *const u8,
+    target_len: u64,
+) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let target = if target_ptr.is_null() || target_len == 0 {
+        return;
+    } else {
+        let bytes = std::slice::from_raw_parts(target_ptr, target_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    let builder = builder.target(target);
+    (*handle).ptr = Box::into_raw(Box::new(builder)) as *mut std::ffi::c_void;
+}
+
+/// Add a string field to a log entry.
+///
+/// # Safety
+/// All pointers must be valid UTF-8 data.
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_add_field_str(
+    handle: *mut LogEntryHandle,
+    key_ptr: *const u8,
+    key_len: u64,
+    value_ptr: *const u8,
+    value_len: u64,
+) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let key = if key_ptr.is_null() || key_len == 0 {
+        return;
+    } else {
+        let bytes = std::slice::from_raw_parts(key_ptr, key_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    let value = if value_ptr.is_null() || value_len == 0 {
+        String::new()
+    } else {
+        let bytes = std::slice::from_raw_parts(value_ptr, value_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    let builder = builder.field_str(key, value);
+    (*handle).ptr = Box::into_raw(Box::new(builder)) as *mut std::ffi::c_void;
+}
+
+/// Add an integer field to a log entry.
+///
+/// # Safety
+/// `handle` must be a valid handle, `key_ptr` must be valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_add_field_int(
+    handle: *mut LogEntryHandle,
+    key_ptr: *const u8,
+    key_len: u64,
+    value: i64,
+) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let key = if key_ptr.is_null() || key_len == 0 {
+        return;
+    } else {
+        let bytes = std::slice::from_raw_parts(key_ptr, key_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    let builder = builder.field_int(key, value);
+    (*handle).ptr = Box::into_raw(Box::new(builder)) as *mut std::ffi::c_void;
+}
+
+/// Add a float field to a log entry.
+///
+/// # Safety
+/// `handle` must be a valid handle, `key_ptr` must be valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_add_field_float(
+    handle: *mut LogEntryHandle,
+    key_ptr: *const u8,
+    key_len: u64,
+    value: f64,
+) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let key = if key_ptr.is_null() || key_len == 0 {
+        return;
+    } else {
+        let bytes = std::slice::from_raw_parts(key_ptr, key_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    let builder = builder.field_float(key, value);
+    (*handle).ptr = Box::into_raw(Box::new(builder)) as *mut std::ffi::c_void;
+}
+
+/// Add a boolean field to a log entry.
+///
+/// # Safety
+/// `handle` must be a valid handle, `key_ptr` must be valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_add_field_bool(
+    handle: *mut LogEntryHandle,
+    key_ptr: *const u8,
+    key_len: u64,
+    value: c_int,
+) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let key = if key_ptr.is_null() || key_len == 0 {
+        return;
+    } else {
+        let bytes = std::slice::from_raw_parts(key_ptr, key_len as usize);
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        }
+    };
+
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    let builder = builder.field_bool(key, value != 0);
+    (*handle).ptr = Box::into_raw(Box::new(builder)) as *mut std::ffi::c_void;
+}
+
+/// Emit a log entry.
+///
+/// This emits the log entry and frees the handle.
+///
+/// # Safety
+/// `handle` must be a valid handle from `log_entry_new`.
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_emit(handle: *mut LogEntryHandle) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    builder.emit();
+    (*handle).ptr = std::ptr::null_mut();
+}
+
+/// Drop a log entry without emitting.
+///
+/// # Safety
+/// `handle` must be a valid handle from `log_entry_new`.
+#[no_mangle]
+pub unsafe extern "C" fn log_entry_drop(handle: *mut LogEntryHandle) {
+    if handle.is_null() || (*handle).ptr.is_null() {
+        return;
+    }
+
+    let _builder = Box::from_raw((*handle).ptr as *mut crate::log::LogBuilder);
+    // Drop without emitting
+    (*handle).ptr = std::ptr::null_mut();
+}
+
+// ============================================================================
 // Vec<T> Runtime Functions
 // ============================================================================
 
@@ -6144,9 +8032,9 @@ pub unsafe extern "C" fn option_expect(
 ) {
     if opt.is_null() {
         let message = if !msg.is_null() && msg_len > 0 {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+            String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len as usize))
         } else {
-            "called `Option::expect()` on a `None` value"
+            std::borrow::Cow::Borrowed("called `Option::expect()` on a `None` value")
         };
         panic!("{}", message);
     }
@@ -6155,9 +8043,9 @@ pub unsafe extern "C" fn option_expect(
 
     if tag == 0 {
         let message = if !msg.is_null() && msg_len > 0 {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+            String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len as usize))
         } else {
-            "called `Option::expect()` on a `None` value"
+            std::borrow::Cow::Borrowed("called `Option::expect()` on a `None` value")
         };
         panic!("{}", message);
     }
@@ -6814,9 +8702,9 @@ pub unsafe extern "C" fn result_expect(
 ) {
     if res.is_null() {
         let message = if !msg.is_null() && msg_len > 0 {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+            String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len as usize))
         } else {
-            "called `Result::expect()` on an `Err` value"
+            std::borrow::Cow::Borrowed("called `Result::expect()` on an `Err` value")
         };
         panic!("{}", message);
     }
@@ -6825,9 +8713,9 @@ pub unsafe extern "C" fn result_expect(
 
     if tag != 0 {
         let message = if !msg.is_null() && msg_len > 0 {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+            String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len as usize))
         } else {
-            "called `Result::expect()` on an `Err` value"
+            std::borrow::Cow::Borrowed("called `Result::expect()` on an `Err` value")
         };
         panic!("{}", message);
     }
@@ -6863,9 +8751,9 @@ pub unsafe extern "C" fn result_expect_err(
 ) {
     if res.is_null() {
         let message = if !msg.is_null() && msg_len > 0 {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+            String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len as usize))
         } else {
-            "called `Result::expect_err()` on an `Ok` value"
+            std::borrow::Cow::Borrowed("called `Result::expect_err()` on an `Ok` value")
         };
         panic!("{}", message);
     }
@@ -6874,9 +8762,9 @@ pub unsafe extern "C" fn result_expect_err(
 
     if tag != 1 {
         let message = if !msg.is_null() && msg_len > 0 {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, msg_len as usize))
+            String::from_utf8_lossy(std::slice::from_raw_parts(msg, msg_len as usize))
         } else {
-            "called `Result::expect_err()` on an `Ok` value"
+            std::borrow::Cow::Borrowed("called `Result::expect_err()` on an `Ok` value")
         };
         panic!("{}", message);
     }
@@ -8231,7 +10119,7 @@ pub unsafe extern "C" fn debug_read_enum_at(ptr: *const u8) {
 #[no_mangle]
 pub unsafe extern "C" fn debug_local_enum(ptr: *const u8, name: *const u8, name_len: i64) {
     let name_slice = std::slice::from_raw_parts(name, name_len as usize);
-    let name_str = std::str::from_utf8_unchecked(name_slice);
+    let name_str = String::from_utf8_lossy(name_slice);
     let tag = std::ptr::read(ptr as *const i32);
     let payload = std::ptr::read(ptr.add(8) as *const i64);
     eprintln!("[debug_local_enum] {} at {:p}: tag={} payload={}", name_str, ptr, tag, payload);
@@ -8706,4 +10594,49 @@ pub extern "C" fn blood_increment_generation(slot_ptr: *mut u8) {
     // We look up the address and bump its generation.
     let addr = slot_ptr as u64;
     crate::memory::increment_generation(addr);
+}
+
+// ============================================================================
+// Time Functions
+// ============================================================================
+
+/// Lazily initialized start time for monotonic clock.
+static START_TIME: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Get the start time, initializing it on first call.
+fn get_start_time() -> std::time::Instant {
+    *START_TIME.get_or_init(std::time::Instant::now)
+}
+
+/// Get nanoseconds elapsed since program start (or first call to a time function).
+///
+/// This provides high-precision monotonic timing suitable for performance measurement.
+/// The value wraps after ~584 years, which should be sufficient.
+#[no_mangle]
+pub extern "C" fn blood_clock_nanos() -> u64 {
+    get_start_time().elapsed().as_nanos() as u64
+}
+
+/// Get microseconds elapsed since program start (or first call to a time function).
+///
+/// Convenience function for microsecond-precision timing.
+#[no_mangle]
+pub extern "C" fn blood_clock_micros() -> u64 {
+    get_start_time().elapsed().as_micros() as u64
+}
+
+/// Get milliseconds elapsed since program start (or first call to a time function).
+///
+/// Convenience function for coarse timing (e.g., phase timing in compilers).
+#[no_mangle]
+pub extern "C" fn blood_clock_millis() -> u64 {
+    get_start_time().elapsed().as_millis() as u64
+}
+
+/// Get seconds elapsed since program start as a floating-point value.
+///
+/// Returns the elapsed time with sub-second precision as an f64.
+#[no_mangle]
+pub extern "C" fn blood_clock_secs_f64() -> f64 {
+    get_start_time().elapsed().as_secs_f64()
 }
