@@ -265,12 +265,56 @@ pub struct GenericParam {
     pub span: Span,
 }
 
+/// Variance annotation for a type parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum VarianceAnnotation {
+    /// No explicit annotation - variance will be inferred.
+    #[default]
+    Inferred,
+    /// Explicitly covariant (`+T`).
+    Covariant,
+    /// Explicitly contravariant (`-T`).
+    Contravariant,
+    /// Explicitly invariant (`=T`).
+    Invariant,
+}
+
+impl VarianceAnnotation {
+    /// Returns true if variance should be inferred.
+    pub fn is_inferred(&self) -> bool {
+        matches!(self, VarianceAnnotation::Inferred)
+    }
+
+    /// Parse from annotation string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "+" => Some(VarianceAnnotation::Covariant),
+            "-" => Some(VarianceAnnotation::Contravariant),
+            "=" => Some(VarianceAnnotation::Invariant),
+            _ => None,
+        }
+    }
+
+    /// Get the annotation character.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VarianceAnnotation::Inferred => "",
+            VarianceAnnotation::Covariant => "+",
+            VarianceAnnotation::Contravariant => "-",
+            VarianceAnnotation::Invariant => "=",
+        }
+    }
+}
+
 /// The kind of generic parameter.
 #[derive(Debug, Clone)]
 pub enum GenericParamKind {
     /// A type parameter.
     Type {
+        /// Default type if any.
         default: Option<Type>,
+        /// Explicit variance annotation (if provided).
+        variance: VarianceAnnotation,
     },
     /// A lifetime parameter.
     Lifetime,

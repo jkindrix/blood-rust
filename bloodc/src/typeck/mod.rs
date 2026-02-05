@@ -41,6 +41,7 @@ pub mod methods;
 pub mod resolve;
 pub mod suggestion;
 pub mod unify;
+pub mod variance;
 
 pub use ambiguity::{Ambiguity, AmbiguityChecker, AmbiguityCheckResult};
 pub use context::TypeContext;
@@ -55,6 +56,7 @@ pub use lint::{PointerLintContext, PointerLintConfig, HandlerLintContext, Handle
 pub use methods::{MethodFamily, MethodRegistry};
 pub use resolve::{Resolver, Scope, ScopeKind};
 pub use unify::Unifier;
+pub use variance::{Variance, VarianceInfo, VarianceInferrer, VarianceChecker};
 
 use crate::ast;
 use crate::hir;
