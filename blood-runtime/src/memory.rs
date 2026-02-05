@@ -485,6 +485,162 @@ pub fn system_alloc_live_bytes() -> u64 {
     allocated.saturating_sub(freed)
 }
 
+// ============================================================================
+// Memory Limits
+// ============================================================================
+
+/// Maximum heap size in bytes (0 = unlimited).
+static MAX_HEAP_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// Set the maximum heap size.
+///
+/// Allocations that would exceed this limit will fail.
+/// Set to 0 for unlimited (default).
+pub fn set_max_heap_size(max_bytes: u64) {
+    MAX_HEAP_SIZE.store(max_bytes, Ordering::SeqCst);
+}
+
+/// Get the current maximum heap size.
+///
+/// Returns 0 if unlimited.
+pub fn max_heap_size() -> u64 {
+    MAX_HEAP_SIZE.load(Ordering::SeqCst)
+}
+
+/// Check if an allocation of the given size would exceed the memory limit.
+///
+/// Returns `true` if the allocation is allowed, `false` if it would exceed the limit.
+pub fn check_allocation_allowed(size: usize) -> bool {
+    let max = MAX_HEAP_SIZE.load(Ordering::SeqCst);
+    if max == 0 {
+        return true; // Unlimited
+    }
+
+    let current = system_alloc_live_bytes();
+    current.saturating_add(size as u64) <= max
+}
+
+/// Try to record an allocation, checking against memory limits.
+///
+/// Returns `true` if the allocation was recorded successfully,
+/// `false` if it would exceed the memory limit.
+///
+/// This is an atomic operation - if it returns `true`, the allocation
+/// has been recorded. If it returns `false`, nothing has changed.
+pub fn try_record_system_alloc(size: usize) -> bool {
+    let max = MAX_HEAP_SIZE.load(Ordering::SeqCst);
+
+    if max == 0 {
+        // Unlimited - just record it
+        record_system_alloc(size);
+        return true;
+    }
+
+    // Use compare-and-swap to atomically check and update
+    loop {
+        let current_allocated = SYSTEM_ALLOC_BYTES.load(Ordering::Relaxed);
+        let current_freed = SYSTEM_FREE_BYTES.load(Ordering::Relaxed);
+        let current_live = current_allocated.saturating_sub(current_freed);
+
+        let new_live = current_live.saturating_add(size as u64);
+        if new_live > max {
+            return false; // Would exceed limit
+        }
+
+        // Try to atomically increment the allocation counter
+        match SYSTEM_ALLOC_BYTES.compare_exchange_weak(
+            current_allocated,
+            current_allocated + size as u64,
+            Ordering::SeqCst,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                SYSTEM_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            Err(_) => {
+                // Another thread modified it, retry
+                continue;
+            }
+        }
+    }
+}
+
+/// Error returned when a memory allocation fails.
+#[derive(Debug, Clone, Copy)]
+pub enum AllocationError {
+    /// Allocation would exceed the configured memory limit.
+    LimitExceeded {
+        /// Requested allocation size.
+        requested: usize,
+        /// Current memory usage.
+        current: u64,
+        /// Configured memory limit.
+        limit: u64,
+    },
+    /// Allocation failed due to system error.
+    OutOfMemory,
+}
+
+impl std::fmt::Display for AllocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AllocationError::LimitExceeded { requested, current, limit } => {
+                write!(
+                    f,
+                    "allocation of {} bytes would exceed memory limit ({} / {} bytes used)",
+                    requested, current, limit
+                )
+            }
+            AllocationError::OutOfMemory => {
+                write!(f, "out of memory")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AllocationError {}
+
+/// Get memory usage summary.
+pub fn memory_usage_summary() -> MemoryUsageSummary {
+    let (allocated, freed, alloc_count, free_count) = system_alloc_stats();
+    let live = allocated.saturating_sub(freed);
+    let limit = max_heap_size();
+
+    MemoryUsageSummary {
+        allocated_bytes: allocated,
+        freed_bytes: freed,
+        live_bytes: live,
+        allocation_count: alloc_count,
+        free_count,
+        limit_bytes: if limit == 0 { None } else { Some(limit) },
+        usage_percent: if limit == 0 {
+            0.0
+        } else {
+            (live as f64 / limit as f64) * 100.0
+        },
+    }
+}
+
+/// Summary of memory usage.
+#[derive(Debug, Clone)]
+pub struct MemoryUsageSummary {
+    /// Total bytes allocated.
+    pub allocated_bytes: u64,
+    /// Total bytes freed.
+    pub freed_bytes: u64,
+    /// Currently live bytes (allocated - freed).
+    pub live_bytes: u64,
+    /// Total number of allocations.
+    pub allocation_count: u64,
+    /// Total number of frees.
+    pub free_count: u64,
+    /// Memory limit in bytes, if configured.
+    pub limit_bytes: Option<u64>,
+    /// Usage as a percentage of limit (0 if unlimited).
+    pub usage_percent: f64,
+}
+
 /// Register an allocation in the global slot registry.
 ///
 /// This should be called by the allocator when a new allocation is made.
