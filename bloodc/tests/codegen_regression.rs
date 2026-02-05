@@ -192,6 +192,95 @@ fn test_enum_match_ir() {
 }
 
 // ============================================================================
+// Generics IR Tests — regression for monomorphization and generic dispatch
+// ============================================================================
+
+/// Generic functions with bare type parameters fail monomorphization through
+/// the check_program() path (no stdlib). This test documents the limitation
+/// and will be enabled once the codegen handles this case.
+#[test]
+#[should_panic(expected = "monomorphize")]
+fn test_generic_function_ir() {
+    let source = load_fixture("generic_function.blood");
+    let _ir = compile_to_ir(&source);
+}
+
+#[test]
+fn test_generic_struct_ir() {
+    let source = load_fixture("generic_struct.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+#[test]
+fn test_generic_enum_ir() {
+    let source = load_fixture("generic_enum.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+// ============================================================================
+// Closure / Higher-Order Function IR Tests
+// ============================================================================
+
+#[test]
+fn test_closure_basic_ir() {
+    let source = load_fixture("closure_basic.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+#[test]
+fn test_closure_capture_ir() {
+    let source = load_fixture("closure_capture.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+#[test]
+fn test_higher_order_fn_ir() {
+    let source = load_fixture("higher_order_fn.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+// ============================================================================
+// Effect Handler IR Tests — regression for effect dispatch and resume
+// ============================================================================
+
+#[test]
+fn test_effect_state_ir() {
+    let source = load_fixture("effect_state.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+// ============================================================================
+// Static Mutable IR Tests — should emit LLVM globals, not dummy functions
+// ============================================================================
+
+/// Static mutable items fail codegen through check_program() path with
+/// "Unknown static DefId". This test documents the limitation and will be
+/// enabled once codegen handles statics without full pipeline context.
+#[test]
+#[should_panic(expected = "Unknown static")]
+fn test_static_mut_ir() {
+    let source = load_fixture("static_mut.blood");
+    let _ir = compile_to_ir(&source);
+}
+
+// ============================================================================
+// Array Indexing IR Tests — regression for GEP with subscript access
+// ============================================================================
+
+#[test]
+fn test_array_indexing_ir() {
+    let source = load_fixture("array_indexing.blood");
+    let ir = compile_to_ir(&source);
+    insta::assert_snapshot!(ir);
+}
+
+// ============================================================================
 // Targeted Pattern Assertions — verify specific IR patterns exist
 // ============================================================================
 
@@ -247,6 +336,36 @@ fn test_function_call_produces_call_instruction() {
     assert!(
         ir.contains("call "),
         "Expected 'call' instruction in IR for function calls:\n{}",
+        ir
+    );
+}
+
+#[test]
+fn test_closure_produces_call_or_function_ptr() {
+    let source = load_fixture("closure_basic.blood");
+    let ir = compile_to_ir(&source);
+    assert!(
+        ir.contains("call "),
+        "Expected 'call' instruction in IR for closures:\n{}",
+        ir
+    );
+}
+
+/// Blocked by same codegen limitation as test_static_mut_ir.
+#[test]
+#[should_panic(expected = "Unknown static")]
+fn test_static_mut_produces_global() {
+    let source = load_fixture("static_mut.blood");
+    let _ir = compile_to_ir(&source);
+}
+
+#[test]
+fn test_array_indexing_produces_gep() {
+    let source = load_fixture("array_indexing.blood");
+    let ir = compile_to_ir(&source);
+    assert!(
+        ir.contains("getelementptr") || ir.contains("extractvalue"),
+        "Expected GEP or extractvalue in IR for array indexing:\n{}",
         ir
     );
 }
