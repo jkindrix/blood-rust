@@ -587,15 +587,15 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             }
 
             // Check if this is a builtin function call
-            if let Some(builtin_name) = self.builtin_fns.get(def_id) {
-                if let Some(fn_value) = self.module.get_function(builtin_name) {
+            if let Some(builtin_name) = self.builtin_fns.get(def_id).cloned() {
+                if let Some(fn_value) = self.module.get_function(&builtin_name) {
                     // Builtin function call - compile args and call runtime function
                     let fn_type = fn_value.get_type();
+                    let param_types = fn_type.get_param_types();
                     let mut compiled_args = Vec::new();
                     for (i, arg) in args.iter().enumerate() {
                         if let Some(val) = self.compile_expr(arg)? {
-                            // Check if we need to convert i1 (bool) to i32 for C runtime
-                            let converted_val = if let Some(param_type) = fn_type.get_param_types().get(i) {
+                            let converted_val = if let Some(param_type) = param_types.get(i) {
                                 if val.is_int_value() && param_type.is_int_type() {
                                     let val_int = val.into_int_value();
                                     let param_int_type = param_type.into_int_type();
@@ -604,6 +604,18 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                         self.builder
                                             .build_int_z_extend(val_int, param_int_type, "zext")
                                             .map_err(|e| vec![Diagnostic::error(format!("LLVM zext error: {}", e), self.current_span())])?
+                                            .into()
+                                    } else {
+                                        val
+                                    }
+                                } else if val.is_pointer_value() && param_type.is_pointer_type() {
+                                    // Cast pointer types if they don't match (e.g., typed ptr -> i8*)
+                                    let ptr_val = val.into_pointer_value();
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if ptr_val.get_type() != expected_ptr_type {
+                                        self.builder
+                                            .build_pointer_cast(ptr_val, expected_ptr_type, "arg_ptr_cast")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?
                                             .into()
                                     } else {
                                         val
@@ -618,9 +630,59 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         }
                     }
 
+                    // Handle out-pointer builtins: these take an output buffer pointer
+                    // and return void. The HIR has 0 user args but the runtime function
+                    // expects a pointer argument for the output value.
+                    let mut output_buffer_alloca = None;
+                    let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+                    match builtin_name.as_str() {
+                        "string_new" => {
+                            // string_new(out: *void) -> void
+                            let string_ty = self.context.struct_type(&[
+                                i8_ptr_type.into(),
+                                self.context.i64_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+                            let out_alloca = self.builder
+                                .build_alloca(string_ty, "string_out")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), self.current_span())])?;
+                            output_buffer_alloca = Some(out_alloca);
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?;
+                            compiled_args.push(out_ptr.into());
+                        }
+                        "str_to_string" => {
+                            // str_to_string(s: &str, out: *void) -> void
+                            // User args already compiled (the &str). Append out pointer.
+                            let string_ty = self.context.struct_type(&[
+                                i8_ptr_type.into(),
+                                self.context.i64_type().into(),
+                                self.context.i64_type().into(),
+                            ], false);
+                            let out_alloca = self.builder
+                                .build_alloca(string_ty, "str_to_string_out")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), self.current_span())])?;
+                            output_buffer_alloca = Some(out_alloca);
+                            let out_ptr = self.builder
+                                .build_pointer_cast(out_alloca, i8_ptr_type, "out_ptr_cast")
+                                .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?;
+                            compiled_args.push(out_ptr.into());
+                        }
+                        _ => {}
+                    }
+
                     let call = self.builder
                         .build_call(fn_value, &compiled_args, "builtin_call")
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])?;
+
+                    // If we used an output buffer, load and return the result
+                    if let Some(out_alloca) = output_buffer_alloca {
+                        let result = self.builder
+                            .build_load(out_alloca, "out_result")
+                            .map_err(|e| vec![Diagnostic::error(format!("LLVM load error: {}", e), self.current_span())])?;
+                        return Ok(Some(result));
+                    }
 
                     return Ok(call.try_as_basic_value().left());
                 } else {
@@ -904,6 +966,26 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     format!("Method not found: {:?}", method_id),
                     receiver.span,
                 )])?;
+
+            // Coerce pointer args to match parameter types (e.g., typed ptr -> i8* for builtins)
+            let method_param_types = fn_value.get_type().get_param_types();
+            for (i, arg) in compiled_args.iter_mut().enumerate() {
+                if let Some(param_type) = method_param_types.get(i) {
+                    if param_type.is_pointer_type() {
+                        if let BasicMetadataValueEnum::PointerValue(ptr) = arg {
+                            let expected = param_type.into_pointer_type();
+                            if ptr.get_type() != expected {
+                                *arg = self.builder
+                                    .build_pointer_cast(*ptr, expected, "method_ptr_cast")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM error: {}", e), receiver.span
+                                    )])?
+                                    .into();
+                            }
+                        }
+                    }
+                }
+            }
 
             let call = self.builder
                 .build_call(fn_value, &compiled_args, "method_call")
