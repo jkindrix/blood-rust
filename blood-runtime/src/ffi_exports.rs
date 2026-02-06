@@ -11187,3 +11187,48 @@ pub extern "C" fn blood_clock_millis() -> u64 {
 pub extern "C" fn blood_clock_secs_f64() -> f64 {
     get_start_time().elapsed().as_secs_f64()
 }
+
+// ============================================================================
+// OS Thread Primitives
+// ============================================================================
+
+/// Spawn an OS thread that calls `func_ptr(arg)`.
+///
+/// `func_ptr` is a raw function pointer (the fn_ptr field of a Blood fat pointer,
+/// cast to u64 by the Blood program). The function signature must be `fn(u64) -> u64`.
+/// `arg` is an opaque u64 passed to the function.
+///
+/// Returns an opaque thread handle (Box<JoinHandle> leaked as u64), or 0 on failure.
+///
+/// # Safety
+/// The function pointer must be a valid `extern "C" fn(u64) -> u64`.
+#[no_mangle]
+pub unsafe extern "C" fn blood_thread_spawn(func_ptr: u64, arg: u64) -> u64 {
+    let f: extern "C" fn(u64) -> u64 = std::mem::transmute(func_ptr);
+
+    match std::thread::Builder::new().spawn(move || f(arg)) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as u64,
+        Err(_) => 0,
+    }
+}
+
+/// Join a thread previously spawned by `blood_thread_spawn`.
+///
+/// `handle` is the opaque handle returned by `blood_thread_spawn`.
+/// Returns 0 on success, 1 on failure (invalid handle or thread panicked).
+///
+/// # Safety
+/// `handle` must be a valid handle returned by `blood_thread_spawn`, and must
+/// not be joined more than once.
+#[no_mangle]
+pub unsafe extern "C" fn blood_thread_join(handle: u64) -> u64 {
+    if handle == 0 {
+        return 1;
+    }
+    let boxed: Box<std::thread::JoinHandle<u64>> =
+        Box::from_raw(handle as *mut std::thread::JoinHandle<u64>);
+    match boxed.join() {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}

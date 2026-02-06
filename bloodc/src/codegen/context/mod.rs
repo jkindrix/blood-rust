@@ -3947,6 +3947,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let scheduler_is_running_type = i32_type.fn_type(&[], false);
         self.module.add_function("blood_scheduler_is_running", scheduler_is_running_type, None);
 
+        // === OS Thread Primitives ===
+
+        // blood_thread_spawn(func_ptr: i64, arg: i64) -> i64
+        let thread_spawn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function("blood_thread_spawn", thread_spawn_type, None);
+
+        // blood_thread_join(handle: i64) -> i64
+        let thread_join_type = i64_type.fn_type(&[i64_type.into()], false);
+        self.module.add_function("blood_thread_join", thread_join_type, None);
+
         // === Runtime Lifecycle ===
 
         // blood_runtime_init() -> i32

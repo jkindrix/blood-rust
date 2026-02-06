@@ -1196,6 +1196,33 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 }
             }
 
+            // Fat pointer (struct) to Int - extract field 0 (fn_ptr or data_ptr) and convert to u64
+            // Handles `fn as u64` where fn is { fn_ptr: i8*, env_ptr: i8* }
+            (BasicValueEnum::StructValue(struct_val), BasicTypeEnum::IntType(int_ty)) => {
+                let field0 = self.builder.build_extract_value(struct_val, 0, "struct_field0")
+                    .map_err(|e| vec![Diagnostic::error(
+                        format!("LLVM extract_value error: {}", e), self.current_span()
+                    )])?;
+                if let BasicValueEnum::PointerValue(ptr_val) = field0 {
+                    let cast = self.builder.build_ptr_to_int(ptr_val, int_ty, "fat_to_int")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM ptrtoint error: {}", e), self.current_span()
+                        )])?;
+                    Ok(cast.into())
+                } else if let BasicValueEnum::IntValue(int_val) = field0 {
+                    let cast = self.builder.build_int_cast(int_val, int_ty, "field0_intcast")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM intcast error: {}", e), self.current_span()
+                        )])?;
+                    Ok(cast.into())
+                } else {
+                    Err(vec![Diagnostic::error(
+                        format!("Cannot cast struct field 0 type {:?} to integer", field0.get_type()),
+                        self.current_span()
+                    )])
+                }
+            }
+
             // Same type, no cast needed
             _ if val.get_type() == target_llvm => Ok(val),
 

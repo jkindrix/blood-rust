@@ -388,6 +388,20 @@ impl<'a> TypeContext<'a> {
 
         // args_join() -> &str - get all arguments as a single space-separated string
         self.register_builtin_fn("args_join", vec![], ref_str_ty.clone());
+
+        // === OS Thread Primitives ===
+
+        // thread_spawn(fn_ptr: u64, arg: u64) -> u64 - spawn OS thread, returns handle
+        self.register_builtin_fn_aliased(
+            "thread_spawn", "blood_thread_spawn",
+            vec![u64_ty.clone(), u64_ty.clone()], u64_ty.clone(),
+        );
+
+        // thread_join(handle: u64) -> u64 - join thread, returns 0 on success
+        self.register_builtin_fn_aliased(
+            "thread_join", "blood_thread_join",
+            vec![u64_ty.clone()], u64_ty.clone(),
+        );
     }
 
     /// Register a single built-in function.
