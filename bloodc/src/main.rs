@@ -151,6 +151,14 @@ struct FileArgs {
     /// Emit intermediate representation(s) instead of building
     #[arg(long, value_enum, value_delimiter = ',')]
     emit: Vec<EmitKind>,
+
+    /// Output file path (for executable or --emit output)
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    /// Disable the build cache (recompile all definitions)
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Args)]
@@ -196,6 +204,14 @@ struct BuildArgs {
     /// Emit intermediate representation(s) instead of building
     #[arg(long, value_enum, value_delimiter = ',')]
     emit: Vec<EmitKind>,
+
+    /// Output file path (for executable or --emit output)
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    /// Disable the build cache (recompile all definitions)
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Args)]
@@ -473,6 +489,8 @@ fn cmd_check_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
             stdlib_path: args.stdlib_path.clone(),
             release: false, // Check command doesn't use release mode
             emit: Vec::new(),
+            output: None,
+            no_cache: false,
         };
         return cmd_check(&file_args, verbosity);
     }
@@ -518,6 +536,8 @@ fn cmd_check_project(args: &BuildArgs, verbosity: u8) -> ExitCode {
                 stdlib_path: args.stdlib_path.clone(),
                 release: false, // Check command doesn't use release mode
                 emit: Vec::new(),
+                output: None,
+                no_cache: false,
             };
             cmd_check(&file_args, verbosity)
         }
@@ -539,6 +559,8 @@ fn cmd_build_project(args: &BuildArgs, verbosity: u8, timings: bool) -> ExitCode
             stdlib_path: args.stdlib_path.clone(),
             release: args.release,
             emit: args.emit.clone(),
+            output: args.output.clone(),
+            no_cache: args.no_cache,
         };
         return cmd_build(&file_args, verbosity, timings);
     }
@@ -586,6 +608,8 @@ fn cmd_build_project(args: &BuildArgs, verbosity: u8, timings: bool) -> ExitCode
                     stdlib_path: args.stdlib_path.clone(),
                     release: args.release,
                     emit: args.emit.clone(),
+                    output: args.output.clone(),
+                    no_cache: args.no_cache,
                 };
 
                 let result = cmd_build(&file_args, verbosity, timings);
@@ -1399,16 +1423,36 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
 
     // Determine output paths
     let _output_obj = args.file.with_extension("o");
-    let output_exe = args.file.with_extension("");
+    let output_exe = args.output.clone().unwrap_or_else(|| args.file.with_extension(""));
 
     let (ref mir_bodies, ref escape_map, ref inline_handler_bodies, ref closure_analysis) = mir_result
         .expect("MIR result should be present (errors return early)");
 
     // Emit LLVM IR if requested (before object code generation)
     if emit_set.contains(&EmitKind::LlvmIr) || emit_set.contains(&EmitKind::LlvmIrUnopt) {
+        // Helper: write IR to -o path or stdout
+        let write_ir = |ir: &str, label: &str| -> Result<(), ExitCode> {
+            if let Some(ref output_path) = args.output {
+                if let Err(e) = std::fs::write(output_path, ir) {
+                    eprintln!("Failed to write {} to {}: {}", label, output_path.display(), e);
+                    return Err(ExitCode::from(1));
+                }
+                if verbosity > 0 {
+                    eprintln!("Wrote {} to {}", label, output_path.display());
+                }
+            } else {
+                println!("{}", ir);
+            }
+            Ok(())
+        };
+
         if emit_set.contains(&EmitKind::LlvmIr) {
             match codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids) {
-                Ok(ir) => println!("{}", ir),
+                Ok(ir) => {
+                    if let Err(code) = write_ir(&ir, "optimized LLVM IR") {
+                        return code;
+                    }
+                }
                 Err(errors) => {
                     for error in &errors {
                         emitter.emit(error);
@@ -1423,7 +1467,11 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
                 &hir_crate, mir_bodies, escape_map,
                 codegen::BloodOptLevel::None, builtin_def_ids,
             ) {
-                Ok(ir) => println!("{}", ir),
+                Ok(ir) => {
+                    if let Err(code) = write_ir(&ir, "unoptimized LLVM IR") {
+                        return code;
+                    }
+                }
                 Err(errors) => {
                     for error in &errors {
                         emitter.emit(error);
@@ -1508,37 +1556,39 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
             // Check cache for this definition (local and remote)
             let obj_path = obj_dir.join(format!("def_{}.o", def_id.index()));
 
-            match distributed_cache.fetch(&def_hash) {
-                FetchResult::LocalHit(data) => {
-                    // Local cache hit - write to obj file and use
-                    if std::fs::write(&obj_path, &data).is_ok() {
-                        object_files.push(obj_path);
-                        cached_count += 1;
-                        if verbosity > 2 {
-                            eprintln!("  Cache hit (local): {:?} ({})", def_id, def_hash.short_display());
+            if !args.no_cache {
+                match distributed_cache.fetch(&def_hash) {
+                    FetchResult::LocalHit(data) => {
+                        // Local cache hit - write to obj file and use
+                        if std::fs::write(&obj_path, &data).is_ok() {
+                            object_files.push(obj_path);
+                            cached_count += 1;
+                            if verbosity > 2 {
+                                eprintln!("  Cache hit (local): {:?} ({})", def_id, def_hash.short_display());
+                            }
+                            continue;
                         }
-                        continue;
+                        // If write fails, fall through to compile
                     }
-                    // If write fails, fall through to compile
-                }
-                FetchResult::RemoteHit { data, source } => {
-                    // Remote cache hit - already stored locally by fetch(), write to obj file
-                    if std::fs::write(&obj_path, &data).is_ok() {
-                        object_files.push(obj_path);
-                        cached_count += 1;
-                        if verbosity > 1 {
-                            eprintln!("  Cache hit (remote): {:?} ({}) from {}", def_id, def_hash.short_display(), source);
+                    FetchResult::RemoteHit { data, source } => {
+                        // Remote cache hit - already stored locally by fetch(), write to obj file
+                        if std::fs::write(&obj_path, &data).is_ok() {
+                            object_files.push(obj_path);
+                            cached_count += 1;
+                            if verbosity > 1 {
+                                eprintln!("  Cache hit (remote): {:?} ({}) from {}", def_id, def_hash.short_display(), source);
+                            }
+                            continue;
                         }
-                        continue;
+                        // If write fails, fall through to compile
                     }
-                    // If write fails, fall through to compile
-                }
-                FetchResult::NotFound | FetchResult::Error(_) => {
-                    // Cache miss - need to compile
+                    FetchResult::NotFound | FetchResult::Error(_) => {
+                        // Cache miss - need to compile
+                    }
                 }
             }
 
-            // Cache miss - compile this definition
+            // Compile this definition
             let escape_results = escape_map.get(&def_id);
 
             match codegen::compile_definition_to_object(
@@ -1588,31 +1638,33 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
             // Check cache for this handler (local and remote)
             let obj_path = obj_dir.join(format!("handler_{}.o", def_id.index()));
 
-            match distributed_cache.fetch(&def_hash) {
-                FetchResult::LocalHit(data) => {
-                    if std::fs::write(&obj_path, &data).is_ok() {
-                        object_files.push(obj_path);
-                        cached_count += 1;
-                        if verbosity > 2 {
-                            eprintln!("  Cache hit (handler, local): {:?} ({})", def_id, def_hash.short_display());
+            if !args.no_cache {
+                match distributed_cache.fetch(&def_hash) {
+                    FetchResult::LocalHit(data) => {
+                        if std::fs::write(&obj_path, &data).is_ok() {
+                            object_files.push(obj_path);
+                            cached_count += 1;
+                            if verbosity > 2 {
+                                eprintln!("  Cache hit (handler, local): {:?} ({})", def_id, def_hash.short_display());
+                            }
+                            continue;
                         }
-                        continue;
                     }
-                }
-                FetchResult::RemoteHit { data, source } => {
-                    if std::fs::write(&obj_path, &data).is_ok() {
-                        object_files.push(obj_path);
-                        cached_count += 1;
-                        if verbosity > 1 {
-                            eprintln!("  Cache hit (handler, remote): {:?} ({}) from {}", def_id, def_hash.short_display(), source);
+                    FetchResult::RemoteHit { data, source } => {
+                        if std::fs::write(&obj_path, &data).is_ok() {
+                            object_files.push(obj_path);
+                            cached_count += 1;
+                            if verbosity > 1 {
+                                eprintln!("  Cache hit (handler, remote): {:?} ({}) from {}", def_id, def_hash.short_display(), source);
+                            }
+                            continue;
                         }
-                        continue;
                     }
+                    FetchResult::NotFound | FetchResult::Error(_) => {}
                 }
-                FetchResult::NotFound | FetchResult::Error(_) => {}
             }
 
-            // Cache miss - compile this handler
+            // Compile this handler
             match codegen::compile_definition_to_object(def_id, &hir_crate, None, None, Some(mir_bodies), Some(inline_handler_bodies), &obj_path, builtin_def_ids, Some(closure_analysis)) {
                 Ok(()) => {
                     compiled_count += 1;
@@ -2267,6 +2319,8 @@ fn run_single_test(
         stdlib_path: args.stdlib_path.clone(),
         release: false,
         emit: Vec::new(),
+        output: None,
+        no_cache: false,
     };
 
     // Suppress build output unless verbose
