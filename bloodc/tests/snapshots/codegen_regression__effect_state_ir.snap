@@ -142,6 +142,10 @@ declare i64 @blood_snapshot_len(i64)
 
 declare i64 @blood_snapshot_validate(i64)
 
+declare i64 @blood_thread_join(i64)
+
+declare i64 @blood_thread_spawn(i64, i64)
+
 declare i64 @i32_to_i64(i32)
 
 declare i64 @parse_i64_radix({ i8*, i64 }, i32)
@@ -488,7 +492,7 @@ bb2:                                              ; preds = %bb1
 bb3:                                              ; preds = %bb2
   %snapshot = call i64 @blood_snapshot_create()
   %continuation = call i64 @blood_continuation_create_multishot(i64 (i64, i8*)* @__blood_identity_continuation, i8* null)
-  %perform_result = call i64 @blood_perform(i64 332, i32 0, i64* null, i64 0, i64 %continuation)
+  %perform_result = call i64 @blood_perform(i64 334, i32 0, i64* null, i64 0, i64 %continuation)
   %perform_trunc = trunc i64 %perform_result to i32
   store i32 %perform_trunc, i32* %_7_stack, align 4
   %validation = call i64 @blood_snapshot_validate(i64 %snapshot)
@@ -553,7 +557,7 @@ region_merge_ev:                                  ; preds = %region_clone_ev, %r
   %state_field_0_ptoi = ptrtoint i8* %state_field_0 to i64
   store i64 %state_field_0_ptoi, i64* %shadow_0_ptr, align 8
   %state_void_ptr = bitcast { i64 }* %state_shadow to i8*
-  call void @blood_evidence_push_with_state(i8* %evidence, i64 332, i8* %state_void_ptr)
+  call void @blood_evidence_push_with_state(i8* %evidence, i64 334, i8* %state_void_ptr)
   call void @"blood$increment"()
   br label %bb1
 
@@ -578,7 +582,7 @@ entry:
   %op_ptr1 = getelementptr [2 x i8*], [2 x i8*]* %handler_ops, i32 0, i32 1
   store i8* bitcast (i64 (i8*, i64*, i64, i64)* @LocalState_put to i8*), i8** %op_ptr1, align 8
   %ops_ptr = getelementptr [2 x i8*], [2 x i8*]* %handler_ops, i32 0, i32 0
-  call void @blood_evidence_register(i8* null, i64 332, i8** %ops_ptr, i64 2)
+  call void @blood_evidence_register(i8* null, i64 334, i8** %ops_ptr, i64 2)
   ret void
 }
 
@@ -677,7 +681,7 @@ bb0:
   %_5_stack = alloca i8, align 1
   %snapshot = call i64 @blood_snapshot_create()
   %continuation = call i64 @blood_continuation_create_multishot(i64 (i64, i8*)* @__blood_identity_continuation, i8* null)
-  %perform_result = call i64 @blood_perform(i64 332, i32 0, i64* null, i64 0, i64 %continuation)
+  %perform_result = call i64 @blood_perform(i64 334, i32 0, i64* null, i64 0, i64 %continuation)
   %perform_trunc = trunc i64 %perform_result to i32
   store i32 %perform_trunc, i32* %_2_stack, align 4
   %validation = call i64 @blood_snapshot_validate(i64 %snapshot)
@@ -699,7 +703,7 @@ bb1:                                              ; preds = %snapshot_valid
   store i64 %arg_i64, i64* %arg_0, align 8
   %args_ptr = bitcast [1 x i64]* %perform_args to i64*
   %continuation4 = call i64 @blood_continuation_create_multishot(i64 (i64, i8*)* @__blood_identity_continuation, i8* null)
-  %perform_result5 = call i64 @blood_perform(i64 332, i32 1, i64* %args_ptr, i64 1, i64 %continuation4)
+  %perform_result5 = call i64 @blood_perform(i64 334, i32 1, i64* %args_ptr, i64 1, i64 %continuation4)
   %validation6 = call i64 @blood_snapshot_validate(i64 %snapshot3)
   call void @blood_snapshot_destroy(i64 %snapshot3)
   %is_valid9 = icmp eq i64 %validation6, 0
