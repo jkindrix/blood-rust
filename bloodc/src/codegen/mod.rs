@@ -770,8 +770,10 @@ pub fn compile_mir_to_ir(
     mir_bodies: &MirBodiesMap,
     escape_analysis: &EscapeAnalysisMap,
     builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
+    inline_handler_bodies: Option<&InlineHandlerBodies>,
+    closure_analysis: Option<&ClosureAnalysisResults>,
 ) -> Result<String, Vec<Diagnostic>> {
-    compile_mir_to_ir_with_opt(hir_crate, mir_bodies, escape_analysis, BloodOptLevel::Aggressive, builtin_def_ids)
+    compile_mir_to_ir_with_opt(hir_crate, mir_bodies, escape_analysis, BloodOptLevel::Aggressive, builtin_def_ids, inline_handler_bodies, closure_analysis)
 }
 
 /// Compile MIR bodies to LLVM IR text with specified optimization level.
@@ -781,6 +783,8 @@ pub fn compile_mir_to_ir_with_opt(
     escape_analysis: &EscapeAnalysisMap,
     opt_level: BloodOptLevel,
     builtin_def_ids: (Option<DefId>, Option<DefId>, Option<DefId>, Option<DefId>),
+    inline_handler_bodies: Option<&InlineHandlerBodies>,
+    closure_analysis: Option<&ClosureAnalysisResults>,
 ) -> Result<String, Vec<Diagnostic>> {
     let context = Context::create();
     let module = context.create_module("blood_program");
@@ -793,6 +797,14 @@ pub fn compile_mir_to_ir_with_opt(
 
     let mut codegen = CodegenContext::new(&context, &module, &builder);
     codegen.set_escape_analysis(escape_analysis.clone());
+    if let Some(ihb) = inline_handler_bodies {
+        codegen.set_inline_handler_bodies(ihb.clone());
+    }
+    if let Some(ca) = closure_analysis {
+        codegen.set_closure_analysis(ca.clone());
+    }
+    // Store MIR bodies for generic functions (for on-demand monomorphization)
+    codegen.set_generic_mir_bodies(mir_bodies);
     // Set builtin def IDs so Vec, Box, Option, Result get correct type representations
     codegen.set_builtin_def_ids(
         builtin_def_ids.0,

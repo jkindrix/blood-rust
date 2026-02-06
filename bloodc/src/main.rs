@@ -1447,7 +1447,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
         };
 
         if emit_set.contains(&EmitKind::LlvmIr) {
-            match codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids) {
+            match codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids, Some(inline_handler_bodies), Some(closure_analysis)) {
                 Ok(ir) => {
                     if let Err(code) = write_ir(&ir, "optimized LLVM IR") {
                         return code;
@@ -1466,6 +1466,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
             match codegen::compile_mir_to_ir_with_opt(
                 &hir_crate, mir_bodies, escape_map,
                 codegen::BloodOptLevel::None, builtin_def_ids,
+                Some(inline_handler_bodies), Some(closure_analysis),
             ) {
                 Ok(ir) => {
                     if let Err(code) = write_ir(&ir, "unoptimized LLVM IR") {
@@ -1718,7 +1719,7 @@ fn cmd_build(args: &FileArgs, verbosity: u8, timings: bool) -> ExitCode {
 
     // Debug: show LLVM IR if requested
     if args.debug {
-        let ir_result = codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids);
+        let ir_result = codegen::compile_mir_to_ir(&hir_crate, mir_bodies, escape_map, builtin_def_ids, Some(inline_handler_bodies), Some(closure_analysis));
         if let Ok(ir) = ir_result {
             println!("{}", ir);
         }

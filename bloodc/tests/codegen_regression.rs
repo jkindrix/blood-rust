@@ -27,7 +27,7 @@ fn compile_to_ir_with_opt(source: &str, opt_level: BloodOptLevel) -> String {
         .expect("fixture should type-check without errors");
 
     let mut mir_lowering = MirLowering::new(&hir_crate);
-    let (mir_bodies, _inline_handlers) = mir_lowering
+    let (mir_bodies, inline_handlers) = mir_lowering
         .lower_crate()
         .expect("fixture should lower to MIR without errors");
 
@@ -47,6 +47,8 @@ fn compile_to_ir_with_opt(source: &str, opt_level: BloodOptLevel) -> String {
         &escape_map,
         opt_level,
         builtin_def_ids,
+        Some(&inline_handlers),
+        None,
     )
     .expect("fixture should codegen without errors")
 }
@@ -68,7 +70,7 @@ fn compile_to_ir(source: &str) -> String {
 
     // MIR lowering
     let mut mir_lowering = MirLowering::new(&hir_crate);
-    let (mir_bodies, _inline_handlers) = mir_lowering
+    let (mir_bodies, inline_handlers) = mir_lowering
         .lower_crate()
         .expect("fixture should lower to MIR without errors");
 
@@ -90,6 +92,8 @@ fn compile_to_ir(source: &str) -> String {
         &escape_map,
         BloodOptLevel::None,
         builtin_def_ids,
+        Some(&inline_handlers),
+        None,
     )
     .expect("fixture should codegen without errors");
 
