@@ -10681,20 +10681,16 @@ pub unsafe extern "C" fn debug_local_enum(ptr: *const u8, name: *const u8, name_
 // ============================================================================
 
 /// Print a boolean value without newline.
-///
-/// The boolean is represented as an i32 where 0 = false, non-zero = true.
 #[no_mangle]
-pub extern "C" fn print_bool(val: i32) {
-    print!("{}", val != 0);
+pub extern "C" fn print_bool(val: bool) {
+    print!("{}", val);
     let _ = io::stdout().flush();
 }
 
 /// Print a boolean value with newline.
-///
-/// The boolean is represented as an i32 where 0 = false, non-zero = true.
 #[no_mangle]
-pub extern "C" fn println_bool(val: i32) {
-    println!("{}", val != 0);
+pub extern "C" fn println_bool(val: bool) {
+    println!("{}", val);
 }
 
 /// Print a character without newline.
@@ -11106,11 +11102,11 @@ pub extern "C" fn blood_assert(cond: i32) {
     }
 }
 
-/// Assert that two boolean values (represented as i32) are equal. Aborts if not.
+/// Assert that two boolean values are equal. Aborts if not.
 #[no_mangle]
-pub extern "C" fn blood_assert_eq_bool(a: i32, b: i32) {
-    if (a != 0) != (b != 0) {
-        eprintln!("BLOOD RUNTIME PANIC: assertion failed: bool values not equal ({} != {})", a != 0, b != 0);
+pub extern "C" fn blood_assert_eq_bool(a: bool, b: bool) {
+    if a != b {
+        eprintln!("BLOOD RUNTIME PANIC: assertion failed: bool values not equal ({} != {})", a, b);
         std::process::abort();
     }
 }

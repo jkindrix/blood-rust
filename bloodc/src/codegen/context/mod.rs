@@ -3398,8 +3398,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let int_to_string_type = str_slice_type.fn_type(&[i32_type.into()], false);
         self.module.add_function("int_to_string", int_to_string_type, None);
 
-        // bool_to_string(i32) -> {*i8, i64} - convert boolean to string (bool passed as i32)
-        self.module.add_function("bool_to_string", int_to_string_type, None);
+        // bool_to_string(i1) -> {*i8, i64} - convert boolean to string
+        let bool_type = self.context.bool_type();
+        let bool_to_string_type = str_slice_type.fn_type(&[bool_type.into()], false);
+        self.module.add_function("bool_to_string", bool_to_string_type, None);
 
         // i64_to_string(i64) -> {*i8, i64} - convert 64-bit integer to string
         let i64_to_string_type = str_slice_type.fn_type(&[i64_type.into()], false);
@@ -3497,8 +3499,10 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let assert_eq_int_type = void_type.fn_type(&[i32_type.into(), i32_type.into()], false);
         self.module.add_function("blood_assert_eq_int", assert_eq_int_type, None);
 
-        // blood_assert_eq_bool(i32, i32) -> void - assert two bools are equal (as i32)
-        self.module.add_function("blood_assert_eq_bool", assert_eq_int_type, None);
+        // blood_assert_eq_bool(i1, i1) -> void - assert two bools are equal
+        let bool_type = self.context.bool_type();
+        let assert_eq_bool_type = void_type.fn_type(&[bool_type.into(), bool_type.into()], false);
+        self.module.add_function("blood_assert_eq_bool", assert_eq_bool_type, None);
 
         // print_char(i32) -> void
         self.module.add_function("print_char", print_int_type, None);
@@ -3506,11 +3510,13 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // println_char(i32) -> void (char with newline)
         self.module.add_function("println_char", print_int_type, None);
 
-        // print_bool(i32) -> void (bool as i32)
-        self.module.add_function("print_bool", print_int_type, None);
+        // print_bool(i1) -> void
+        let bool_type = self.context.bool_type();
+        let print_bool_type = void_type.fn_type(&[bool_type.into()], false);
+        self.module.add_function("print_bool", print_bool_type, None);
 
-        // println_bool(i32) -> void (bool with newline)
-        self.module.add_function("println_bool", print_int_type, None);
+        // println_bool(i1) -> void
+        self.module.add_function("println_bool", print_bool_type, None);
 
         // print_f64(f64) -> void
         let f64_type = self.context.f64_type();
@@ -4241,14 +4247,16 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // === File I/O Functions ===
 
-        // file_exists(path: {*i8, i64}) -> i32 (bool)
+        let bool_type = self.context.bool_type();
+
+        // file_exists(path: {*i8, i64}) -> i1 (bool)
         // Check if a file exists at the given path
-        let file_exists_type = i32_type.fn_type(&[str_slice_type.into()], false);
+        let file_exists_type = bool_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("file_exists", file_exists_type, None);
 
-        // file_write_string(path: {*i8, i64}, content: {*i8, i64}) -> i32 (0 = success, non-zero = error)
+        // file_write_string(path: {*i8, i64}, content: {*i8, i64}) -> i1 (bool: true = success)
         // Write string content to a file
-        let file_write_string_type = i32_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
+        let file_write_string_type = bool_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
         self.module.add_function("file_write_string", file_write_string_type, None);
 
         // file_read_to_string(path: {*i8, i64}) -> {*i8, i64} (String as str slice)
@@ -4256,14 +4264,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         let file_read_to_string_type = str_slice_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("file_read_to_string", file_read_to_string_type, None);
 
-        // file_delete(path: {*i8, i64}) -> i32 (bool: 1 = success, 0 = error)
+        // file_delete(path: {*i8, i64}) -> i1 (bool: true = success)
         // Delete a file at the given path
-        let file_delete_type = i32_type.fn_type(&[str_slice_type.into()], false);
+        let file_delete_type = bool_type.fn_type(&[str_slice_type.into()], false);
         self.module.add_function("file_delete", file_delete_type, None);
 
-        // file_append_string(path: {*i8, i64}, content: {*i8, i64}) -> i32 (0 = success, non-zero = error)
+        // file_append_string(path: {*i8, i64}, content: {*i8, i64}) -> i1 (bool: true = success)
         // Append string content to a file (creates if needed)
-        let file_append_string_type = i32_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
+        let file_append_string_type = bool_type.fn_type(&[str_slice_type.into(), str_slice_type.into()], false);
         self.module.add_function("file_append_string", file_append_string_type, None);
 
         // system(cmd: {*i8, i64}) -> i32 (exit code)
@@ -4273,14 +4281,14 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
 
         // === Command-Line Arguments ===
 
-        // args_count() -> i64
+        // args_count() -> i32
         // Get the number of command-line arguments
-        let args_count_type = i64_type.fn_type(&[], false);
+        let args_count_type = i32_type.fn_type(&[], false);
         self.module.add_function("args_count", args_count_type, None);
 
-        // args_get(index: i64) -> {*i8, i64} (String as str slice)
+        // args_get(index: i32) -> {*i8, i64} (String as str slice)
         // Get command-line argument at index
-        let args_get_type = str_slice_type.fn_type(&[i64_type.into()], false);
+        let args_get_type = str_slice_type.fn_type(&[i32_type.into()], false);
         self.module.add_function("args_get", args_get_type, None);
     }
 }

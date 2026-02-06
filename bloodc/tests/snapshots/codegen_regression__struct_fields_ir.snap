@@ -8,7 +8,17 @@ declare double @parse_f64({ i8*, i64 })
 
 declare double @ptr_read_f64(i64)
 
+declare i1 @file_append_string({ i8*, i64 }, { i8*, i64 })
+
+declare i1 @file_delete({ i8*, i64 })
+
+declare i1 @file_exists({ i8*, i64 })
+
+declare i1 @file_write_string({ i8*, i64 }, { i8*, i64 })
+
 declare i1 @str_eq({ i8*, i64 }, { i8*, i64 })
+
+declare i32 @args_count()
 
 declare i32 @blood_alloc(i64, i64*, i64*)
 
@@ -39,14 +49,6 @@ declare i32 @blood_scheduler_run_background()
 declare i32 @blood_validate_generation(i64, i32)
 
 declare i32 @char_from_u32(i32)
-
-declare i32 @file_append_string({ i8*, i64 }, { i8*, i64 })
-
-declare i32 @file_delete({ i8*, i64 })
-
-declare i32 @file_exists({ i8*, i64 })
-
-declare i32 @file_write_string({ i8*, i64 }, { i8*, i64 })
 
 declare i32 @i64_to_i32(i64)
 
@@ -83,8 +85,6 @@ declare i32 @vec_get(i8*, i64, i64, i8*)
 declare i32 @vec_is_empty(i8*)
 
 declare i32 @vec_pop(i8*, i64, i8*)
-
-declare i64 @args_count()
 
 declare i64 @blood_alloc_or_abort(i64, i32*)
 
@@ -190,7 +190,7 @@ declare i8* @vec_get_ptr(i8*, i64, i64)
 
 declare void @blood_assert(i32)
 
-declare void @blood_assert_eq_bool(i32, i32)
+declare void @blood_assert_eq_bool(i1, i1)
 
 declare void @blood_assert_eq_int(i32, i32)
 
@@ -282,7 +282,7 @@ declare void @option_xor(i8*, i8*, i64, i8*)
 
 declare void @panic({ i8*, i64 })
 
-declare void @print_bool(i32)
+declare void @print_bool(i1)
 
 declare void @print_char(i32)
 
@@ -306,7 +306,7 @@ declare void @print_u64(i64)
 
 declare void @println()
 
-declare void @println_bool(i32)
+declare void @println_bool(i1)
 
 declare void @println_char(i32)
 
@@ -396,11 +396,11 @@ declare { i32, i32 } @str_char_at_index({ i8*, i64 }*, i64)
 
 declare { i32, i32 } @string_char_at({ i8*, i64 }*, i64)
 
-declare { i8*, i64 } @args_get(i64)
+declare { i8*, i64 } @args_get(i32)
 
 declare { i8*, i64 } @blood_str_concat({ i8*, i64 }, { i8*, i64 })
 
-declare { i8*, i64 } @bool_to_string(i32)
+declare { i8*, i64 } @bool_to_string(i1)
 
 declare { i8*, i64 } @char_to_string(i32)
 
