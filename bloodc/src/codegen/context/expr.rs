@@ -523,6 +523,37 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
     ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
         use crate::ast::UnaryOp::*;
 
+        // Handle reference operators before evaluating operand —
+        // these need the lvalue (address), not the rvalue.
+        match op {
+            Ref | RefMut => {
+                return self.compile_borrow(operand)?
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "Cannot take reference of void expression",
+                        operand.span,
+                    )]);
+            }
+            Deref => {
+                // Dereference: evaluate operand to a pointer, then load through it.
+                let val = self.compile_expr(operand)?
+                    .ok_or_else(|| vec![Diagnostic::error(
+                        "Expected value for dereference", operand.span
+                    )])?;
+                if let BasicValueEnum::PointerValue(ptr) = val {
+                    let loaded = self.builder.build_load(ptr, "deref")
+                        .map_err(|e| vec![Diagnostic::error(
+                            format!("LLVM load error: {}", e), self.current_span()
+                        )])?;
+                    return Ok(loaded);
+                }
+                return Err(vec![Diagnostic::error(
+                    format!("Cannot dereference non-pointer type: {:?}", val.get_type()),
+                    operand.span,
+                )]);
+            }
+            Neg | Not => {} // fall through to value-based evaluation below
+        }
+
         let val = self.compile_expr(operand)?
             .ok_or_else(|| vec![Diagnostic::error("Expected value for unary op", operand.span)])?;
 
@@ -555,10 +586,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     .map(|v| v.into())
                     .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])
             }
-            _ => Err(vec![Diagnostic::error(
-                format!("Unsupported unary operator: {:?}", op),
-                self.current_span(),
-            )]),
+            // Ref, RefMut, Deref handled above before operand evaluation
+            Ref | RefMut | Deref => unreachable!(),
         }
     }
 
@@ -571,11 +600,58 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
         // First, try to get a direct function reference
         if let hir::ExprKind::Def(def_id) = &callee.kind {
             if let Some(&fn_value) = self.functions.get(def_id) {
-                // Direct function call
+                // Direct function call - compile args with type coercion
+                let param_types = fn_value.get_type().get_param_types();
                 let mut compiled_args = Vec::new();
-                for arg in args {
+                for (i, arg) in args.iter().enumerate() {
                     if let Some(val) = self.compile_expr(arg)? {
-                        compiled_args.push(val.into());
+                        let coerced = if let Some(param_type) = param_types.get(i) {
+                            if val.is_pointer_value() && param_type.is_pointer_type() {
+                                let ptr_val = val.into_pointer_value();
+                                let expected_ptr_type = param_type.into_pointer_type();
+                                if ptr_val.get_type() != expected_ptr_type {
+                                    self.builder
+                                        .build_pointer_cast(ptr_val, expected_ptr_type, "arg_ptr_cast")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?
+                                        .into()
+                                } else {
+                                    val
+                                }
+                            } else if val.is_struct_value() && param_type.is_pointer_type() {
+                                // Struct value → pointer: alloca + store + pass pointer
+                                let struct_val = val.into_struct_value();
+                                let alloca = self.builder
+                                    .build_alloca(struct_val.get_type(), "call_arg_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), self.current_span())])?;
+                                self.builder.build_store(alloca, struct_val)
+                                    .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), self.current_span())])?;
+                                let expected_ptr_type = param_type.into_pointer_type();
+                                if alloca.get_type() != expected_ptr_type {
+                                    self.builder
+                                        .build_pointer_cast(alloca, expected_ptr_type, "call_arg_ptr_cast")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?
+                                        .into()
+                                } else {
+                                    alloca.into()
+                                }
+                            } else if val.is_int_value() && param_type.is_int_type() {
+                                let val_int = val.into_int_value();
+                                let param_int_type = param_type.into_int_type();
+                                if val_int.get_type().get_bit_width() < param_int_type.get_bit_width() {
+                                    self.builder
+                                        .build_int_z_extend(val_int, param_int_type, "zext")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM zext error: {}", e), self.current_span())])?
+                                        .into()
+                                } else {
+                                    val
+                                }
+                            } else {
+                                val
+                            }
+                        } else {
+                            val
+                        };
+                        compiled_args.push(coerced.into());
                     }
                 }
 
@@ -619,6 +695,59 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                                             .into()
                                     } else {
                                         val
+                                    }
+                                } else if val.is_struct_value() && param_type.is_pointer_type() {
+                                    // Struct value needs to be passed by pointer (e.g., &str -> ptr for runtime ABI).
+                                    // Allocate stack slot, store the struct, and pass the pointer.
+                                    let struct_val = val.into_struct_value();
+                                    let alloca = self.builder
+                                        .build_alloca(struct_val.get_type(), "builtin_arg_tmp")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), self.current_span())])?;
+                                    self.builder.build_store(alloca, struct_val)
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), self.current_span())])?;
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if alloca.get_type() != expected_ptr_type {
+                                        self.builder
+                                            .build_pointer_cast(alloca, expected_ptr_type, "builtin_arg_ptr_cast")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?
+                                            .into()
+                                    } else {
+                                        alloca.into()
+                                    }
+                                } else if val.is_int_value() && param_type.is_pointer_type() {
+                                    // Int value needs to be passed by pointer.
+                                    // Allocate stack slot, store the int, and pass the pointer.
+                                    let int_val = val.into_int_value();
+                                    let alloca = self.builder
+                                        .build_alloca(int_val.get_type(), "builtin_int_arg_tmp")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), self.current_span())])?;
+                                    self.builder.build_store(alloca, int_val)
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), self.current_span())])?;
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if alloca.get_type() != expected_ptr_type {
+                                        self.builder
+                                            .build_pointer_cast(alloca, expected_ptr_type, "builtin_int_arg_ptr_cast")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?
+                                            .into()
+                                    } else {
+                                        alloca.into()
+                                    }
+                                } else if val.is_array_value() && param_type.is_pointer_type() {
+                                    // Array value needs to be passed by pointer.
+                                    let array_val = val.into_array_value();
+                                    let alloca = self.builder
+                                        .build_alloca(array_val.get_type(), "builtin_arr_arg_tmp")
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM alloca error: {}", e), self.current_span())])?;
+                                    self.builder.build_store(alloca, array_val)
+                                        .map_err(|e| vec![Diagnostic::error(format!("LLVM store error: {}", e), self.current_span())])?;
+                                    let expected_ptr_type = param_type.into_pointer_type();
+                                    if alloca.get_type() != expected_ptr_type {
+                                        self.builder
+                                            .build_pointer_cast(alloca, expected_ptr_type, "builtin_arr_arg_ptr_cast")
+                                            .map_err(|e| vec![Diagnostic::error(format!("LLVM pointer cast error: {}", e), self.current_span())])?
+                                            .into()
+                                    } else {
+                                        alloca.into()
                                     }
                                 } else {
                                     val
@@ -967,20 +1096,100 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                     receiver.span,
                 )])?;
 
-            // Coerce pointer args to match parameter types (e.g., typed ptr -> i8* for builtins)
+            // Coerce args to match parameter types (e.g., typed ptr -> i8* for builtins,
+            // struct value -> pointer for &self method semantics)
             let method_param_types = fn_value.get_type().get_param_types();
             for (i, arg) in compiled_args.iter_mut().enumerate() {
                 if let Some(param_type) = method_param_types.get(i) {
                     if param_type.is_pointer_type() {
-                        if let BasicMetadataValueEnum::PointerValue(ptr) = arg {
-                            let expected = param_type.into_pointer_type();
-                            if ptr.get_type() != expected {
-                                *arg = self.builder
-                                    .build_pointer_cast(*ptr, expected, "method_ptr_cast")
+                        let expected_ptr_type = param_type.into_pointer_type();
+                        match arg {
+                            BasicMetadataValueEnum::PointerValue(ptr) => {
+                                if ptr.get_type() != expected_ptr_type {
+                                    *arg = self.builder
+                                        .build_pointer_cast(*ptr, expected_ptr_type, "method_ptr_cast")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM error: {}", e), receiver.span
+                                        )])?
+                                        .into();
+                                }
+                            }
+                            BasicMetadataValueEnum::StructValue(struct_val) => {
+                                // Parameter expects pointer but we have struct value.
+                                // Allocate on stack and pass pointer (&self method semantics).
+                                let alloca = self.builder
+                                    .build_alloca(struct_val.get_type(), "method_arg_tmp")
                                     .map_err(|e| vec![Diagnostic::error(
-                                        format!("LLVM error: {}", e), receiver.span
-                                    )])?
-                                    .into();
+                                        format!("LLVM alloca error: {}", e), receiver.span
+                                    )])?;
+                                self.builder.build_store(alloca, *struct_val)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), receiver.span
+                                    )])?;
+                                if alloca.get_type() != expected_ptr_type {
+                                    *arg = self.builder
+                                        .build_pointer_cast(alloca, expected_ptr_type, "method_ptr_cast")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM error: {}", e), receiver.span
+                                        )])?
+                                        .into();
+                                } else {
+                                    *arg = alloca.into();
+                                }
+                            }
+                            BasicMetadataValueEnum::IntValue(int_val) => {
+                                // Parameter expects pointer but we have int value.
+                                // Allocate on stack and pass pointer.
+                                let alloca = self.builder
+                                    .build_alloca(int_val.get_type(), "method_int_arg_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), receiver.span
+                                    )])?;
+                                self.builder.build_store(alloca, *int_val)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), receiver.span
+                                    )])?;
+                                if alloca.get_type() != expected_ptr_type {
+                                    *arg = self.builder
+                                        .build_pointer_cast(alloca, expected_ptr_type, "method_ptr_cast")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM error: {}", e), receiver.span
+                                        )])?
+                                        .into();
+                                } else {
+                                    *arg = alloca.into();
+                                }
+                            }
+                            BasicMetadataValueEnum::ArrayValue(array_val) => {
+                                // Parameter expects pointer but we have array value.
+                                // Allocate on stack and pass pointer.
+                                let alloca = self.builder
+                                    .build_alloca(array_val.get_type(), "method_arr_arg_tmp")
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM alloca error: {}", e), receiver.span
+                                    )])?;
+                                self.builder.build_store(alloca, *array_val)
+                                    .map_err(|e| vec![Diagnostic::error(
+                                        format!("LLVM store error: {}", e), receiver.span
+                                    )])?;
+                                if alloca.get_type() != expected_ptr_type {
+                                    *arg = self.builder
+                                        .build_pointer_cast(alloca, expected_ptr_type, "method_ptr_cast")
+                                        .map_err(|e| vec![Diagnostic::error(
+                                            format!("LLVM error: {}", e), receiver.span
+                                        )])?
+                                        .into();
+                                } else {
+                                    *arg = alloca.into();
+                                }
+                            }
+                            BasicMetadataValueEnum::FloatValue(_)
+                            | BasicMetadataValueEnum::VectorValue(_)
+                            | BasicMetadataValueEnum::MetadataValue(_) => {
+                                return Err(vec![Diagnostic::error(
+                                    "Cannot pass float/vector/metadata value where pointer is expected",
+                                    receiver.span,
+                                )]);
                             }
                         }
                     }
