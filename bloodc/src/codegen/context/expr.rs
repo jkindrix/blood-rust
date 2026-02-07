@@ -369,6 +369,11 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
             return self.compile_pipe(left, right);
         }
 
+        // Short-circuit evaluation for logical && and ||.
+        if matches!(op, And | Or) {
+            return self.compile_short_circuit(op, left, right);
+        }
+
         let lhs = self.compile_expr(left)?
             .ok_or_else(|| vec![Diagnostic::error("Expected value for binary op", left.span)])?;
         let rhs = self.compile_expr(right)?
@@ -412,7 +417,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         .map(|v| v.into())
                         .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())]);
                 }
-                // Comparison, logical, and bitwise ops are handled in the second match below
+                // Comparison and bitwise ops are handled in the second match below
+                // And/Or are handled by short-circuit before reaching here
                 Eq | Ne | Lt | Le | Gt | Ge | And | Or | BitAnd | BitOr | BitXor | Shl | Shr | Pipe => {
                     // Fall through to comparison/error handling below
                 }
@@ -495,8 +501,8 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                         self.builder.build_int_compare(IntPredicate::SGE, lhs_int, rhs_int, "sge")
                     }
                 }
-                And => self.builder.build_and(lhs_int, rhs_int, "and"),
-                Or => self.builder.build_or(lhs_int, rhs_int, "or"),
+                // And/Or handled by compile_short_circuit before operand evaluation
+                And | Or => unreachable!("Logical &&/|| handled by short-circuit before operand eval"),
                 BitAnd => self.builder.build_and(lhs_int, rhs_int, "bitand"),
                 BitOr => self.builder.build_or(lhs_int, rhs_int, "bitor"),
                 BitXor => self.builder.build_xor(lhs_int, rhs_int, "bitxor"),
@@ -513,6 +519,82 @@ impl<'ctx, 'a> CodegenContext<'ctx, 'a> {
                 .map(|v| v.into())
                 .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), self.current_span())])
         }
+    }
+
+    /// Compile short-circuit logical operators (&& and ||).
+    ///
+    /// `a && b` → evaluate a; if false, result=false (skip b); else result=b.
+    /// `a || b` → evaluate a; if true, result=true (skip b); else result=b.
+    ///
+    /// Uses conditional branch + phi node to avoid evaluating the RHS
+    /// when the LHS determines the result.
+    fn compile_short_circuit(
+        &mut self,
+        op: &crate::ast::BinOp,
+        left: &hir::Expr,
+        right: &hir::Expr,
+    ) -> Result<BasicValueEnum<'ctx>, Vec<Diagnostic>> {
+        use crate::ast::BinOp::*;
+
+        let lhs = self.compile_expr(left)?
+            .ok_or_else(|| vec![Diagnostic::error("Expected value for logical op LHS", left.span)])?;
+        let lhs_bool = lhs.into_int_value();
+
+        let current_fn = self.builder.get_insert_block()
+            .ok_or_else(|| vec![Diagnostic::error("No current block for short-circuit", left.span)])?
+            .get_parent()
+            .ok_or_else(|| vec![Diagnostic::error("No parent function for short-circuit", left.span)])?;
+
+        let eval_rhs_block = self.context.append_basic_block(current_fn, "sc_rhs");
+        let short_circuit_block = self.context.append_basic_block(current_fn, "sc_short");
+        let merge_block = self.context.append_basic_block(current_fn, "sc_merge");
+
+        // Branch based on LHS.
+        // &&: true → eval RHS, false → short-circuit (result=false)
+        // ||: true → short-circuit (result=true), false → eval RHS
+        match op {
+            And => {
+                self.builder.build_conditional_branch(lhs_bool, eval_rhs_block, short_circuit_block)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), left.span)])?;
+            }
+            Or => {
+                self.builder.build_conditional_branch(lhs_bool, short_circuit_block, eval_rhs_block)
+                    .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), left.span)])?;
+            }
+            _ => unreachable!(),
+        }
+
+        // Eval RHS block
+        self.builder.position_at_end(eval_rhs_block);
+        let rhs = self.compile_expr(right)?
+            .ok_or_else(|| vec![Diagnostic::error("Expected value for logical op RHS", right.span)])?;
+        let rhs_bool = rhs.into_int_value();
+        // The RHS evaluation may have changed the current block (nested short-circuits, calls, etc.)
+        let rhs_end_block = self.builder.get_insert_block()
+            .ok_or_else(|| vec![Diagnostic::error("No current block after RHS eval", right.span)])?;
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), right.span)])?;
+
+        // Short-circuit block: result is the constant (false for &&, true for ||)
+        self.builder.position_at_end(short_circuit_block);
+        let short_val = match op {
+            And => self.context.bool_type().const_int(0, false),
+            Or => self.context.bool_type().const_int(1, false),
+            _ => unreachable!(),
+        };
+        self.builder.build_unconditional_branch(merge_block)
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), left.span)])?;
+
+        // Merge block: phi node selects the result
+        self.builder.position_at_end(merge_block);
+        let phi = self.builder.build_phi(self.context.bool_type(), "sc_result")
+            .map_err(|e| vec![Diagnostic::error(format!("LLVM error: {}", e), left.span)])?;
+        phi.add_incoming(&[
+            (&rhs_bool, rhs_end_block),
+            (&short_val, short_circuit_block),
+        ]);
+
+        Ok(phi.as_basic_value())
     }
 
     /// Compile a unary operation.

@@ -61,8 +61,8 @@ pub fn convert_binop(op: BinOp) -> MirBinOp {
         BinOp::Le => MirBinOp::Le,
         BinOp::Gt => MirBinOp::Gt,
         BinOp::Ge => MirBinOp::Ge,
-        BinOp::And => MirBinOp::BitAnd, // Logical and
-        BinOp::Or => MirBinOp::BitOr,   // Logical or
+        BinOp::And => panic!("ICE: Logical && must use short-circuit lowering, not convert_binop"),
+        BinOp::Or => panic!("ICE: Logical || must use short-circuit lowering, not convert_binop"),
         BinOp::Pipe => panic!("ICE: Pipe operator should be lowered before convert_binop"),
     }
 }
@@ -673,6 +673,13 @@ pub trait ExprLowering {
             // Fall through to regular binary op if pipe is not supported
         }
 
+        // Short-circuit evaluation for logical && and ||.
+        // a && b: evaluate a; if false, result is false (skip b).
+        // a || b: evaluate a; if true, result is true (skip b).
+        if matches!(op, BinOp::And | BinOp::Or) {
+            return self.lower_short_circuit(op, left, right, ty, span);
+        }
+
         let left_op = self.lower_expr(left)?;
         let right_op = self.lower_expr(right)?;
 
@@ -685,6 +692,83 @@ pub trait ExprLowering {
         };
         self.push_assign(Place::local(temp), rvalue);
         Ok(Operand::Copy(Place::local(temp)))
+    }
+
+    /// Lower short-circuit logical operators (&& and ||).
+    ///
+    /// `a && b` lowers to:
+    ///   eval a → if false goto short_circuit(result=false), else goto eval_rhs
+    ///   eval_rhs: eval b → result=b, goto join
+    ///   short_circuit: result=false, goto join
+    ///   join: use result
+    ///
+    /// `a || b` lowers to:
+    ///   eval a → if true goto short_circuit(result=true), else goto eval_rhs
+    ///   eval_rhs: eval b → result=b, goto join
+    ///   short_circuit: result=true, goto join
+    ///   join: use result
+    fn lower_short_circuit(
+        &mut self,
+        op: BinOp,
+        left: &Expr,
+        right: &Expr,
+        ty: &Type,
+        span: Span,
+    ) -> Result<Operand, Vec<Diagnostic>> {
+        let lhs = self.lower_expr(left)?;
+
+        let eval_rhs_block = self.builder_mut().new_block();
+        let short_circuit_block = self.builder_mut().new_block();
+        let join_block = self.builder_mut().new_block();
+
+        let result = self.new_temp(ty.clone(), span);
+
+        // Branch based on LHS value.
+        // &&: if lhs is true (1), evaluate RHS; if false, short-circuit to false.
+        // ||: if lhs is true (1), short-circuit to true; if false, evaluate RHS.
+        match op {
+            BinOp::And => {
+                self.terminate(TerminatorKind::SwitchInt {
+                    discr: lhs,
+                    targets: SwitchTargets::new(vec![(1, eval_rhs_block)], short_circuit_block),
+                });
+            }
+            BinOp::Or => {
+                self.terminate(TerminatorKind::SwitchInt {
+                    discr: lhs,
+                    targets: SwitchTargets::new(vec![(1, short_circuit_block)], eval_rhs_block),
+                });
+            }
+            _ => unreachable!(),
+        }
+
+        // Eval RHS block: evaluate right operand, assign to result.
+        self.builder_mut().switch_to(eval_rhs_block);
+        *self.current_block_mut() = eval_rhs_block;
+        let rhs = self.lower_expr(right)?;
+        self.push_assign(Place::local(result), Rvalue::Use(rhs));
+        if !self.is_terminated() {
+            self.terminate(TerminatorKind::Goto { target: join_block });
+        }
+
+        // Short-circuit block: assign the short-circuit constant.
+        // &&: false (LHS was false, skip RHS)
+        // ||: true  (LHS was true, skip RHS)
+        self.builder_mut().switch_to(short_circuit_block);
+        *self.current_block_mut() = short_circuit_block;
+        let short_val = match op {
+            BinOp::And => Operand::Constant(Constant::bool(false)),
+            BinOp::Or => Operand::Constant(Constant::bool(true)),
+            _ => unreachable!(),
+        };
+        self.push_assign(Place::local(result), Rvalue::Use(short_val));
+        self.terminate(TerminatorKind::Goto { target: join_block });
+
+        // Join block: result is ready.
+        self.builder_mut().switch_to(join_block);
+        *self.current_block_mut() = join_block;
+
+        Ok(Operand::Copy(Place::local(result)))
     }
 
     /// Lower a unary operation.
@@ -3162,8 +3246,10 @@ mod tests {
         assert_eq!(convert_binop(BinOp::Add), MirBinOp::Add);
         assert_eq!(convert_binop(BinOp::Sub), MirBinOp::Sub);
         assert_eq!(convert_binop(BinOp::Eq), MirBinOp::Eq);
-        assert_eq!(convert_binop(BinOp::And), MirBinOp::BitAnd);
-        assert_eq!(convert_binop(BinOp::Or), MirBinOp::BitOr);
+        assert_eq!(convert_binop(BinOp::BitAnd), MirBinOp::BitAnd);
+        assert_eq!(convert_binop(BinOp::BitOr), MirBinOp::BitOr);
+        // Note: BinOp::And and BinOp::Or are handled by short-circuit lowering,
+        // not convert_binop. Calling convert_binop with And/Or would panic.
     }
 
     #[test]
@@ -3339,14 +3425,13 @@ mod tests {
     // Binary Operator Property Tests
     // ------------------------------------------------------------------------
 
-    /// Generate all AST binary operators.
-    /// All AST binary operators that go through convert_binop.
+    /// Generate all AST binary operators that go through convert_binop.
     /// Pipe is excluded — it is lowered as function application before reaching convert_binop.
+    /// And/Or are excluded — they use short-circuit lowering, not convert_binop.
     fn all_ast_binops() -> Vec<BinOp> {
         vec![
             BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Rem,
             BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge,
-            BinOp::And, BinOp::Or,
             BinOp::BitAnd, BinOp::BitOr, BinOp::BitXor, BinOp::Shl, BinOp::Shr,
         ]
     }
