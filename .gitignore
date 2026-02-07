@@ -64,6 +64,7 @@ examples/tuple_pass
 
 # Incremental compilation cache
 *.blood_cache/
+.blood-cache/
 *.blood_objs/
 *.proptest-regressions
 
